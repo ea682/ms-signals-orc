@@ -5,11 +5,11 @@ rest-client:
   metric-wallet:
     info-base: ${URL_METRIC:http://192.168.1.123:4102}
   binance-service:
-    info-base: ${URL_BINANCE:http://localhost:4106}
+    info-base: ${URL_BINANCE:http://192.168.1.123:4106}
 #
 spring:
   datasource:
-     url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros}
+     url: ${DB_URL:jdbc:postgresql://postgres:5432/trading_futuros}
      username: ${DB_USER:postgres}
      password: ${DB_PASSWORD:5450940}
      jpa:
