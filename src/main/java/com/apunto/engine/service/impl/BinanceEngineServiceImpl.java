@@ -170,7 +170,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
                     userDetail.getUser().getId(),
                     dto.getSymbol(),
                     dto.getQuantity(),
-                    dto.getLeverage());
+                    userDetail.getDetail().getLeverage());
 
             final BinanceFuturesOrderClientResponse response =
                     procesBinanceService.newOperation(dto);
