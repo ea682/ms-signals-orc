@@ -1,0 +1,38 @@
+server:
+  port: ${PORT:4108}
+
+rest-client:
+  metric-wallet:
+    info-base: ${URL_METRIC:http://192.168.1.123:4102}
+  binance-service:
+    info-base: ${URL_BINANCE:http://localhost:4106}
+#
+spring:
+  datasource:
+     url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros}
+     username: ${DB_USER:postgres}
+     password: ${DB_PASSWORD:5450940}
+     jpa:
+       hibernate:
+         ddl-auto: validate
+       show-sql: false
+       properties:
+         hibernate:
+           default_schema: ${DB_SCHEMA:futuros_operaciones}
+           jdbc.time_zone: UTC
+           format_sql: true
+         hibernate.physical_naming_strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:192.168.1.123:9094}
+    consumer:
+      group-id: operaciones-consumer
+
+app:
+  kafka:
+    topics:
+      operaciones: operaciones-eventos
+
+binance:
+  dispatch:
+    delay-ms: 100
+    pool-size: 4
