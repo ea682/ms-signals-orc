@@ -274,7 +274,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
                 .side(Side.BUY)
                 .type(OrderType.MARKET)
                 .quantity(quantity.toPlainString())
-                .leverage(1)
+                .leverage(userDetail.getDetail().getLeverage())
                 .apiKey(userDetail.getUserApiKey().getApiKey())
                 .secret(userDetail.getUserApiKey().getApiSecret())
                 .build();
