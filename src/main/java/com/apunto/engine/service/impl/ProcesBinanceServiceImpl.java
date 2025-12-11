@@ -2,7 +2,7 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.client.BinanceClient;
 import com.apunto.engine.dto.CloseOperationDto;
-import com.apunto.engine.dto.NewOperationDto;
+import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.dto.client.*;
 import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.shared.dto.ApiResponse;
@@ -19,7 +19,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     private final BinanceClient binanceClient;
 
     @Override
-    public BinanceFuturesOrderClientResponse newOperation(NewOperationDto newOperationDto) {
+    public BinanceFuturesOrderClientResponse operationPosition(OperationDto newOperationDto) {
         ApiResponse<BinanceFuturesOrderClientResponse> response = binanceClient.openPosition(newOperationDto.getApiKey(),
                 newOperationDto.getSecret(),
                 builderNewOperationClientRequest(newOperationDto));
@@ -48,11 +48,12 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     }
 
 
-    private NewOperationClientRequest builderNewOperationClientRequest(NewOperationDto newOperationDto){
+    private NewOperationClientRequest builderNewOperationClientRequest(OperationDto newOperationDto){
         return  NewOperationClientRequest.builder()
                 .symbol(newOperationDto.getSymbol())
                 .side(newOperationDto.getSide())
                 .type(newOperationDto.getType())
+                .positionSide(newOperationDto.getPositionSide())
                 .quantity(newOperationDto.getQuantity())
                 .price(newOperationDto.getPrice())
                 .leverage(newOperationDto.getLeverage())

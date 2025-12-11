@@ -1,5 +1,6 @@
 package com.apunto.engine.dto;
 
+import com.apunto.engine.shared.enums.PositionSide;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -19,7 +20,7 @@ public class OperacionDto {
     private final UUID idOperacion;
     private final String idCuenta;
     private final String parSymbol;
-    private final String tipoOperacion;
+    private final PositionSide tipoOperacion;
     private final BigDecimal size;
     private final BigDecimal precioEntrada;
     private final BigDecimal precioCierre;
