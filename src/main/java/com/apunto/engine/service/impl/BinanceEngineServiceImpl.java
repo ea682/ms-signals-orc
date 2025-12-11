@@ -2,7 +2,7 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.dto.CloseOperationDto;
 import com.apunto.engine.dto.CopyOperationDto;
-import com.apunto.engine.dto.NewOperationDto;
+import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.dto.client.*;
 import com.apunto.engine.events.OperacionEvent;
@@ -11,6 +11,7 @@ import com.apunto.engine.service.CopyOperationService;
 import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.shared.enums.OrderType;
+import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -164,7 +165,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
                                      UserDetailDto userDetail,
                                      MetricaWalletDto walletMetric) {
         try {
-            final NewOperationDto dto = buildNewOperationDto(event, userDetail, walletMetric);
+            final OperationDto dto = buildNewOperationDto(event, userDetail, walletMetric);
 
             log.debug("Enviando newOperation para userId={} symbol={} qty={} leverage={}",
                     userDetail.getUser().getId(),
@@ -173,7 +174,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
                     userDetail.getDetail().getLeverage());
 
             final BinanceFuturesOrderClientResponse response =
-                    procesBinanceService.newOperation(dto);
+                    procesBinanceService.operationPosition(dto);
 
             createNewOperation(
                     response,
@@ -192,7 +193,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
     }
 
 
-    private NewOperationDto buildNewOperationDto(OperacionEvent event,
+    private OperationDto buildNewOperationDto(OperacionEvent event,
                                                  UserDetailDto userDetail,
                                                  MetricaWalletDto walletMetric) {
         Objects.requireNonNull(event, "event no puede ser null");
@@ -269,17 +270,38 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
                 quantity.toPlainString()
         );
 
-        return NewOperationDto.builder()
-                .symbol(event.getOperacion().getParSymbol())
-                .side(Side.BUY)
-                .type(OrderType.MARKET)
-                .quantity(quantity.toPlainString())
-                .leverage(userDetail.getDetail().getLeverage())
-                .apiKey(userDetail.getUserApiKey().getApiKey())
-                .secret(userDetail.getUserApiKey().getApiSecret())
-                .build();
+        return buildBuyAndSellPosition(event, quantity, userDetail);
     }
 
+
+    private OperationDto buildBuyAndSellPosition(OperacionEvent event, BigDecimal quantity, UserDetailDto userDetail) {
+
+        if(event.getOperacion().getTipoOperacion().equals("LONG")){
+            return OperationDto.builder()
+                    .symbol(event.getOperacion().getParSymbol())
+                    .side(Side.BUY)
+                    .type(OrderType.MARKET)
+                    .positionSide(event.getOperacion().getTipoOperacion())
+                    .quantity(quantity.toPlainString())
+                    .leverage(userDetail.getDetail().getLeverage())
+                    .reduceOnly(false)
+                    .apiKey(userDetail.getUserApiKey().getApiKey())
+                    .secret(userDetail.getUserApiKey().getApiSecret())
+                    .build();
+        }else{
+            return OperationDto.builder()
+                    .symbol(event.getOperacion().getParSymbol())
+                    .side(Side.SELL)
+                    .type(OrderType.MARKET)
+                    .positionSide(event.getOperacion().getTipoOperacion())
+                    .quantity(quantity.toPlainString())
+                    .leverage(userDetail.getDetail().getLeverage())
+                    .reduceOnly(false)
+                    .apiKey(userDetail.getUserApiKey().getApiKey())
+                    .secret(userDetail.getUserApiKey().getApiSecret())
+                    .build();
+        }
+    }
 
     private MetricaWalletDto getWalletMetricForOperation(String idWalletOperation,
                                                          List<MetricaWalletDto> metrics) {
@@ -422,15 +444,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
 
     private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail) {
 
-        final CloseOperationDto closeOperation = CloseOperationDto.builder()
-                .symbol(copyOperation.getParsymbol())
-                .operationQty(copyOperation.getSizePar())
-                .apiKey(userDetail.getUserApiKey().getApiKey())
-                .secret(userDetail.getUserApiKey().getApiSecret())
-                .build();
+
 
         final BinanceFuturesOrderClientResponse order =
-                procesBinanceService.closeOperation(closeOperation);
+                procesBinanceService.operationPosition(buildClosePosition(copyOperation, userDetail));
         copyOperation.setIdUser(userDetail.getUser().getId().toString());
 
 
@@ -439,9 +456,38 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         copyOperationService.closeOperation(buildCopyOperation);
         log.info("Cierre de operación enviado a Binance para userId={} symbol={} qty={} respuesta={}",
                 userDetail.getUser().getId(),
-                closeOperation.getSymbol(),
-                closeOperation.getOperationQty(),
+                copyOperation.getParsymbol(),
+                copyOperation.getSizePar(),
                 order);
+    }
+
+    private OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
+
+        if(copyOperation.getTypeOperation().equals("LONG")){
+            return OperationDto.builder()
+                    .symbol(copyOperation.getParsymbol())
+                    .side(Side.SELL)
+                    .type(OrderType.MARKET)
+                    .positionSide(PositionSide.LONG)
+                    .quantity(copyOperation.getSizePar().toPlainString())
+                    .leverage(userDetail.getDetail().getLeverage())
+                    .reduceOnly(true)
+                    .apiKey(userDetail.getUserApiKey().getApiKey())
+                    .secret(userDetail.getUserApiKey().getApiSecret())
+                    .build();
+        }else{
+            return OperationDto.builder()
+                    .symbol(copyOperation.getParsymbol())
+                    .side(Side.BUY)
+                    .type(OrderType.MARKET)
+                    .positionSide(PositionSide.SHORT)
+                    .quantity(copyOperation.getSizePar().toPlainString())
+                    .leverage(userDetail.getDetail().getLeverage())
+                    .reduceOnly(true)
+                    .apiKey(userDetail.getUserApiKey().getApiKey())
+                    .secret(userDetail.getUserApiKey().getApiSecret())
+                    .build();
+        }
     }
 
     private CopyOperationDto buildCopyNewOperationDto(BinanceFuturesOrderClientResponse order,
