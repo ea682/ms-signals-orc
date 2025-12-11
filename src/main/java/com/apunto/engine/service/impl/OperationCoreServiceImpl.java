@@ -1,6 +1,6 @@
 package com.apunto.engine.service.impl;
 
-import com.apunto.engine.dto.NewOperationDto;
+import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.service.*;
