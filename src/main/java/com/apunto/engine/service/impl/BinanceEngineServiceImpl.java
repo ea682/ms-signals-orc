@@ -255,7 +255,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         quantity = adjustQuantityToBinanceRules(
                 event.getOperacion().getParSymbol(),
                 quantity,
-                entryPrice
+                entryPrice,
+                event.getOperacion().getTipoOperacion()
         );
 
         log.debug(
@@ -315,9 +316,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
                 .orElse(null);
     }
 
+    private static final BigDecimal USER_MIN_NOTIONAL_USDT = new BigDecimal("7");
+
     private BigDecimal adjustQuantityToBinanceRules(String parSymbol,
                                                     BigDecimal quantity,
-                                                    BigDecimal entryPrice) {
+                                                    BigDecimal entryPrice,
+                                                    PositionSide positionSide) {
 
         if (quantity == null || quantity.compareTo(BigDecimal.ZERO) <= 0) {
             return BigDecimal.ZERO;
@@ -340,7 +344,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         BigDecimal adjusted = quantity;
         BigDecimal stepSize = null;
         BigDecimal minQty = BigDecimal.ZERO;
-        BigDecimal minNotional = BigDecimal.ZERO;
+        BigDecimal minNotional;
         final Integer quantityPrecision = symbolDetail.getQuantityPrecision();
 
         final BinanceFuturesSymbolFilterDto lotSizeFilter = symbolDetail.getFilters().stream()
@@ -378,6 +382,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         if (minNotional.compareTo(MIN_NOTIONAL_FALLBACK) < 0) {
             minNotional = MIN_NOTIONAL_FALLBACK;
         }
+
+        minNotional = minNotional.max(USER_MIN_NOTIONAL_USDT);
 
         int calcScale = DEFAULT_CALC_SCALE;
         if (quantityPrecision != null) {
