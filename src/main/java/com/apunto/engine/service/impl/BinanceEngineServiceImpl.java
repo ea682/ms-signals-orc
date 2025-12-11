@@ -276,7 +276,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
 
     private OperationDto buildBuyAndSellPosition(OperacionEvent event, BigDecimal quantity, UserDetailDto userDetail) {
 
-        if(event.getOperacion().getTipoOperacion().equals("LONG")){
+        if(event.getOperacion().getTipoOperacion().equals(PositionSide.LONG)){
             return OperationDto.builder()
                     .symbol(event.getOperacion().getParSymbol())
                     .side(Side.BUY)
