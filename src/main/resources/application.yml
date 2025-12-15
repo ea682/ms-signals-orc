@@ -6,22 +6,33 @@ rest-client:
     info-base: ${URL_METRIC:http://192.168.1.123:4102}
   binance-service:
     info-base: ${URL_BINANCE:http://192.168.1.123:4106}
-#
+
+logging:
+  pattern:
+    console: '%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%-5level) %clr([%t]){faint} %clr(%logger{36}){cyan} : %msg%n%wex'
+
 spring:
+  output:
+    ansi:
+      enabled: ALWAYS
+
   datasource:
-     url: ${DB_URL:jdbc:postgresql://postgres:5432/trading_futuros}
-     username: ${DB_USER:postgres}
-     password: ${DB_PASSWORD:5450940}
-     jpa:
-       hibernate:
-         ddl-auto: validate
-       show-sql: false
-       properties:
-         hibernate:
-           default_schema: ${DB_SCHEMA:futuros_operaciones}
-           jdbc.time_zone: UTC
-           format_sql: true
-         hibernate.physical_naming_strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
+    url: ${DB_URL:jdbc:postgresql://postgres:5432/trading_futuros}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:5450940}
+
+  jpa:
+    show-sql: false
+    hibernate:
+      ddl-auto: validate
+      naming:
+        physical-strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
+    properties:
+      hibernate:
+        default_schema: ${DB_SCHEMA:futuros_operaciones}
+        jdbc.time_zone: UTC
+        format_sql: true
+
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:192.168.1.123:9094}
     consumer:
