@@ -3,35 +3,53 @@ package com.apunto.engine.service.impl;
 import com.apunto.engine.client.MetricWalletsInfoClient;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.service.MetricWalletService;
-import lombok.AllArgsConstructor;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
 @Slf4j
-@AllArgsConstructor
+@RequiredArgsConstructor
 public class MetricWalletServiceImpl implements MetricWalletService {
+
+    private static final int HISTORY_LIMIT = 60;
+    private static final long REFRESH_SECONDS = 10;
+    private static final long EXPIRE_SECONDS = 30;
+    private static final long SLOW_THRESHOLD_MS = 250;
 
     private final MetricWalletsInfoClient metricWalletsInfoClient;
 
+    private final LoadingCache<Integer, List<MetricaWalletDto>> allPositionHistoryCache =
+            Caffeine.newBuilder()
+                    .maximumSize(10)
+                    .refreshAfterWrite(REFRESH_SECONDS, TimeUnit.SECONDS)
+                    .expireAfterWrite(EXPIRE_SECONDS, TimeUnit.SECONDS)
+                    .recordStats()
+                    .build(this::loadAllPositionHistorySafely);
 
     @Override
     public List<MetricaWalletDto> getMetricWallets(int maxWallets) {
         double maxCapitalToUse = 0.90;
-        double maxPerWallet    = 0.50;
+        double maxPerWallet = 0.50;
         return getMetricWallets(maxWallets, maxCapitalToUse, maxPerWallet);
     }
 
-    public List<MetricaWalletDto> getMetricWallets(int maxWallets,
-                                                   double maxCapitalToUse,
-                                                   double maxPerWallet) {
+    public List<MetricaWalletDto> getMetricWallets(int maxWallets, double maxCapitalToUse, double maxPerWallet) {
+        long startNs = System.nanoTime();
 
+        if (maxWallets <= 0) {
+            return List.of();
+        }
         if (maxCapitalToUse <= 0.0 || maxCapitalToUse > 1.0) {
             throw new IllegalArgumentException("maxCapitalToUse debe estar entre 0 y 1 (ej: 0.9 = 90%).");
         }
@@ -39,24 +57,75 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             throw new IllegalArgumentException("maxPerWallet debe estar entre 0 y maxCapitalToUse.");
         }
 
-        List<MetricaWalletDto> metricWalletDtos = metricWalletsInfoClient.allPositionHistory(60);
+        List<MetricaWalletDto> base;
+        try {
+            base = allPositionHistoryCache.get(HISTORY_LIMIT);
+        } catch (Exception ex) {
+            log.warn("metric_wallets.history_cache_error limit={} err={}", HISTORY_LIMIT, ex.toString());
+            base = List.of();
+        }
 
-        List<MetricaWalletDto> candidates = metricWalletDtos.stream()
-                .filter(MetricaWalletDto::getPassesFilter)
+        if (base == null || base.isEmpty()) {
+            long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+            log.warn("metric_wallets.empty_history maxWallets={} durationMs={} cacheStats={}",
+                    maxWallets, ms, allPositionHistoryCache.stats());
+            return List.of();
+        }
+
+        List<MetricaWalletDto> candidates = base.stream()
+                .filter(dto -> Boolean.TRUE.equals(dto.getPassesFilter()))
                 .sorted(Comparator.comparingDouble(MetricaWalletDto::getDecisionMetric).reversed())
                 .limit(maxWallets)
+                .map(this::copyForAllocation)
                 .collect(Collectors.toList());
 
-        applyCapitalWeights(candidates, maxPerWallet, maxCapitalToUse);
+        if (candidates.isEmpty()) {
+            long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+            log.info("metric_wallets.no_candidates maxWallets={} baseSize={} durationMs={}",
+                    maxWallets, base.size(), ms);
+            return List.of();
+        }
 
+        applyCapitalWeights(candidates, maxPerWallet, maxCapitalToUse);
         validateLimits(candidates, maxPerWallet, maxCapitalToUse);
+
+        double total = candidates.stream().mapToDouble(MetricaWalletDto::getCapitalShare).sum();
+        long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+
+        if (durationMs >= SLOW_THRESHOLD_MS) {
+            log.warn("metric_wallets.slow maxWallets={} baseSize={} candidates={} totalShare={} durationMs={} cacheStats={}",
+                    maxWallets, base.size(), candidates.size(), total, durationMs, allPositionHistoryCache.stats());
+        } else {
+            log.debug("metric_wallets.ok maxWallets={} baseSize={} candidates={} totalShare={} durationMs={}",
+                    maxWallets, base.size(), candidates.size(), total, durationMs);
+        }
 
         return candidates;
     }
 
-    private void applyCapitalWeights(List<MetricaWalletDto> wallets,
-                                     double maxPerWallet,
-                                     double maxCapitalToUse) {
+    private List<MetricaWalletDto> loadAllPositionHistorySafely(Integer limit) {
+        long startNs = System.nanoTime();
+        try {
+            List<MetricaWalletDto> resp = metricWalletsInfoClient.allPositionHistory(limit);
+            long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+            int size = (resp == null) ? 0 : resp.size();
+            log.debug("metric_wallets.history_loaded limit={} size={} durationMs={}", limit, size, ms);
+            return resp != null ? resp : List.of();
+        } catch (Exception ex) {
+            long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+            log.warn("metric_wallets.history_load_failed limit={} durationMs={} err={}", limit, ms, ex.toString());
+            return List.of();
+        }
+    }
+
+    private MetricaWalletDto copyForAllocation(MetricaWalletDto src) {
+        MetricaWalletDto dst = new MetricaWalletDto();
+        BeanUtils.copyProperties(src, dst);
+        dst.setCapitalShare(0.0);
+        return dst;
+    }
+
+    private void applyCapitalWeights(List<MetricaWalletDto> wallets, double maxPerWallet, double maxCapitalToUse) {
         if (wallets == null || wallets.isEmpty()) {
             return;
         }
@@ -101,7 +170,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 double score = w.getDecisionMetric();
 
                 double proposed = remainingWeight * (score / sumScore);
-                double current  = w.getCapitalShare();
+                double current = w.getCapitalShare();
                 double newShare = current + proposed;
 
                 if (newShare > maxPerWallet) {
@@ -145,13 +214,10 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .mapToDouble(MetricaWalletDto::getCapitalShare)
                 .sum();
 
-        log.debug("Total capitalShare asignado = {}, maxCapitalToUse = {}", total, maxCapitalToUse);
+        log.debug("metric_wallets.capital_assigned totalShare={} maxCapitalToUse={}", total, maxCapitalToUse);
     }
 
-    private void validateLimits(List<MetricaWalletDto> wallets,
-                                double maxPerWallet,
-                                double maxCapitalToUse) {
-
+    private void validateLimits(List<MetricaWalletDto> wallets, double maxPerWallet, double maxCapitalToUse) {
         double total = wallets.stream()
                 .mapToDouble(MetricaWalletDto::getCapitalShare)
                 .sum();

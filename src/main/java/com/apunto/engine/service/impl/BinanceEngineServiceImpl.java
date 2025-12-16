@@ -24,12 +24,10 @@ import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 
 @Service
 @Slf4j
@@ -60,6 +58,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         Objects.requireNonNull(event, "El evento de operación no puede ser null");
         Objects.requireNonNull(usersDetail, "La lista de usuarios no puede ser null");
 
+        long startNs = System.nanoTime();
+
         String operationKey = String.valueOf(event.getOperacion().getIdOperacion());
         long now = System.currentTimeMillis();
         boolean[] isNew = {false};
@@ -73,7 +73,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         });
 
         if (!isNew[0]) {
-            log.warn("Operación duplicada recibida por Kafka. operationKey={} -> se ignora", operationKey);
+            log.warn("operation.duplicate_kafka_event operationKey={} action=ignore", operationKey);
             return;
         }
 
@@ -82,9 +82,15 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         final long baseTime = System.currentTimeMillis();
         int index = 0;
 
+        final Map<Integer, List<MetricaWalletDto>> metricsByMaxWallet = new HashMap<>();
+
         for (UserDetailDto userDetail : usersDetail) {
-            final List<MetricaWalletDto> metrics =
-                    metricWalletService.getMetricWallets(userDetail.getDetail().getMaxWallet());
+            Integer maxWallet = userDetail.getDetail().getMaxWallet();
+
+            List<MetricaWalletDto> metrics = metricsByMaxWallet.computeIfAbsent(
+                    maxWallet,
+                    metricWalletService::getMetricWallets
+            );
 
             final MetricaWalletDto walletMetric =
                     getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
@@ -98,16 +104,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
                         executionTime
                 );
             } else {
-                log.warn("No se encontró métrica para idWallet={} en userId={}",
+                log.warn("operation.no_metric_found idWallet={} userId={} maxWallet={}",
                         event.getOperacion().getIdCuenta(),
-                        userDetail.getUser().getId());
+                        userDetail.getUser().getId(),
+                        maxWallet);
             }
 
             index++;
         }
 
-        log.info("Programadas {} operaciones de apertura hacia Binance con delay de {}ms",
-                usersDetail.size(), delayBetweenMs);
+        long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+        log.info("operation.open_scheduled opId={} users={} uniqueMaxWallets={} delayBetweenMs={} durationMs={}",
+                event.getOperacion().getIdOperacion(),
+                usersDetail.size(),
+                metricsByMaxWallet.size(),
+                delayBetweenMs,
+                durationMs);
     }
 
     @Override
