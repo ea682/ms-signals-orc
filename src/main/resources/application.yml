@@ -17,7 +17,7 @@ spring:
       enabled: ALWAYS
 
   datasource:
-    url: ${DB_URL:jdbc:postgresql://postgres:5432/trading_futuros}
+    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros}
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:5450940}
 
@@ -37,6 +37,15 @@ spring:
     bootstrap-servers: ${KAFKA_BROKERS:192.168.1.123:9094}
     consumer:
       group-id: operaciones-consumer
+      max-poll-records: 10
+      properties:
+        max.poll.interval.ms: 900000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
 
 app:
   kafka:
