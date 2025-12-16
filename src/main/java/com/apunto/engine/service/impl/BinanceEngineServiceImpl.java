@@ -342,14 +342,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         }
     }
 
-    private MetricaWalletDto getWalletMetricForOperation(String idWalletOperation,
-                                                         List<MetricaWalletDto> metrics) {
-        if (metrics == null || metrics.isEmpty()) {
-            return null;
-        }
+    private MetricaWalletDto getWalletMetricForOperation(String idWalletOperation, List<MetricaWalletDto> metrics) {
+        if (metrics == null || metrics.isEmpty() || idWalletOperation == null) return null;
 
+        final String w = idWalletOperation.trim();
         return metrics.stream()
-                .filter(w -> Objects.equals(w.getIdWallet(), idWalletOperation))
+                .filter(m -> m.getIdWallet() != null && m.getIdWallet().trim().equalsIgnoreCase(w))
                 .findFirst()
                 .orElse(null);
     }
