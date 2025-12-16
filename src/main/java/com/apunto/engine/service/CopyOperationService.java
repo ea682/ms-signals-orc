@@ -7,10 +7,10 @@ import java.util.List;
 public interface CopyOperationService {
     void newOperation(CopyOperationDto operation);
     void closeOperation(CopyOperationDto operation);
-    CopyOperationDto findOperation(String idOperacion);
+
+    CopyOperationDto findOperation(String idOrden);
 
     List<CopyOperationDto> findOperationsByOrigin(String idOrderOrigin);
     CopyOperationDto findOperationForUser(String idOrderOrigin, String idUser);
-
     boolean existsByOriginAndUser(String idOrderOrigin, String idUser);
 }

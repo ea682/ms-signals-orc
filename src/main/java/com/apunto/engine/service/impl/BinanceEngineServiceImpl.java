@@ -58,9 +58,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         Objects.requireNonNull(event, "El evento de operación no puede ser null");
         Objects.requireNonNull(usersDetail, "La lista de usuarios no puede ser null");
 
-        long startNs = System.nanoTime();
+        final String originId = event.getOperacion().getIdOperacion().toString();
+        final String operationKey = originId;
 
-        String operationKey = String.valueOf(event.getOperacion().getIdOperacion());
         long now = System.currentTimeMillis();
         boolean[] isNew = {false};
 
@@ -73,54 +73,62 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         });
 
         if (!isNew[0]) {
-            log.warn("operation.duplicate_kafka_event operationKey={} action=ignore", operationKey);
+            log.warn("event=operation.open.duplicate_inmemory originId={} action=ignore", originId);
             return;
         }
 
         processedOperations.entrySet().removeIf(e -> now - e.getValue() > TTL_MS * 5);
 
+        final java.util.Set<String> alreadyCopiedUsers = copyOperationService.findOperationsByOrigin(originId)
+                .stream()
+                .map(CopyOperationDto::getIdUser)
+                .collect(java.util.stream.Collectors.toSet());
+
         final long baseTime = System.currentTimeMillis();
         int index = 0;
 
-        final Map<Integer, List<MetricaWalletDto>> metricsByMaxWallet = new HashMap<>();
+        final java.util.Map<Integer, List<MetricaWalletDto>> metricsByMaxWallet = new java.util.HashMap<>();
 
         for (UserDetailDto userDetail : usersDetail) {
-            Integer maxWallet = userDetail.getDetail().getMaxWallet();
+            final String userId = userDetail.getUser().getId().toString();
 
-            List<MetricaWalletDto> metrics = metricsByMaxWallet.computeIfAbsent(
+            if (alreadyCopiedUsers.contains(userId)) {
+                log.info("event=operation.open.skip_already_processed originId={} userId={}", originId, userId);
+                index++;
+                continue;
+            }
+
+            final int maxWallet = userDetail.getDetail().getMaxWallet();
+
+            final List<MetricaWalletDto> metrics = metricsByMaxWallet.computeIfAbsent(
                     maxWallet,
                     metricWalletService::getMetricWallets
             );
 
-            final MetricaWalletDto walletMetric =
-                    getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
+            final MetricaWalletDto walletMetric = getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
 
-            if (walletMetric != null) {
-                final long delay = index * delayBetweenMs;
-                final Instant executionTime = Instant.ofEpochMilli(baseTime + delay);
-
-                binanceTaskScheduler.schedule(
-                        () -> executeNewOperation(event, userDetail, walletMetric),
-                        executionTime
-                );
-            } else {
-                log.warn("operation.no_metric_found idWallet={} userId={} maxWallet={}",
-                        event.getOperacion().getIdCuenta(),
-                        userDetail.getUser().getId(),
-                        maxWallet);
+            if (walletMetric == null) {
+                log.warn("event=operation.open.no_metric originId={} userId={} idWallet={} maxWallet={}",
+                        originId, userId, event.getOperacion().getIdCuenta(), maxWallet);
+                index++;
+                continue;
             }
+
+            final long delay = index * delayBetweenMs;
+            final Instant executionTime = Instant.ofEpochMilli(baseTime + delay);
+
+            binanceTaskScheduler.schedule(
+                    () -> executeNewOperation(event, userDetail, walletMetric),
+                    executionTime
+            );
 
             index++;
         }
 
-        long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
-        log.info("operation.open_scheduled opId={} users={} uniqueMaxWallets={} delayBetweenMs={} durationMs={}",
-                event.getOperacion().getIdOperacion(),
-                usersDetail.size(),
-                metricsByMaxWallet.size(),
-                delayBetweenMs,
-                durationMs);
+        log.info("event=operation.open.scheduled originId={} users={} scheduled={} uniqueMaxWallets={} delayBetweenMs={}",
+                originId, usersDetail.size(), index, metricsByMaxWallet.size(), delayBetweenMs);
     }
+
 
     @Override
     public void closeOperation(OperacionEvent event, List<UserDetailDto> usersDetail) {
@@ -130,80 +138,99 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
         final long baseTime = System.currentTimeMillis();
         int index = 0;
 
-        final String operationId = event.getOperacion().getIdOperacion().toString();
-        final CopyOperationDto copyOperation = copyOperationService.findOperation(operationId);
+        final String originId = event.getOperacion().getIdOperacion().toString();
 
-        if (copyOperation == null) {
-            log.warn("No se encontró la operación {}. No se programarán cierres.", operationId);
+        final java.util.Map<String, CopyOperationDto> copyByUser =
+                copyOperationService.findOperationsByOrigin(originId)
+                        .stream()
+                        .collect(java.util.stream.Collectors.toMap(
+                                CopyOperationDto::getIdUser,
+                                java.util.function.Function.identity(),
+                                (a, b) -> a
+                        ));
+
+        if (copyByUser.isEmpty()) {
+            log.warn("event=operation.close.no_copies originId={} users={}", originId, usersDetail.size());
             return;
         }
 
-        if (!copyOperation.isActive()) {
-            log.info("La operación {} está inactiva. No se programarán cierres.", operationId);
-            return;
-        }
+        int scheduled = 0;
 
         for (UserDetailDto userDetail : usersDetail) {
+            final String userId = userDetail.getUser().getId().toString();
+            final CopyOperationDto copyOperation = copyByUser.get(userId);
+
+            if (copyOperation == null) {
+                log.warn("event=operation.close.copy_missing originId={} userId={}", originId, userId);
+                index++;
+                continue;
+            }
+
+            if (!copyOperation.isActive()) {
+                log.info("event=operation.close.skip_inactive originId={} userId={}", originId, userId);
+                index++;
+                continue;
+            }
+
             final long delay = index * delayBetweenMs;
             final Instant executionTime = Instant.ofEpochMilli(baseTime + delay);
 
             binanceTaskScheduler.schedule(
-                    () -> safelyExecuteCloseOperation(copyOperation, userDetail, operationId),
+                    () -> safelyExecuteCloseOperation(copyOperation, userDetail, originId),
                     executionTime
             );
 
+            scheduled++;
             index++;
         }
 
-        log.info(
-                "Programadas {} operaciones de cierre hacia Binance con un delay de {}ms (operación {}).",
-                usersDetail.size(), delayBetweenMs, operationId
-        );
+        log.info("event=operation.close.scheduled originId={} users={} scheduled={} delayBetweenMs={}",
+                originId, usersDetail.size(), scheduled, delayBetweenMs);
     }
 
-    private void safelyExecuteCloseOperation(CopyOperationDto copyOperation,
-                                             UserDetailDto userDetail,
-                                             String operationId) {
+
+    private void safelyExecuteCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail, String originId) {
         try {
             executeCloseOperation(copyOperation, userDetail);
-
         } catch (Exception ex) {
-            log.error("Error ejecutando cierre de operación {} para user {}: {}",
-                    operationId, userDetail.getUser().getId(), ex.getMessage(), ex);
+            log.error("event=operation.close.error originId={} userId={} err={}",
+                    originId, userDetail.getUser().getId(), ex.toString(), ex);
         }
     }
 
-    private void executeNewOperation(OperacionEvent event,
-                                     UserDetailDto userDetail,
-                                     MetricaWalletDto walletMetric) {
+
+    private void executeNewOperation(OperacionEvent event, UserDetailDto userDetail, MetricaWalletDto walletMetric) {
+        final String originId = event.getOperacion().getIdOperacion().toString();
+        final String userId = userDetail.getUser().getId().toString();
+
         try {
+            if (copyOperationService.existsByOriginAndUser(originId, userId)) {
+                log.info("event=operation.open.skip_persisted originId={} userId={}", originId, userId);
+                return;
+            }
+
             final OperationDto dto = buildNewOperationDto(event, userDetail, walletMetric);
 
-            log.debug("Enviando newOperation para userId={} symbol={} qty={} leverage={}",
-                    userDetail.getUser().getId(),
-                    dto.getSymbol(),
-                    dto.getQuantity(),
-                    userDetail.getDetail().getLeverage());
+            log.info("event=binance.open.send originId={} userId={} symbol={} qty={} leverage={}",
+                    originId, userId, dto.getSymbol(), dto.getQuantity(), userDetail.getDetail().getLeverage());
 
-            final BinanceFuturesOrderClientResponse response =
-                    procesBinanceService.operationPosition(dto);
+            final BinanceFuturesOrderClientResponse response = procesBinanceService.operationPosition(dto);
 
             createNewOperation(
                     response,
                     walletMetric.getIdWallet(),
-                    event.getOperacion().getIdOperacion(),
-                    userDetail.getUser().getId().toString(),
+                    UUID.fromString(originId),
+                    userId,
                     userDetail.getDetail().getLeverage()
             );
 
-            log.info("Ejecución exitosa de apertura en Binance para userId={} symbol={}",
-                    userDetail.getUser().getId(), dto.getSymbol());
+            log.info("event=binance.open.ok originId={} userId={} symbol={} orderId={}",
+                    originId, userId, dto.getSymbol(), response != null ? response.getOrderId() : null);
+
         } catch (Exception ex) {
-            log.error("Error ejecutando newOperation para userId={}",
-                    userDetail.getUser().getId(), ex);
+            log.error("event=binance.open.error originId={} userId={} err={}", originId, userId, ex.toString(), ex);
         }
     }
-
 
     private OperationDto buildNewOperationDto(OperacionEvent event,
                                                  UserDetailDto userDetail,
@@ -469,22 +496,28 @@ public class BinanceEngineServiceImpl implements BinanceEngineService {
     }
 
     private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail) {
+        final String originId = copyOperation.getIdOrderOrigin();
+        final String userId = userDetail.getUser().getId().toString();
 
-
+        if (!copyOperation.isActive()) {
+            log.info("event=binance.close.skip_inactive originId={} userId={} orderId={}",
+                    originId, userId, copyOperation.getIdOrden());
+            return;
+        }
 
         final BinanceFuturesOrderClientResponse order =
                 procesBinanceService.operationPosition(buildClosePosition(copyOperation, userDetail));
-        copyOperation.setIdUser(userDetail.getUser().getId().toString());
 
-
-        CopyOperationDto buildCopyOperation = buildCopyCloseOperationDto(copyOperation, order);
+        final CopyOperationDto buildCopyOperation = buildCopyCloseOperationDto(copyOperation, order);
 
         copyOperationService.closeOperation(buildCopyOperation);
-        log.info("Cierre de operación enviado a Binance para userId={} symbol={} qty={} respuesta={}",
-                userDetail.getUser().getId(),
+
+        log.info("event=binance.close.ok originId={} userId={} symbol={} qty={} orderId={}",
+                originId,
+                userId,
                 copyOperation.getParsymbol(),
                 copyOperation.getSizePar(),
-                order);
+                order != null ? order.getOrderId() : null);
     }
 
     private OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
