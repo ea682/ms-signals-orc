@@ -5,12 +5,20 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
 public interface CopyOperationRepository extends JpaRepository<CopyOperationEntity, UUID> {
 
-    CopyOperationEntity findByIdOrderOrigin(String idOrdenOrigin);
+    List<CopyOperationEntity> findAllByIdOrderOrigin(String idOrderOrigin);
 
-    List<CopyOperationEntity> findByIdOrden(String idOrden);
+    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
+
+    boolean existsByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
+
+    Optional<CopyOperationEntity> findByIdOrden(String idOrden);
+
+    List<CopyOperationEntity> findAllByIdOrden(String idOrden);
 }
+
