@@ -52,8 +52,8 @@ management:
 
 app:
   kafka:
-    topics:
-      operaciones: operaciones-eventos
+    operaciones:
+      topic: operaciones-eventos
 
 binance:
   dispatch:
