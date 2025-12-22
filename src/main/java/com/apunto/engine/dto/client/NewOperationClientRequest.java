@@ -17,5 +17,5 @@ public class NewOperationClientRequest {
     private String timeInForce;
     private Integer leverage;
     private PositionSide positionSide;
-    private Boolean reduceOnly;
+    private boolean reduceOnly;
 }

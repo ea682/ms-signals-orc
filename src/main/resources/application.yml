@@ -2,6 +2,9 @@ server:
   port: ${PORT:4108}
 
 rest-client:
+  timeout:
+    connect-ms: 2000
+    read-ms: 5000
   metric-wallet:
     info-base: ${URL_METRIC:http://192.168.1.123:4102}
   binance-service:
@@ -26,7 +29,7 @@ spring:
       enabled: ALWAYS
 
   datasource:
-    url: ${DB_URL:jdbc:postgresql://postgres:5432/trading_futuros}
+    url: jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=futuros_operaciones
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:5450940}
 
@@ -41,9 +44,6 @@ spring:
         default_schema: ${DB_SCHEMA:futuros_operaciones}
         jdbc.time_zone: UTC
         format_sql: true
-
-
-
 management:
   endpoints:
     web:
@@ -53,9 +53,22 @@ management:
 app:
   kafka:
     operaciones:
-      topic: operaciones-eventos
+      topic: ${KAFKA_TOPIC_OPERACIONES:operaciones-eventos}
 
 binance:
   dispatch:
     delay-ms: 100
     pool-size: 4
+
+copy:
+  job:
+    worker:
+      pool-size: 16
+      max-batch: 200
+      poll-ms: 200
+      max-attempts: 12
+
+engine:
+  copy:
+    execution-job-worker:
+      enabled: true
