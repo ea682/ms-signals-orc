@@ -4,7 +4,7 @@ server:
 rest-client:
   timeout:
     connect-ms: 2000
-    read-ms: 5000
+    read-ms: 30000
   metric-wallet:
     info-base: ${URL_METRIC:http://192.168.1.123:4102}
   binance-service:
