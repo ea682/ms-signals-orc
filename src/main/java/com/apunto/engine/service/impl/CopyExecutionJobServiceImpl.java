@@ -16,6 +16,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import javax.swing.text.DefaultEditorKit;
 import java.time.OffsetDateTime;
 import java.util.*;
 
@@ -42,6 +43,10 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
             if (u == null || u.getUser() == null || u.getUser().getId() == null) continue;
 
             CopyExecutionJobEntity job = new CopyExecutionJobEntity();
+
+            // Clave para evitar merge/update: NO dejar id seteado (forzamos null por si acaso)
+            job.setId(null);
+
             job.setOriginId(originId);
             job.setUserId(u.getUser().getId().toString());
             job.setAction(action);
@@ -52,14 +57,16 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
             job.setLastErrorCategory(CopyJobErrorCategory.NONE);
 
             try {
-                repository.save(job);
+                repository.saveAndFlush(job);
                 created++;
             } catch (DataIntegrityViolationException dup) {
+                // duplicado por uq_copy_execution_job_origin_user_action -> lo ignoramos
             }
         }
 
         return created;
     }
+
 
 
     @Override
