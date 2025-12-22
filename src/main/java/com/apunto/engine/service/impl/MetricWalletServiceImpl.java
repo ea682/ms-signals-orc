@@ -74,6 +74,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         List<MetricaWalletDto> candidates = base.stream()
                 .filter(dto -> Boolean.TRUE.equals(dto.getPassesFilter()))
+                .filter(dto -> Boolean.TRUE.equals(dto.getPreCopiable()))
                 .sorted(Comparator.comparingDouble(MetricaWalletDto::getDecisionMetric).reversed())
                 .limit(maxWallets)
                 .map(this::copyForAllocation)

@@ -1,42 +1,21 @@
 package com.apunto.engine.controller;
 
-import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
-import com.apunto.engine.service.BinanceEngineService;
-import com.apunto.engine.service.UserDetailCachedService;
+import com.apunto.engine.service.OperacionEventIngestService;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-import java.util.List;
+import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping("/api/operaciones")
+@RequestMapping("/operacion-event")
+@RequiredArgsConstructor
 public class OperacionEventController {
 
-    private final UserDetailCachedService userDetailCachedService;
-    private final BinanceEngineService binanceEngineService;
+    private final OperacionEventIngestService operacionEventIngestService;
 
-    public OperacionEventController(
-            UserDetailCachedService userDetailCachedService,
-            BinanceEngineService binanceEngineService
-    ) {
-        this.userDetailCachedService = userDetailCachedService;
-        this.binanceEngineService = binanceEngineService;
-    }
-
-    @PostMapping("/proce-operation")
-    public ResponseEntity<Void> procesarEventoOperacion(@RequestBody OperacionEvent event) {
-        List<UserDetailDto> usersDetail = userDetailCachedService.getUsers();
-
-        if ("ABIERTA".equals(event.getTipo().name())) {
-            binanceEngineService.openOperation(event, usersDetail);
-        } else {
-            binanceEngineService.closeOperation(event, usersDetail);
-        }
-
-        return ResponseEntity.accepted().build();
+    @PostMapping
+    public ResponseEntity<String> receiveEvent(@RequestBody OperacionEvent event) {
+        int jobs = operacionEventIngestService.ingest(event);
+        return ResponseEntity.accepted().body("Enqueued jobs: " + jobs);
     }
 }

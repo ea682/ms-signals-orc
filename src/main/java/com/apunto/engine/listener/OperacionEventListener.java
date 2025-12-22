@@ -1,63 +1,62 @@
 package com.apunto.engine.listener;
 
-
 import com.apunto.engine.events.OperacionEvent;
-import com.apunto.engine.service.OperationCoreService;
-import lombok.AllArgsConstructor;
+import com.apunto.engine.service.OperacionEventIngestService;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.messaging.handler.annotation.Header;
-import org.springframework.messaging.handler.annotation.Headers;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
 
-import java.time.Instant;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
-
 @Slf4j
 @Component
-@AllArgsConstructor
+@RequiredArgsConstructor
 public class OperacionEventListener {
-    private static final long SLOW_MS = 300;
 
-    private final OperationCoreService operationCoreService;
+    private final OperacionEventIngestService operacionEventIngestService;
 
     @KafkaListener(
-            topics = "${app.kafka.operaciones.topic:operaciones-eventos}",
+            topics = "${app.kafka.operaciones.topic:${KAFKA_TOPIC_OPERACIONES:operaciones-eventos}}",
             groupId = "${spring.kafka.consumer.group-id:operaciones-consumer}",
             containerFactory = "kafkaListenerContainerFactoryOperacionEvents"
     )
-
     public void listenOperacionEvent(
             @Payload OperacionEvent event,
-            @Header(KafkaHeaders.RECEIVED_KEY) String key,
+            @Header(KafkaHeaders.RECEIVED_TOPIC) String topic,
             @Header(KafkaHeaders.RECEIVED_PARTITION) int partition,
+            @Header(name = KafkaHeaders.RECEIVED_KEY, required = false) String key,
             @Header(KafkaHeaders.OFFSET) long offset,
-            @Header(KafkaHeaders.RECEIVED_TOPIC) String topic
+            @Header(name = KafkaHeaders.RECEIVED_TIMESTAMP, required = false) Long timestamp,
+            @Header(name = "correlationId", required = false) String correlationId,
+            Acknowledgment acknowledgment
     ) {
-        long startNs = System.nanoTime();
+        final String corr = (correlationId != null && !correlationId.isBlank())
+                ? correlationId
+                : "%s:%d:%d".formatted(topic, partition, offset);
 
-        Instant created = event != null && event.getOperacion() != null ? event.getOperacion().getFechaCreacion() : null;
-        long lagMs = created != null ? (System.currentTimeMillis() - created.toEpochMilli()) : -1;
+        MDC.put("correlationId", corr);
+        MDC.put("kafka.topic", topic);
+        MDC.put("kafka.partition", String.valueOf(partition));
+        MDC.put("kafka.offset", String.valueOf(offset));
 
-        String opId = event != null && event.getOperacion() != null && event.getOperacion().getIdOperacion() != null
-                ? event.getOperacion().getIdOperacion().toString()
-                : "null";
+        try {
+            log.info("event=kafka.received key={} ts={}", key, timestamp);
 
-        String tipo = event != null && event.getTipo() != null ? event.getTipo().name() : "null";
+            operacionEventIngestService.ingest(event);
 
-        log.info("event=kafka.received topic={} partition={} offset={} key={} tipo={} opId={} lagMs={}",
-                topic, partition, offset, key, tipo, opId, lagMs);
+            acknowledgment.acknowledge();
+            log.info("event=kafka.ack key={}", key);
 
-        operationCoreService.procesarEventoOperacion(event);
-
-        long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
-        if (durationMs >= SLOW_MS) {
-            log.warn("event=kafka.process_slow opId={} tipo={} durationMs={} lagMs={}", opId, tipo, durationMs, lagMs);
-        } else {
-            log.debug("event=kafka.process_ok opId={} tipo={} durationMs={}", opId, tipo, durationMs);
+        } catch (Exception e) {
+            log.error("event=kafka.handler.error key={} errorClass={} msg={}",
+                    key, e.getClass().getSimpleName(), e.getMessage(), e);
+            throw e;
+        } finally {
+            MDC.clear();
         }
     }
 }
