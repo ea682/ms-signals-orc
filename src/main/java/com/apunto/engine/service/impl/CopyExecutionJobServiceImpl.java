@@ -42,7 +42,6 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
             if (u == null || u.getUser() == null || u.getUser().getId() == null) continue;
 
             CopyExecutionJobEntity job = new CopyExecutionJobEntity();
-            job.setId(UUID.randomUUID());
             job.setOriginId(originId);
             job.setUserId(u.getUser().getId().toString());
             job.setAction(action);
@@ -56,12 +55,12 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
                 repository.save(job);
                 created++;
             } catch (DataIntegrityViolationException dup) {
-                // ya existe (originId,userId,action) -> idempotencia de enqueue
             }
         }
 
         return created;
     }
+
 
     @Override
     @Transactional
