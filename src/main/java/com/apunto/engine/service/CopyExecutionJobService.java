@@ -20,5 +20,5 @@ public interface CopyExecutionJobService {
 
     void reschedule(CopyExecutionJobEntity job, OffsetDateTime nextRunAt, String category, String message);
 
-    void requeueStaleProcessing(OffsetDateTime threshold);
+    int requeueStaleProcessing(OffsetDateTime threshold);
 }
