@@ -2,7 +2,9 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.client.BinanceClient;
 import com.apunto.engine.dto.OperationDto;
-import com.apunto.engine.dto.client.*;
+import com.apunto.engine.dto.client.BinanceFuturesOrderClientResponse;
+import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
+import com.apunto.engine.dto.client.NewOperationClientRequest;
 import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.shared.dto.ApiResponse;
 import com.apunto.engine.shared.exception.EngineException;
@@ -12,10 +14,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 
 @Slf4j
 @Service
@@ -27,76 +27,58 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     private static final String ERR_APIKEY_EMPTY = "apiKey requerido";
     private static final String ERR_SECRET_EMPTY = "secret requerido";
     private static final String ERR_QTY_EMPTY = "quantity requerido";
+    private static final String ERR_POSITIONSIDE_EMPTY = "positionSide requerido";
 
     private final BinanceClient binanceClient;
 
     @Override
     public BinanceFuturesOrderClientResponse operationPosition(OperationDto dto) {
-        Objects.requireNonNull(dto, ERR_DTO_NULL);
+        validateOperation(dto);
 
-        if (dto.getSymbol() == null || dto.getSymbol().isBlank()) {
-            throw new SkipExecutionException(ERR_SYMBOL_EMPTY);
-        }
-        if (dto.getApiKey() == null || dto.getApiKey().isBlank()) {
-            throw new SkipExecutionException(ERR_APIKEY_EMPTY);
-        }
-        if (dto.getSecret() == null || dto.getSecret().isBlank()) {
-            throw new SkipExecutionException(ERR_SECRET_EMPTY);
-        }
-        if (dto.getQuantity() == null || dto.getQuantity().isBlank()) {
-            throw new SkipExecutionException(ERR_QTY_EMPTY);
-        }
+        NewOperationClientRequest request = NewOperationClientRequest.builder()
+                .symbol(dto.getSymbol())
+                .side(dto.getSide())
+                .type(dto.getType())
+                .quantity(dto.getQuantity())
+                .price(dto.getPrice())
+                .timeInForce(dto.getTimeInForce())
+                .leverage(dto.getLeverage())
+                .positionSide(dto.getPositionSide())
+                .reduceOnly(dto.isReduceOnly())
+                .build();
 
-        try {
-            if (dto.isReduceOnly()) {
-                // CLOSE
-                BigDecimal qty = new BigDecimal(dto.getQuantity());
+        log.info("event=binance.futures.order.send symbol={} side={} type={} positionSide={} reduceOnly={} qty={}",
+                dto.getSymbol(), dto.getSide(), dto.getType(), dto.getPositionSide(), dto.isReduceOnly(), dto.getQuantity());
 
-                CloseOperationClientRequest request = CloseOperationClientRequest.builder()
-                        .symbol(dto.getSymbol())
-                        .operationQty(qty)
-                        .build();
+        ApiResponse<BinanceFuturesOrderClientResponse> resp = binanceClient.openPosition(dto.getApiKey(), dto.getSecret(), request);
+        BinanceFuturesOrderClientResponse data = unwrap(resp, "futures.order");
 
-                ApiResponse<BinanceFuturesOrderClientResponse> resp =
-                        binanceClient.closePosition(dto.getApiKey(), dto.getSecret(), request);
+        log.info("event=binance.futures.order.ok symbol={} orderId={} avgPrice={} origQty={}",
+                data.getSymbol(), data.getOrderId(), data.getAvgPrice(), data.getOrigQty());
 
-                return unwrap(resp, "closePosition");
-
-            } else {
-                // OPEN
-                NewOperationClientRequest request = NewOperationClientRequest.builder()
-                        .symbol(dto.getSymbol())
-                        .side(dto.getSide())
-                        .type(dto.getType())
-                        .quantity(dto.getQuantity())
-                        .price(dto.getPrice())
-                        .timeInForce(dto.getTimeInForce())
-                        .leverage(dto.getLeverage())
-                        .positionSide(dto.getPositionSide())
-                        .reduceOnly(false)
-                        .build();
-
-                ApiResponse<BinanceFuturesOrderClientResponse> resp =
-                        binanceClient.openPosition(dto.getApiKey(), dto.getSecret(), request);
-
-                return unwrap(resp, "openPosition");
-            }
-        } catch (NumberFormatException nfe) {
-            // Qty inválida: no sirve reintentar
-            throw new SkipExecutionException("quantity inválida: " + dto.getQuantity());
-        }
+        return data;
     }
 
     @Override
     public List<BinanceFuturesSymbolInfoClientDto> getSymbols(String apiKey) {
         if (apiKey == null || apiKey.isBlank()) {
-            throw new SkipExecutionException("apiKey requerido para symbols()");
+            throw new SkipExecutionException(ERR_APIKEY_EMPTY);
         }
 
         ApiResponse<List<BinanceFuturesSymbolInfoClientDto>> resp = binanceClient.symbols(apiKey);
         List<BinanceFuturesSymbolInfoClientDto> data = unwrap(resp, "symbols");
-
         return data == null ? Collections.emptyList() : data;
+    }
+
+    private void validateOperation(OperationDto dto) {
+        if (dto == null) throw new SkipExecutionException(ERR_DTO_NULL);
+        if (dto.getApiKey() == null || dto.getApiKey().isBlank()) throw new SkipExecutionException(ERR_APIKEY_EMPTY);
+        if (dto.getSecret() == null || dto.getSecret().isBlank()) throw new SkipExecutionException(ERR_SECRET_EMPTY);
+        if (dto.getSymbol() == null || dto.getSymbol().isBlank()) throw new SkipExecutionException(ERR_SYMBOL_EMPTY);
+        if (dto.getSide() == null) throw new SkipExecutionException("side requerido");
+        if (dto.getType() == null) throw new SkipExecutionException("type requerido");
+        if (dto.getQuantity() == null || dto.getQuantity().isBlank()) throw new SkipExecutionException(ERR_QTY_EMPTY);
+        if (dto.getPositionSide() == null) throw new SkipExecutionException(ERR_POSITIONSIDE_EMPTY);
     }
 
     private <T> T unwrap(ApiResponse<T> resp, String op) {
@@ -107,36 +89,29 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         int code = resp.getStatusCode();
         T data = resp.getData();
 
-        // Heurística tolerante: si viene data, aceptamos aunque statusCode venga 0.
         if (data != null && (code == 0 || (code >= 200 && code < 300))) {
             return data;
         }
 
-        // Clasificación por statusCode si viene seteado.
+        String msg = safeMsg(resp);
+
         if (code == 429) {
-            throw new EngineException(ErrorCode.BINANCE_RATE_LIMIT,
-                    "Binance rate limit (" + op + "): " + safeMsg(resp));
+            throw new EngineException(ErrorCode.BINANCE_RATE_LIMIT, "Binance rate limit (" + op + "): " + msg);
         }
         if (code >= 400 && code < 500) {
-            // 4xx: normalmente no vale reintentar (validación/credenciales/saldo/etc.)
-            throw new EngineException(ErrorCode.BINANCE_CLIENT_ERROR,
-                    "Binance client error (" + op + ") code=" + code + " msg=" + safeMsg(resp));
+            throw new EngineException(ErrorCode.BINANCE_CLIENT_ERROR, "Binance client error (" + op + ") code=" + code + " msg=" + msg);
         }
         if (code >= 500) {
-            // 5xx: transitorio
-            throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR,
-                    "Binance server error (" + op + ") code=" + code + " msg=" + safeMsg(resp));
+            throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Binance server error (" + op + ") code=" + code + " msg=" + msg);
         }
 
-        // Sin code útil y sin data => error
-        throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR,
-                "Respuesta inválida de Binance (" + op + ") code=" + code + " msg=" + safeMsg(resp));
+        throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Respuesta inválida de Binance (" + op + ") code=" + code + " msg=" + msg);
     }
 
     private String safeMsg(ApiResponse<?> resp) {
         if (resp == null) return "null";
         String m = resp.getMessage();
-        return (m == null || m.isBlank()) ? (resp.getStatus() != null ? resp.getStatus() : "sin mensaje") : m;
+        if (m != null && !m.isBlank()) return m;
+        return resp.getStatus() != null ? resp.getStatus() : "sin mensaje";
     }
 }
-
