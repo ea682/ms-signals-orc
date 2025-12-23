@@ -1,4 +1,5 @@
-package com.apunto.engine.dto.client;
+package com.apunto.engine.dto;
+
 
 import com.apunto.engine.shared.enums.PositionSide;
 import lombok.Builder;

@@ -4,6 +4,8 @@ import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.jobs.model.CopyJobErrorCategory;
 import com.apunto.engine.jobs.model.CopyJobStatus;
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -49,15 +51,13 @@ public class CopyExecutionJobEntity {
     @Column(name = "locked_by", length = 128)
     private String lockedBy;
 
-    @Lob
-    @Column(name = "payload", nullable = false, columnDefinition = "text")
+    @Column(name = "payload", columnDefinition = "text", nullable = false)
     private String payload;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "last_error_category", nullable = false, length = 32)
     private CopyJobErrorCategory lastErrorCategory;
 
-    @Lob
     @Column(name = "last_error_message", columnDefinition = "text")
     private String lastErrorMessage;
 

@@ -44,7 +44,6 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
 
             CopyExecutionJobEntity job = new CopyExecutionJobEntity();
 
-            // Clave para evitar merge/update: NO dejar id seteado (forzamos null por si acaso)
             job.setId(null);
 
             job.setOriginId(originId);
@@ -54,6 +53,7 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
             job.setAttempt(0);
             job.setNextRunAt(OffsetDateTime.now());
             job.setPayload(payload);
+            job.setLastErrorMessage("");
             job.setLastErrorCategory(CopyJobErrorCategory.NONE);
 
             try {
