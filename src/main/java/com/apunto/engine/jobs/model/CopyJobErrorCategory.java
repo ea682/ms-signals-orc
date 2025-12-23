@@ -7,5 +7,6 @@ public enum CopyJobErrorCategory {
     VALIDATION,
     NETWORK,
     TRANSIENT,
+    REJECTED,
     UNKNOWN
 }
