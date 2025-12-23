@@ -16,9 +16,10 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import javax.swing.text.DefaultEditorKit;
 import java.time.OffsetDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -60,14 +61,11 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
                 repository.saveAndFlush(job);
                 created++;
             } catch (DataIntegrityViolationException dup) {
-                // duplicado por uq_copy_execution_job_origin_user_action -> lo ignoramos
             }
         }
 
         return created;
     }
-
-
 
     @Override
     @Transactional
@@ -84,8 +82,6 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
         repository.findAllById(ids).forEach(out::add);
         return out;
     }
-
-
 
     @Override
     @Transactional
@@ -113,8 +109,8 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
 
     @Override
     @Transactional
-    public void requeueStaleProcessing(OffsetDateTime threshold) {
-        repository.requeueStaleProcessing(threshold, OffsetDateTime.now());
+    public int requeueStaleProcessing(OffsetDateTime threshold) {
+        return repository.requeueStaleProcessing(threshold, OffsetDateTime.now());
     }
 
     private String serializeEvent(OperacionEvent event) {
