@@ -75,14 +75,17 @@ import java.util.concurrent.Executor;
 
     @Scheduled(fixedDelayString = "${copy.job.worker.poll-ms:250}")
     public void tick() {
-        // rescata jobs colgados (si el pod murió con PROCESSING)
-        jobService.requeueStaleProcessing(OffsetDateTime.now().minus(STALE_LOCK_TTL));
+        try {
+            jobService.requeueStaleProcessing(OffsetDateTime.now().minus(STALE_LOCK_TTL));
 
-        List<CopyExecutionJobEntity> jobs = jobService.claimBatch(workerId, maxBatch);
-        if (jobs.isEmpty()) return;
+            List<CopyExecutionJobEntity> jobs = jobService.claimBatch(workerId, maxBatch);
+            if (jobs.isEmpty()) return;
 
-        for (CopyExecutionJobEntity job : jobs) {
-            executor.execute(() -> process(job));
+            for (CopyExecutionJobEntity job : jobs) {
+                executor.execute(() -> process(job));
+            }
+        } catch (Exception e) {
+            log.error("job=copy.tick.error workerId={} err={}", workerId, e.toString(), e);
         }
     }
 
