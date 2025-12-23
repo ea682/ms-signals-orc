@@ -15,7 +15,6 @@ import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
-import com.apunto.engine.shared.exception.SkipExecutionException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -50,7 +49,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final BigDecimal MAX_BUFFER_PCT = new BigDecimal("0.30");
     private static final BigDecimal ZERO = BigDecimal.ZERO;
 
-    private static final String SYMBOLS_API_KEY = "S";
+    private static final String SYMBOLS_API_KEY = "1llJ9n3dloLfy0MoYLnQbiPxfvWmxS4CyyqUo1otzEWO56BLUW3Ij9dbcepqHAWb";
     private static final int DEFAULT_CALC_SCALE = 18;
     private static final long TTL_MS = 60_000L;
 
