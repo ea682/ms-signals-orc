@@ -232,7 +232,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         Integer v = s.getDecisionMetricCapacityAware();
         if (v != null) return v.doubleValue();
 
-        v = s.getDecisionMetric();
+        v = s.getDecisionMetricConservative();
         if (v != null) return v.doubleValue();
 
         v = s.getDecisionMetricConservative();
@@ -361,7 +361,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             Integer v = s.getDecisionMetricCapacityAware();
             if (v != null) return v.doubleValue();
 
-            v = s.getDecisionMetric();
+            v = s.getDecisionMetricConservative();
             if (v != null) return v.doubleValue();
 
             v = s.getDecisionMetricConservative();
