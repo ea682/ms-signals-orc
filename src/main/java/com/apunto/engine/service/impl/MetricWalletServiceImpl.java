@@ -69,7 +69,6 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     @Override
     public List<MetricaWalletDto> getMetricWallets(int maxWallets) {
-        // defaults “business”
         return getMetricWallets(maxWallets, 0.90, 0.50);
     }
 
@@ -154,7 +153,15 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     private List<MetricaWalletDto> loadAllPositionHistory(Integer limit) {
         final long startNs = System.nanoTime();
-        List<MetricaWalletDto> resp = metricWalletsInfoClient.allPositionHistory(limit);
+
+        List<MetricaWalletDto> resp;
+        try {
+            resp = metricWalletsInfoClient.allPositionHistory(limit);
+        } catch (Exception ex) {
+            long durationMs = elapsedMs(startNs);
+            log.warn("event=metric_wallets.history_client_failed limit={} durationMs={} err={}", limit, durationMs, safeErr(ex));
+            return List.of();
+        }
 
         long durationMs = elapsedMs(startNs);
         int size = resp == null ? 0 : resp.size();
@@ -200,20 +207,38 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     private List<MetricaWalletDto> selectCandidates(List<MetricaWalletDto> base, int maxWallets) {
         return base.stream()
-                .filter(dto -> Boolean.TRUE.equals(dto.getPassesFilter()))
-                .filter(dto -> Boolean.TRUE.equals(dto.getPreCopiable()))
-                .sorted(Comparator.comparingDouble(MetricaWalletDto::getDecisionMetric).reversed())
+                .filter(Objects::nonNull)
+                .filter((MetricaWalletDto dto) -> dto.getScoring() != null)
+                .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPassesFilter()))
+                .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPreCopiable()))
+                .sorted(Comparator.comparingDouble((MetricaWalletDto dto) -> decisionScore(dto)).reversed())
                 .limit(maxWallets)
                 .map(this::copyForAllocation)
                 .collect(Collectors.toList());
     }
-
 
     private MetricaWalletDto copyForAllocation(MetricaWalletDto src) {
         MetricaWalletDto dst = new MetricaWalletDto();
         BeanUtils.copyProperties(src, dst);
         dst.setCapitalShare(0.0);
         return dst;
+    }
+
+    private static double decisionScore(MetricaWalletDto dto) {
+        if (dto == null || dto.getScoring() == null) return 0.0;
+
+        MetricaWalletDto.ScoringDto s = dto.getScoring();
+
+        Integer v = s.getDecisionMetricCapacityAware();
+        if (v != null) return v.doubleValue();
+
+        v = s.getDecisionMetric();
+        if (v != null) return v.doubleValue();
+
+        v = s.getDecisionMetricConservative();
+        if (v != null) return v.doubleValue();
+
+        return 0.0;
     }
 
     private static void validateAllocationInputs(double maxCapitalToUse, double maxPerWallet) {
@@ -249,7 +274,23 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return t.getClass().getSimpleName() + ": " + (t.getMessage() == null ? "" : t.getMessage());
     }
 
-    private record HistoryResult(List<MetricaWalletDto> values, String source) {}
+    private static final class HistoryResult {
+        private final List<MetricaWalletDto> values;
+        private final String source;
+
+        private HistoryResult(List<MetricaWalletDto> values, String source) {
+            this.values = values;
+            this.source = source;
+        }
+
+        public List<MetricaWalletDto> values() {
+            return values;
+        }
+
+        public String source() {
+            return source;
+        }
+    }
 
     private static final class CapitalAllocator {
 
@@ -264,7 +305,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             List<MetricaWalletDto> remaining = new ArrayList<>(wallets);
 
             while (!remaining.isEmpty() && remainingWeight > 0.0) {
-                double sumScore = remaining.stream().mapToDouble(MetricaWalletDto::getDecisionMetric).sum();
+                double sumScore = remaining.stream().mapToDouble(CapitalAllocator::decisionScore).sum();
 
                 if (sumScore <= 0.0) {
                     remainingWeight = distributeEqually(remaining, remainingWeight, maxPerWallet);
@@ -276,7 +317,11 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 Iterator<MetricaWalletDto> it = remaining.iterator();
                 while (it.hasNext() && remainingWeight > 0.0) {
                     MetricaWalletDto w = it.next();
-                    double proposed = remainingWeight * (w.getDecisionMetric() / sumScore);
+
+                    double score = decisionScore(w);
+                    if (score <= 0.0) continue;
+
+                    double proposed = remainingWeight * (score / sumScore);
 
                     double current = w.getCapitalShare();
                     double newShare = current + proposed;
@@ -292,7 +337,10 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
                 if (!anyCapped && remainingWeight > 0.0) {
                     for (MetricaWalletDto w : remaining) {
-                        double inc = remainingWeight * (w.getDecisionMetric() / sumScore);
+                        double score = decisionScore(w);
+                        if (score <= 0.0) continue;
+
+                        double inc = remainingWeight * (score / sumScore);
                         double current = w.getCapitalShare();
                         w.setCapitalShare(Math.min(maxPerWallet, current + inc));
                     }
@@ -303,6 +351,23 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             wallets.forEach(w -> {
                 if (w.getCapitalShare() < 0.0) w.setCapitalShare(0.0);
             });
+        }
+
+        private static double decisionScore(MetricaWalletDto dto) {
+            if (dto == null || dto.getScoring() == null) return 0.0;
+
+            MetricaWalletDto.ScoringDto s = dto.getScoring();
+
+            Integer v = s.getDecisionMetricCapacityAware();
+            if (v != null) return v.doubleValue();
+
+            v = s.getDecisionMetric();
+            if (v != null) return v.doubleValue();
+
+            v = s.getDecisionMetricConservative();
+            if (v != null) return v.doubleValue();
+
+            return 0.0;
         }
 
         private static double distributeEqually(List<MetricaWalletDto> remaining, double remainingWeight, double maxPerWallet) {
