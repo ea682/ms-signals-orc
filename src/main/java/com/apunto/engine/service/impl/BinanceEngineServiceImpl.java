@@ -8,6 +8,7 @@ import com.apunto.engine.dto.client.BinanceFuturesSymbolFilterDto;
 import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.mapper.CopyTradingMapper;
 import com.apunto.engine.service.*;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.enums.OrderType;
@@ -24,8 +25,6 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -57,8 +56,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String FILTER_TYPE_MARKET_LOT_SIZE = "MARKET_LOT_SIZE";
     private static final String FILTER_TYPE_MIN_NOTIONAL = "MIN_NOTIONAL";
     private static final String FILTER_TYPE_NOTIONAL = "NOTIONAL";
-
-    private static final String TYPE_OPERATION_LONG = "LONG";
 
     private static final String ERR_EVENT_NULL = "El evento de operación no puede ser null";
     private static final String ERR_USERS_NULL = "La lista de usuarios no puede ser null";
@@ -115,6 +112,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     @Value("${binance.symbols.cache-ttl-ms:60000}")
     private long symbolsCacheTtlMs;
+
+    private final CopyTradingMapper copyTradingMapper;
+
 
     private final ConcurrentMap<String, Long> processedOperations = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, BigDecimal> usedMarginByUserWallet = new ConcurrentHashMap<>();
@@ -279,7 +279,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private void executeNewOperation(OperacionEvent event, UserDetailDto userDetail, MetricaWalletDto walletMetric) {
         final String originId = event.getOperacion().getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
-        final String wallet = walletMetric.getIdWallet();
+        final String wallet = walletMetric.getWallet().getIdWallet();
 
         try {
             if (copyOperationService.existsByOriginAndUser(originId, userId)) {
@@ -297,7 +297,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     public void executeNewOperationStrict(OperacionEvent event, UserDetailDto userDetail, MetricaWalletDto walletMetric) {
         final String originId = event.getOperacion().getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
-        final String walletId = walletMetric.getIdWallet();
+        final String walletId = walletMetric.getWallet().getIdWallet();
 
         final PreparedOpen prepared = prepareOpenOperation(event, userDetail, walletMetric);
         if (prepared == null) {
@@ -393,14 +393,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String userId = userDetail.getUser().getId().toString();
 
         final BinanceFuturesOrderClientResponse order =
-                procesBinanceService.operationPosition(buildClosePosition(copyOperation, userDetail));
+                procesBinanceService.operationPosition(copyTradingMapper.buildClosePosition(copyOperation, userDetail));
 
         if (!isValidOrderResponse(order)) {
             log.warn(LOG_CLOSE_INVALID_RESPONSE, originId, userId, copyOperation.getParsymbol());
             throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Respuesta inválida de Binance");
         }
 
-        final CopyOperationDto buildCopyOperation = buildCopyCloseOperationDto(copyOperation, order);
+        final CopyOperationDto buildCopyOperation = copyTradingMapper.buildCopyCloseOperationDto(copyOperation, order);
         copyOperationService.closeOperation(buildCopyOperation);
 
         log.info(LOG_CLOSE_OK,
@@ -421,7 +421,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String originId = event.getOperacion().getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
-        final String walletId = walletMetric.getIdWallet();
+        final String walletId = walletMetric.getWallet().getIdWallet();
 
         final Double capitalShare = walletMetric.getCapitalShare();
         if (capitalShare == null || capitalShare <= 0) {
@@ -437,7 +437,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return null;
         }
 
-        final double baseCapital = Optional.ofNullable(walletMetric.getCapitalRequired())
+        final double baseCapital = Optional.ofNullable(walletMetric.getExposureAndCapacity().getCapitalRequired())
                 .filter(required -> required > 0)
                 .orElse(DEFAULT_BASE_CAPITAL);
 
@@ -586,7 +586,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final Double share = metric.getCapitalShare();
         if (share == null || share <= 0) {
-            throw new SkipExecutionException("capitalShare inválido para wallet=" + metric.getIdWallet());
+            throw new SkipExecutionException("capitalShare inválido para wallet=" + metric.getWallet().getIdWallet());
         }
 
         return metric;
@@ -597,7 +597,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String w = idWalletOperation.trim();
         return metrics.stream()
-                .filter(m -> m.getIdWallet() != null && m.getIdWallet().trim().equalsIgnoreCase(w))
+                .filter(m -> m.getWallet().getIdWallet() != null && m.getWallet().getIdWallet().trim().equalsIgnoreCase(w))
                 .findFirst()
                 .orElse(null);
     }
@@ -745,86 +745,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Respuesta inválida de Binance");
         }
 
-        final CopyOperationDto buildCopyOperation = buildCopyNewOperationDto(order, idWallet, idOperation, idUser, leverage);
+        final CopyOperationDto buildCopyOperation = copyTradingMapper.buildCopyNewOperationDto(order, idWallet, idOperation, idUser, leverage);
         copyOperationService.newOperation(buildCopyOperation);
-    }
-
-    private OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
-        if (TYPE_OPERATION_LONG.equals(copyOperation.getTypeOperation())) {
-            return OperationDto.builder()
-                    .symbol(copyOperation.getParsymbol())
-                    .side(Side.SELL)
-                    .type(OrderType.MARKET)
-                    .positionSide(PositionSide.LONG)
-                    .quantity(copyOperation.getSizePar().toPlainString())
-                    .leverage(userDetail.getDetail().getLeverage())
-                    .reduceOnly(true)
-                    .apiKey(userDetail.getUserApiKey().getApiKey())
-                    .secret(userDetail.getUserApiKey().getApiSecret())
-                    .build();
-        } else {
-            return OperationDto.builder()
-                    .symbol(copyOperation.getParsymbol())
-                    .side(Side.BUY)
-                    .type(OrderType.MARKET)
-                    .positionSide(PositionSide.SHORT)
-                    .quantity(copyOperation.getSizePar().toPlainString())
-                    .leverage(userDetail.getDetail().getLeverage())
-                    .reduceOnly(true)
-                    .apiKey(userDetail.getUserApiKey().getApiKey())
-                    .secret(userDetail.getUserApiKey().getApiSecret())
-                    .build();
-        }
-    }
-
-    private CopyOperationDto buildCopyNewOperationDto(BinanceFuturesOrderClientResponse order,
-                                                      String idWallet,
-                                                      UUID idOperation,
-                                                      String idUser,
-                                                      int leverage) {
-
-        final BigDecimal countUsd = order.getOrigQty().multiply(order.getAvgPrice());
-
-        return CopyOperationDto.builder()
-                .idOrden(order.getOrderId().toString())
-                .idOrderOrigin(idOperation.toString())
-                .idUser(idUser)
-                .idWalletOrigin(idWallet)
-                .parsymbol(order.getSymbol())
-                .typeOperation(order.getPositionSide())
-                .leverage(new BigDecimal(leverage))
-                .siseUsd(countUsd)
-                .sizePar(order.getOrigQty())
-                .priceEntry(order.getAvgPrice())
-                .priceClose(null)
-                .dateCreation(OffsetDateTime.ofInstant(
-                        Instant.ofEpochMilli(order.getUpdateTime()),
-                        ZoneOffset.UTC))
-                .active(true)
-                .build();
-    }
-
-    private CopyOperationDto buildCopyCloseOperationDto(CopyOperationDto operation, BinanceFuturesOrderClientResponse order) {
-        final BigDecimal countUsd = order.getOrigQty().multiply(order.getAvgPrice());
-
-        return CopyOperationDto.builder()
-                .idOrden(order.getOrderId().toString())
-                .idOrderOrigin(operation.getIdOrderOrigin())
-                .idUser(operation.getIdUser())
-                .idWalletOrigin(operation.getIdWalletOrigin())
-                .parsymbol(order.getSymbol())
-                .typeOperation(order.getPositionSide())
-                .leverage(operation.getLeverage())
-                .siseUsd(countUsd)
-                .sizePar(order.getOrigQty())
-                .priceEntry(operation.getPriceEntry())
-                .priceClose(order.getAvgPrice())
-                .dateCreation(operation.getDateCreation())
-                .dateClose(OffsetDateTime.ofInstant(
-                        Instant.ofEpochMilli(order.getUpdateTime()),
-                        ZoneOffset.UTC))
-                .active(false)
-                .build();
     }
 
     private boolean isValidOrderResponse(BinanceFuturesOrderClientResponse orderResponse) {
