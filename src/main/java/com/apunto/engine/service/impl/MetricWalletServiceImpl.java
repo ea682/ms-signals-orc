@@ -211,7 +211,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .filter((MetricaWalletDto dto) -> dto.getScoring() != null)
                 .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPassesFilter()))
                 .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPreCopiable()))
-                .sorted(Comparator.comparingDouble((MetricaWalletDto dto) -> decisionScore(dto)).reversed())
+                .filter(dto ->  69 <= dto.getScoring().getDecisionMetricConservative())
+                .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
                 .limit(maxWallets)
                 .map(this::copyForAllocation)
                 .collect(Collectors.toList());
@@ -229,13 +230,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         MetricaWalletDto.ScoringDto s = dto.getScoring();
 
-        Integer v = s.getDecisionMetricCapacityAware();
-        if (v != null) return v.doubleValue();
-
-        v = s.getDecisionMetricConservative();
-        if (v != null) return v.doubleValue();
-
-        v = s.getDecisionMetricConservative();
+        Integer v = s.getDecisionMetricConservative();
         if (v != null) return v.doubleValue();
 
         return 0.0;
@@ -358,10 +353,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
             MetricaWalletDto.ScoringDto s = dto.getScoring();
 
-            Integer v = s.getDecisionMetricCapacityAware();
-            if (v != null) return v.doubleValue();
-
-            v = s.getDecisionMetricConservative();
+            Integer v = v = s.getDecisionMetricConservative();
             if (v != null) return v.doubleValue();
 
             v = s.getDecisionMetricConservative();
