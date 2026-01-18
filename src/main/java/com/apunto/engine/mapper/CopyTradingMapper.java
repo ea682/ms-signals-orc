@@ -58,9 +58,9 @@ public interface CopyTradingMapper {
     @Mapping(target = "leverage", expression = "java(new java.math.BigDecimal(leverage))")
     @Mapping(target = "sizePar", source = "order.origQty")
     @Mapping(target = "priceEntry", source = "order.avgPrice")
-    @Mapping(target = "priceClose", constant = "null")
+    @Mapping(target = "priceClose", ignore = true)
+    @Mapping(target = "dateClose", ignore = true)
     @Mapping(target = "dateCreation", expression = "java(toUtcOffsetDateTime(order.getUpdateTime()))")
-    @Mapping(target = "dateClose", constant = "null")
     @Mapping(target = "active", constant = "true")
     @Mapping(target = "siseUsd", ignore = true)
     CopyOperationDto buildCopyNewOperationDto(BinanceFuturesOrderClientResponse order,
