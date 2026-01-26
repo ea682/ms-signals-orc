@@ -208,15 +208,17 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private List<MetricaWalletDto> selectCandidates(List<MetricaWalletDto> base, int maxWallets) {
         return base.stream()
                 .filter(Objects::nonNull)
-                .filter((MetricaWalletDto dto) -> dto.getScoring() != null)
+                .filter(dto -> dto.getScoring() != null)
+                .filter(MetricWalletServiceImpl::hasClosedHistory)
                 .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPassesFilter()))
                 .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPreCopiable()))
-                .filter(dto ->  69 <= dto.getScoring().getDecisionMetricConservative())
+                .filter(dto -> 69 <= dto.getScoring().getDecisionMetricConservative())
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
                 .limit(maxWallets)
                 .map(this::copyForAllocation)
                 .collect(Collectors.toList());
     }
+
 
     private MetricaWalletDto copyForAllocation(MetricaWalletDto src) {
         MetricaWalletDto dst = new MetricaWalletDto();
@@ -385,4 +387,16 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             return remainingWeight;
         }
     }
+
+    private static boolean hasClosedHistory(MetricaWalletDto dto) {
+        if (dto == null) return false;
+
+        if (dto.getActivity() != null && dto.getActivity().getLastClosedAt() != null) {
+            return true;
+        }
+
+        Integer c = dto.getWallet() == null ? null : dto.getWallet().getCountOperation();
+        return c != null && c > 0;
+    }
+
 }
