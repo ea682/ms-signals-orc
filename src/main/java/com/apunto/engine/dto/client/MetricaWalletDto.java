@@ -1,5 +1,6 @@
 package com.apunto.engine.dto.client;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.*;
 
@@ -12,6 +13,7 @@ import java.util.Map;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class MetricaWalletDto {
 
     private WalletDto wallet;
@@ -102,7 +104,7 @@ public class MetricaWalletDto {
         private Double pnlCopyTotalUSDT;
 
         private Double roiAnnualizedCopy;
-        private Double copySizing;
+        private CopySizingDto copySizing;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
@@ -164,8 +166,8 @@ public class MetricaWalletDto {
         private Double averageMaxLoss;
         private Double drawdownFrequency;
 
-        private Integer medianDDDurationDays;
-        private Integer p95DDDurationDays;
+        private Double medianDDDurationDays;
+        private Double p95DDDurationDays;
 
         private Double riskOfRuinQuarterPct;
 
@@ -303,6 +305,18 @@ public class MetricaWalletDto {
         private Map<String, Object> issuesByType;
         private List<String> issuesExamplesUnique;
         private List<String> flags;
+    }
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class CopySizingDto {
+        private Double baseCapitalUSDT;
+        private Double targetScale;
+        private Double targetCapitalUSDT;
+        private Double baselinePeakMarginUSDT;
+        private Double appliedScaleFactor;
+        private Double appliedScalePct;
+        private Double realizedPeakMarginUSDT;
+        private Double realizedMaxExposureUSDT;
     }
 }
 
