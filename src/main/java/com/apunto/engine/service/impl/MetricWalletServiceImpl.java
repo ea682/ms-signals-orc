@@ -3,6 +3,7 @@ package com.apunto.engine.service.impl;
 import com.apunto.engine.client.MetricWalletsInfoClient;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.service.MetricWalletService;
+import com.apunto.engine.service.UserCopyAllocationService;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.extern.slf4j.Slf4j;
@@ -35,6 +36,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private final Duration slowThreshold;
 
     private final MetricWalletsInfoClient metricWalletsInfoClient;
+    private final UserCopyAllocationService userCopyAllocationService;
 
     private final AtomicReference<List<MetricaWalletDto>> lastKnownGoodHistory = new AtomicReference<>(List.of());
 
@@ -42,6 +44,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
+            UserCopyAllocationService userCopyAllocationService,
             @Value("${metric-wallet.history.limit:60}") int historyLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:60s}") Duration cacheRefreshAfter,
@@ -49,6 +52,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             @Value("${metric-wallet.history.slow-threshold:250ms}") Duration slowThreshold
     ) {
         this.metricWalletsInfoClient = Objects.requireNonNull(metricWalletsInfoClient, "metricWalletsInfoClient");
+        this.userCopyAllocationService = Objects.requireNonNull(userCopyAllocationService, "userCopyAllocationService");
 
         if (historyLimit <= 0) throw new IllegalArgumentException("metric-wallet.history.limit must be > 0");
         if (cacheMaxSize <= 0) throw new IllegalArgumentException("metric-wallet.history.cache.max-size must be > 0");
@@ -102,6 +106,14 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         CapitalAllocator.allocate(candidates, maxCapitalToUse, maxPerWallet);
         validateLimits(candidates, maxPerWallet, maxCapitalToUse);
+
+        try {
+            userCopyAllocationService.syncDistribution(maxWallets, candidates);
+        } catch (Exception ex) {
+            // No rompemos el engine si la persistencia falla; solo log.
+            log.warn("event=user_copy_allocation.sync_failed maxWallets={} err={}", maxWallets, safeErr(ex));
+        }
+
 
         double totalShare = candidates.stream().mapToDouble(MetricaWalletDto::getCapitalShare).sum();
         long durationMs = elapsedMs(startNs);

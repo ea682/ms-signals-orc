@@ -6,9 +6,10 @@ rest-client:
     connect-ms: 2000
     read-ms: 50000
   metric-wallet:
-    info-base: ${URL_METRIC:http://localhost:4102/}
+    info-base: ${URL_METRIC:http://192.168.1.123:4102}
   binance-service:
     info-base: ${URL_BINANCE:http://192.168.1.123:4106}
+
 
 logging:
   pattern:
@@ -17,7 +18,7 @@ logging:
 spring:
   kafka:
     listener:
-      auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:false}
+      auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:true}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
