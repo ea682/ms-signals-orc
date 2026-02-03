@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Objects;
+import java.math.BigDecimal;
 
 @Service
 @Slf4j
@@ -123,6 +124,17 @@ public class CopyOperationServiceImpl implements CopyOperationService {
             return false;
         }
         return copyOperationRepository.existsByIdOrderOriginAndIdUser(idOrderOrigin, idUser);
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public BigDecimal sumBufferedMarginActive(String idUser, String walletId, BigDecimal safety) {
+        if (idUser == null || idUser.isBlank() || walletId == null || walletId.isBlank()) {
+            return BigDecimal.ZERO;
+        }
+        final BigDecimal s = safety == null ? BigDecimal.ZERO : safety;
+        final BigDecimal v = copyOperationRepository.sumBufferedMarginActive(idUser, walletId, s);
+        return v == null ? BigDecimal.ZERO : v;
     }
 
     private CopyOperationEntity buildCopyOperationEntity(CopyOperationDto operation) {

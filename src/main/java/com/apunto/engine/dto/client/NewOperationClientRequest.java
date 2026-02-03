@@ -18,4 +18,10 @@ public class NewOperationClientRequest {
     private Integer leverage;
     private PositionSide positionSide;
     private boolean reduceOnly;
+
+    /**
+     * Idempotency key for Binance Futures orders (newClientOrderId).
+     * Max 36 chars, allowed [A-Za-z0-9._-].
+     */
+    private String clientOrderId;
 }

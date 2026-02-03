@@ -7,6 +7,7 @@ import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
+import com.apunto.engine.shared.util.IdempotencyKeyUtil;
 import org.mapstruct.AfterMapping;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
@@ -21,7 +22,35 @@ import java.util.UUID;
 @Mapper(componentModel = "spring")
 public interface CopyTradingMapper {
 
+    /**
+     * Binance puede devolver origQty distinto a executedQty (ej. fills parciales).
+     * Para persistencia y cierres, preferimos la cantidad realmente ejecutada.
+     */
+    default BigDecimal resolveFilledQty(BinanceFuturesOrderClientResponse order) {
+        if (order == null) return null;
+
+        // Preferimos executedQty, luego cumQty, y como fallback origQty.
+        BigDecimal q = order.getExecutedQty();
+        if (q == null || q.compareTo(BigDecimal.ZERO) <= 0) {
+            q = order.getCumQty();
+        }
+        if (q == null || q.compareTo(BigDecimal.ZERO) <= 0) {
+            q = order.getOrigQty();
+        }
+        return q;
+    }
+
     default OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
+        // Para copy trading dejamos el leverage fijo (policy) o usamos el leverage guardado en la copia.
+        // Evita inconsistencias al cerrar cuando el usuario cambia su leverage.
+        int closeLeverage = 5;
+        try {
+            if (copyOperation.getLeverage() != null) {
+                closeLeverage = copyOperation.getLeverage().intValue();
+            }
+        } catch (Exception ignored) {
+        }
+
         if ("LONG".equals(copyOperation.getTypeOperation())) {
             return OperationDto.builder()
                     .symbol(copyOperation.getParsymbol())
@@ -29,7 +58,8 @@ public interface CopyTradingMapper {
                     .type(OrderType.MARKET)
                     .positionSide(PositionSide.LONG)
                     .quantity(copyOperation.getSizePar().toPlainString())
-                    .leverage(userDetail.getDetail().getLeverage())
+                    .leverage(closeLeverage)
+                    .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(copyOperation.getIdOrderOrigin(), userDetail.getUser().getId().toString(), copyOperation.getIdWalletOrigin()))
                     .reduceOnly(true)
                     .apiKey(userDetail.getUserApiKey().getApiKey())
                     .secret(userDetail.getUserApiKey().getApiSecret())
@@ -41,7 +71,8 @@ public interface CopyTradingMapper {
                     .type(OrderType.MARKET)
                     .positionSide(PositionSide.SHORT)
                     .quantity(copyOperation.getSizePar().toPlainString())
-                    .leverage(userDetail.getDetail().getLeverage())
+                    .leverage(closeLeverage)
+                    .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(copyOperation.getIdOrderOrigin(), userDetail.getUser().getId().toString(), copyOperation.getIdWalletOrigin()))
                     .reduceOnly(true)
                     .apiKey(userDetail.getUserApiKey().getApiKey())
                     .secret(userDetail.getUserApiKey().getApiSecret())
@@ -56,7 +87,7 @@ public interface CopyTradingMapper {
     @Mapping(target = "parsymbol", source = "order.symbol")
     @Mapping(target = "typeOperation", source = "order.positionSide")
     @Mapping(target = "leverage", expression = "java(new java.math.BigDecimal(leverage))")
-    @Mapping(target = "sizePar", source = "order.origQty")
+    @Mapping(target = "sizePar", expression = "java(resolveFilledQty(order))")
     @Mapping(target = "priceEntry", source = "order.avgPrice")
     @Mapping(target = "priceClose", ignore = true)
     @Mapping(target = "dateClose", ignore = true)
@@ -76,7 +107,8 @@ public interface CopyTradingMapper {
                                 UUID idOperation,
                                 String idUser,
                                 int leverage) {
-        BigDecimal countUsd = order.getOrigQty().multiply(order.getAvgPrice());
+        BigDecimal q = resolveFilledQty(order);
+        BigDecimal countUsd = (q == null ? BigDecimal.ZERO : q).multiply(order.getAvgPrice());
         target.setSiseUsd(countUsd);
     }
 
@@ -87,7 +119,7 @@ public interface CopyTradingMapper {
     @Mapping(target = "parsymbol", source = "order.symbol")
     @Mapping(target = "typeOperation", source = "order.positionSide")
     @Mapping(target = "leverage", source = "operation.leverage")
-    @Mapping(target = "sizePar", source = "order.origQty")
+    @Mapping(target = "sizePar", expression = "java(resolveFilledQty(order))")
     @Mapping(target = "priceEntry", source = "operation.priceEntry")
     @Mapping(target = "priceClose", source = "order.avgPrice")
     @Mapping(target = "dateCreation", source = "operation.dateCreation")
@@ -100,7 +132,8 @@ public interface CopyTradingMapper {
     default void fillSiseUsdClose(@MappingTarget CopyOperationDto target,
                                   CopyOperationDto operation,
                                   BinanceFuturesOrderClientResponse order) {
-        BigDecimal countUsd = order.getOrigQty().multiply(order.getAvgPrice());
+        BigDecimal q = resolveFilledQty(order);
+        BigDecimal countUsd = (q == null ? BigDecimal.ZERO : q).multiply(order.getAvgPrice());
         target.setSiseUsd(countUsd);
     }
 

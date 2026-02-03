@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 public class MetricWalletServiceImpl implements MetricWalletService {
 
     private final int historyLimit;
+    private final int dayzLimit;
     private final int cacheMaxSize;
     private final Duration cacheRefreshAfter;
     private final Duration cacheExpireAfter;
@@ -45,14 +46,16 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
-            @Value("${metric-wallet.history.limit:60}") int historyLimit,
+            @Value("${metric-wallet.history.limit:100}") int historyLimit,
+            @Value("${metric-wallet.history.dayz:30}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
-            @Value("${metric-wallet.history.cache.refresh-after:60s}") Duration cacheRefreshAfter,
+            @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
             @Value("${metric-wallet.history.slow-threshold:250ms}") Duration slowThreshold
     ) {
         this.metricWalletsInfoClient = Objects.requireNonNull(metricWalletsInfoClient, "metricWalletsInfoClient");
         this.userCopyAllocationService = Objects.requireNonNull(userCopyAllocationService, "userCopyAllocationService");
+        this.dayzLimit = dayzLimit;
 
         if (historyLimit <= 0) throw new IllegalArgumentException("metric-wallet.history.limit must be > 0");
         if (cacheMaxSize <= 0) throw new IllegalArgumentException("metric-wallet.history.cache.max-size must be > 0");
@@ -82,7 +85,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         if (maxWallets <= 0) return List.of();
         validateAllocationInputs(maxCapitalToUse, maxPerWallet);
 
-        HistoryResult history = getHistory(historyLimit);
+        HistoryResult history = getHistory(historyLimit, dayzLimit);
 
         if (history.values().isEmpty()) {
             long durationMs = elapsedMs(startNs);
@@ -93,7 +96,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             return List.of();
         }
 
-        List<MetricaWalletDto> candidates = selectCandidates(history.values(), maxWallets);
+        List<MetricaWalletDto> candidates = selectCandidates(history.values(), maxWallets, dayzLimit);
 
         if (candidates.isEmpty()) {
             long durationMs = elapsedMs(startNs);
@@ -113,7 +116,6 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             // No rompemos el engine si la persistencia falla; solo log.
             log.warn("event=user_copy_allocation.sync_failed maxWallets={} err={}", maxWallets, safeErr(ex));
         }
-
 
         double totalShare = candidates.stream().mapToDouble(MetricaWalletDto::getCapitalShare).sum();
         long durationMs = elapsedMs(startNs);
@@ -144,7 +146,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         }
     }
 
-    @Scheduled(fixedDelayString = "${metric-wallet.history.cache.refresh-job:60s}")
+    @Scheduled(fixedDelayString = "${metric-wallet.history.cache.refresh-job:5m}")
     public void refreshHistoryCacheJob() {
         try {
             allPositionHistoryCache.refresh(historyLimit);
@@ -163,12 +165,18 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .build(this::loadAllPositionHistory);
     }
 
+    // ✅ Loader compatible con Caffeine: 1 parámetro (key = limit)
     private List<MetricaWalletDto> loadAllPositionHistory(Integer limit) {
+        return loadAllPositionHistory(limit, dayzLimit);
+    }
+
+    // Implementación real
+    private List<MetricaWalletDto> loadAllPositionHistory(Integer limit, Integer dayz) {
         final long startNs = System.nanoTime();
 
         List<MetricaWalletDto> resp;
         try {
-            resp = metricWalletsInfoClient.allPositionHistory(limit);
+            resp = metricWalletsInfoClient.allPositionHistory(limit, dayz);
         } catch (Exception ex) {
             long durationMs = elapsedMs(startNs);
             log.warn("event=metric_wallets.history_client_failed limit={} durationMs={} err={}", limit, durationMs, safeErr(ex));
@@ -193,7 +201,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return resp;
     }
 
-    private HistoryResult getHistory(int limit) {
+    private HistoryResult getHistory(int limit, int dayz) {
+        // Nota: el cache está indexado por limit; dayz actualmente no altera la key.
         try {
             List<MetricaWalletDto> v = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(List.of());
             if (!v.isEmpty()) return new HistoryResult(v, "cache");
@@ -217,7 +226,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return new HistoryResult(List.of(), "empty");
     }
 
-    private List<MetricaWalletDto> selectCandidates(List<MetricaWalletDto> base, int maxWallets) {
+    private List<MetricaWalletDto> selectCandidates(List<MetricaWalletDto> base, int maxWallets, int dayzLimit) {
         return base.stream()
                 .filter(Objects::nonNull)
                 .filter(dto -> dto.getScoring() != null)
@@ -225,12 +234,12 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPassesFilter()))
                 .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPreCopiable()))
                 .filter(dto -> 69 <= dto.getScoring().getDecisionMetricConservative())
+                .filter(dto -> dayzLimit <= dto.getWallet().getHistoryDays())
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
                 .limit(maxWallets)
                 .map(this::copyForAllocation)
                 .collect(Collectors.toList());
     }
-
 
     private MetricaWalletDto copyForAllocation(MetricaWalletDto src) {
         MetricaWalletDto dst = new MetricaWalletDto();
@@ -242,12 +251,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private static double decisionScore(MetricaWalletDto dto) {
         if (dto == null || dto.getScoring() == null) return 0.0;
 
-        MetricaWalletDto.ScoringDto s = dto.getScoring();
-
-        Integer v = s.getDecisionMetricConservative();
-        if (v != null) return v.doubleValue();
-
-        return 0.0;
+        Integer v = dto.getScoring().getDecisionMetricConservative();
+        return v != null ? v.doubleValue() : 0.0;
     }
 
     private static void validateAllocationInputs(double maxCapitalToUse, double maxPerWallet) {
@@ -364,16 +369,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         private static double decisionScore(MetricaWalletDto dto) {
             if (dto == null || dto.getScoring() == null) return 0.0;
-
-            MetricaWalletDto.ScoringDto s = dto.getScoring();
-
-            Integer v = v = s.getDecisionMetricConservative();
-            if (v != null) return v.doubleValue();
-
-            v = s.getDecisionMetricConservative();
-            if (v != null) return v.doubleValue();
-
-            return 0.0;
+            Integer v = dto.getScoring().getDecisionMetricConservative();
+            return v != null ? v.doubleValue() : 0.0;
         }
 
         private static double distributeEqually(List<MetricaWalletDto> remaining, double remainingWeight, double maxPerWallet) {
@@ -410,5 +407,4 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         Integer c = dto.getWallet() == null ? null : dto.getWallet().getCountOperation();
         return c != null && c > 0;
     }
-
 }

@@ -11,5 +11,5 @@ import java.util.List;
 public interface MetricWalletsInfoClient {
 
     @GetExchange("/operaciones/metrica")
-    List<MetricaWalletDto> allPositionHistory(@RequestParam("limit") int limit);
+    List<MetricaWalletDto> allPositionHistory(@RequestParam("limit") int limit, @RequestParam("dayz") int dayz);
 }

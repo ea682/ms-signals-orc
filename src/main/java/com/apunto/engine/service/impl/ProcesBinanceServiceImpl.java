@@ -45,6 +45,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 .leverage(dto.getLeverage())
                 .positionSide(dto.getPositionSide())
                 .reduceOnly(dto.isReduceOnly())
+                .clientOrderId(dto.getClientOrderId())
                 .build();
 
         log.info("event=binance.futures.order.send symbol={} side={} type={} positionSide={} reduceOnly={} qty={}",
