@@ -11,6 +11,7 @@ import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.mapper.CopyTradingMapper;
 import com.apunto.engine.service.*;
 import com.apunto.engine.shared.exception.SkipExecutionException;
+import com.apunto.engine.shared.util.IdempotencyKeyUtil;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
@@ -25,6 +26,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -45,7 +47,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final double DEFAULT_BASE_CAPITAL = 1_000.0;
     private static final BigDecimal MIN_NOTIONAL_FALLBACK = new BigDecimal("7");
     private static final BigDecimal USER_MIN_NOTIONAL_USDT = new BigDecimal("7");
-    private static final BigDecimal MAX_BUFFER_PCT = new BigDecimal("0.30");
     private static final BigDecimal ZERO = BigDecimal.ZERO;
 
     private static final String SYMBOLS_API_KEY = "1llJ9n3dloLfy0MoYLnQbiPxfvWmxS4CyyqUo1otzEWO56BLUW3Ij9dbcepqHAWb";
@@ -88,6 +89,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_PREP_SKIP_SYMBOL_RULES = "event=operation.open.skip_symbol_rules originId={} userId={} wallet={} symbol={} notionalMax={}";
     private static final String LOG_PREP_SKIP_NOTIONAL_ZERO = "event=operation.open.skip_notional_zero originId={} userId={} wallet={} symbol={}";
     private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} fraction={} walletBudget={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={}";
+    private static final BigDecimal MAX_MARGIN_SAFETY_PCT = new BigDecimal("0.30");
 
     private static final String LOG_QTY_ADJUSTED = "event=binance.qty_adjusted symbol={} qtyOriginal={} qtyFinal={} notionalFinal={} notionalMax={}";
     private static final String LOG_SYMBOLS_CACHE_REFRESH = "event=binance.symbols_cache.refresh size={} ttlMs={}";
@@ -98,11 +100,19 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_COPY_CREATE_INVALID = "event=copyop.create.invalid_order idUser={} idWallet={} idOperation={}";
     private static final String LOG_CLOSE_INVALID_RESPONSE = "event=binance.close.invalid_response originId={} userId={} symbol={}";
     private static final String LOG_CLOSE_OK = "event=binance.close.ok originId={} userId={} symbol={} qty={} orderId={}";
+    private static final int USER_LEVERAGE_MIN = 1;
+    private static final int USER_LEVERAGE_MAX = 10;
+    /**
+     * Política temporal: leverage fijo para copy trading.
+     * (Evita que el usuario cambie su leverage y rompa el sizing / cierre.)
+     */
+    private static final int COPY_LEVERAGE_FIXED = 5;
 
     private final ProcesBinanceService procesBinanceService;
     private final ThreadPoolTaskScheduler binanceTaskScheduler;
     private final MetricWalletService metricWalletService;
     private final CopyOperationService copyOperationService;
+    private final DistributedLockService distributedLockService;
 
     @Value("${binance.dispatch.delay-ms:100}")
     private long delayBetweenMs;
@@ -112,6 +122,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     @Value("${binance.symbols.cache-ttl-ms:60000}")
     private long symbolsCacheTtlMs;
+
+    @Value("${engine.copy.wallet-hardcap-over-pct:0.03}")
+    private BigDecimal walletHardcapOverPct; // 3% de sobre-asignación permitida
+
+    @Value("${engine.copy.wallet-reserve-pct:0.01}")
+    private BigDecimal walletReservePct; // 1% reservado como colchón interno por wallet
+
+    @Value("${engine.copy.sizing.base-capital-cap:10000}")
+    private double sizingBaseCapitalCap; // tope al denominador (evita ballenas incopiables)
+
+    @Value("${engine.copy.sizing.max-fraction-per-trade:0.25}")
+    private BigDecimal maxFractionPerTrade;
+
+    @Value("${engine.copy.sizing.notional-buffer-pct:0.03}")
+    private BigDecimal notionalBufferPct;
 
     private final CopyTradingMapper copyTradingMapper;
 
@@ -166,11 +191,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             final int maxWallet = userDetail.getDetail().getMaxWallet();
-            final List<MetricaWalletDto> metrics = metricsByMaxWallet.computeIfAbsent(maxWallet, metricWalletService::getMetricWallets);
+            final List<MetricaWalletDto> metrics = metricsByMaxWallet.computeIfAbsent(
+                    maxWallet,
+                    mw -> normalizeCapitalShares(metricWalletService.getMetricWallets(mw))
+            );
+
             final MetricaWalletDto walletMetric = getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
 
             if (walletMetric == null) {
                 log.warn(LOG_OPEN_NO_METRIC, originId, userId, event.getOperacion().getIdCuenta(), maxWallet);
+                continue;
+            }
+
+            // Las métricas son referencia (ranking), pero el filtro debe bloquear aperturas.
+            if (!passesWalletFilters(walletMetric)) {
+                log.info("event=operation.open.skip_wallet_filters originId={} userId={} wallet={} reason=passesFilter=false",
+                        originId, userId, walletMetric.getWallet().getIdWallet());
                 continue;
             }
 
@@ -209,7 +245,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return;
         }
 
-        int index = 0;
         int scheduled = 0;
 
         for (UserDetailDto userDetail : usersDetail) {
@@ -218,26 +253,23 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
             if (copyOperation == null) {
                 log.warn(LOG_CLOSE_COPY_MISSING, originId, userId);
-                index++;
                 continue;
             }
 
             if (!copyOperation.isActive()) {
                 log.info(LOG_CLOSE_SKIP_INACTIVE, originId, userId);
-                index++;
                 continue;
             }
 
-            final long delay = (long) index * delayBetweenMs;
+            final long delay = (long) scheduled * delayBetweenMs;
             final Instant executionTime = Instant.ofEpochMilli(baseTime + delay);
 
             binanceTaskScheduler.schedule(
-                    () -> safelyExecuteCloseOperation(copyOperation, userDetail, originId),
+                    () -> safelyExecuteCloseOperationStrict(originId, userDetail),
                     executionTime
             );
 
             scheduled++;
-            index++;
         }
 
         log.info(LOG_CLOSE_SCHEDULED, originId, usersDetail.size(), scheduled, delayBetweenMs);
@@ -294,99 +326,195 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
     }
 
+    // 5) executeNewOperationStrict (producción: lock distribuido por wallet, presupuesto desde DB)
     public void executeNewOperationStrict(OperacionEvent event, UserDetailDto userDetail, MetricaWalletDto walletMetric) {
         final String originId = event.getOperacion().getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
         final String walletId = walletMetric.getWallet().getIdWallet();
+
+        // Guardia extra (por si se llama por otro camino).
+        if (!passesWalletFilters(walletMetric)) {
+            throw new SkipExecutionException("wallet_filters_block");
+        }
 
         final PreparedOpen prepared = prepareOpenOperation(event, userDetail, walletMetric);
         if (prepared == null) {
             throw new SkipExecutionException("No se pudo preparar la operación");
         }
 
-        final String copyKey = copyKey(originId, userId);
-        final boolean reserved = reserveMargin(prepared.userWalletKey, copyKey, prepared.marginRequired, prepared.walletMarginBudget);
+        final String lockKey = distLockKey(userId, walletId);
 
-        if (!reserved) {
-            log.warn(LOG_OPEN_SKIP_BUDGET,
-                    originId,
-                    userId,
-                    walletId,
-                    prepared.symbol,
-                    prepared.marginRequired.toPlainString(),
-                    prepared.walletMarginBudget.toPlainString(),
-                    usedMarginByUserWallet.getOrDefault(prepared.userWalletKey, ZERO).toPlainString());
-            throw new SkipExecutionException("Sin presupuesto/margen disponible");
-        }
-
-        try {
-            log.info(LOG_OPEN_SEND,
-                    originId,
-                    userId,
-                    walletId,
-                    prepared.dto.getSymbol(),
-                    prepared.dto.getQuantity(),
-                    prepared.leverage,
-                    prepared.notional.toPlainString(),
-                    prepared.marginRequired.toPlainString(),
-                    prepared.walletMarginBudget.toPlainString());
-
-            final BinanceFuturesOrderClientResponse response = procesBinanceService.operationPosition(prepared.dto);
-
-            if (!isValidOrderResponse(response)) {
-                throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Respuesta inválida de Binance");
+        distributedLockService.withLock(lockKey, Duration.ofSeconds(120), () -> {
+            // Re-check dentro del lock (2+ réplicas).
+            if (copyOperationService.existsByOriginAndUser(originId, userId)) {
+                log.info(LOG_OPEN_SKIP_PERSISTED, originId, userId);
+                return null;
             }
 
-            final BigDecimal actualNotional = safeNotional(response);
-            final BigDecimal actualMargin = actualNotional
-                    .divide(BigDecimal.valueOf(prepared.leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+            // Presupuesto/margen: fuente de verdad = DB (posiciones activas).
+            final BigDecimal safetyForDb = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
+            final BigDecimal usedFromDb = copyOperationService.sumBufferedMarginActive(userId, walletId, safetyForDb);
 
-            reconcileReservation(prepared.userWalletKey, copyKey, actualMargin);
+            final BigDecimal over = walletHardcapOverPct == null ? ZERO : walletHardcapOverPct;
+            final BigDecimal reservePct = walletReservePct == null ? ZERO : walletReservePct;
 
-            createNewOperation(
-                    response,
-                    walletId,
-                    UUID.fromString(originId),
-                    userId,
-                    prepared.leverage
-            );
+            final BigDecimal hardCap = prepared.walletMarginBudget.multiply(BigDecimal.ONE.add(over));
+            final BigDecimal reserve = prepared.walletMarginBudget.multiply(reservePct);
 
-            log.info(LOG_OPEN_OK,
-                    originId,
-                    userId,
-                    walletId,
-                    prepared.symbol,
-                    response.getOrderId(),
-                    actualNotional.toPlainString(),
-                    actualMargin.toPlainString());
+            if (usedFromDb.add(prepared.marginRequired).add(reserve).compareTo(hardCap) > 0) {
+                log.warn(LOG_OPEN_SKIP_BUDGET,
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.symbol,
+                        prepared.marginRequired.toPlainString(),
+                        prepared.walletMarginBudget.toPlainString(),
+                        usedFromDb.toPlainString());
+                throw new SkipExecutionException("Sin presupuesto/margen disponible");
+            }
 
-        } catch (Exception ex) {
-            releaseReservation(copyKey);
-            throw ex;
-        }
+            boolean orderPlaced = false;
+            BinanceFuturesOrderClientResponse response = null;
+
+            try {
+                log.info(LOG_OPEN_SEND,
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.dto.getSymbol(),
+                        prepared.dto.getQuantity(),
+                        prepared.leverage,
+                        prepared.notional.toPlainString(),
+                        prepared.marginRequired.toPlainString(),
+                        prepared.walletMarginBudget.toPlainString());
+
+                response = procesBinanceService.operationPosition(prepared.dto);
+
+                if (!isValidOrderResponse(response)) {
+                    throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Respuesta inválida de Binance");
+                }
+                orderPlaced = true;
+
+                final BigDecimal actualNotional = safeNotional(response, prepared.entryPrice);
+                final BigDecimal safety = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
+
+                final BigDecimal actualMarginBuffered;
+                if (actualNotional.compareTo(ZERO) > 0) {
+                    final BigDecimal actualMargin = actualNotional
+                            .divide(BigDecimal.valueOf(prepared.leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+                    actualMarginBuffered = actualMargin.multiply(BigDecimal.ONE.add(safety));
+                } else {
+                    actualMarginBuffered = prepared.marginRequired;
+                }
+
+                createNewOperation(
+                        response,
+                        walletId,
+                        UUID.fromString(originId),
+                        userId,
+                        prepared.leverage
+                );
+
+                log.info(LOG_OPEN_OK,
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.symbol,
+                        response.getOrderId(),
+                        actualNotional.toPlainString(),
+                        actualMarginBuffered.toPlainString());
+
+            } catch (Exception ex) {
+                if (orderPlaced) {
+                    // Si la orden ya se colocó, pero falló persistencia/algún paso posterior,
+                    // intentamos cerrar de inmediato (reduceOnly) para no dejar una posición
+                    // abierta sin tracking (especialmente con 2+ réplicas).
+                    try {
+                        tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, response, userDetail);
+                    } catch (Exception closeEx) {
+                        log.error("event=panic_close.failed originId={} userId={} wallet={} err={}",
+                                originId, userId, walletId, closeEx.toString(), closeEx);
+                        throw ex;
+                    }
+                }
+                throw ex;
+            }
+
+            return null;
+        });
     }
 
+    private void tryPanicCloseAfterPersistFailure(String originId, String userId, String walletId,
+                                                 PreparedOpen prepared,
+                                                 BinanceFuturesOrderClientResponse openResponse,
+                                                 UserDetailDto userDetail) {
+        if (prepared == null || userDetail == null) return;
+
+        BigDecimal qty = null;
+        if (openResponse != null) {
+            qty = openResponse.getExecutedQty();
+            if (qty == null || qty.compareTo(ZERO) <= 0) qty = openResponse.getCumQty();
+        }
+        if (qty == null || qty.compareTo(ZERO) <= 0) {
+            // fallback a la qty calculada
+            try {
+                qty = new BigDecimal(prepared.dto.getQuantity());
+            } catch (Exception ignored) {
+            }
+        }
+        if (qty == null || qty.compareTo(ZERO) <= 0) {
+            log.warn("event=panic_close.skip reason=qty_zero symbol={}", prepared.symbol);
+            return;
+        }
+
+        final Side closeSide = prepared.dto.getSide() == Side.BUY ? Side.SELL : Side.BUY;
+
+        final OperationDto close = OperationDto.builder()
+                .symbol(prepared.dto.getSymbol())
+                .side(closeSide)
+                .type(OrderType.MARKET)
+                .positionSide(prepared.dto.getPositionSide())
+                .quantity(qty.toPlainString())
+                .leverage(prepared.leverage)
+                .reduceOnly(true)
+                .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(originId, userId, walletId))
+                .apiKey(userDetail.getUserApiKey().getApiKey())
+                .secret(userDetail.getUserApiKey().getApiSecret())
+                .build();
+
+        final BinanceFuturesOrderClientResponse closeResp = procesBinanceService.operationPosition(close);
+        if (!isValidOrderResponse(closeResp)) {
+            throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Panic close inválido");
+        }
+
+        log.warn("event=panic_close.ok symbol={} qty={} orderId={}",
+                prepared.dto.getSymbol(), qty.toPlainString(), closeResp.getOrderId());
+    }
     public void executeCloseOperationStrict(String originId, UserDetailDto userDetail) {
         Objects.requireNonNull(originId, "originId no puede ser null");
         Objects.requireNonNull(userDetail, ERR_USER_NULL);
 
         final String userId = userDetail.getUser().getId().toString();
-        final CopyOperationDto copyOperation = copyOperationService.findOperationForUser(originId, userId);
 
-        if (copyOperation == null) {
-            throw new SkipExecutionException("copy_missing");
-        }
+        // Necesitamos el walletId para el lock; lo leemos primero.
+        final CopyOperationDto initial = copyOperationService.findOperationForUser(originId, userId);
+        if (initial == null) throw new SkipExecutionException("copy_missing");
 
-        if (!copyOperation.isActive()) {
-            throw new SkipExecutionException("copy_inactive");
-        }
+        final String walletId = initial.getIdWalletOrigin();
+        if (walletId == null || walletId.isBlank()) throw new SkipExecutionException("wallet_missing");
 
-        try {
+        final String lockKey = distLockKey(userId, walletId);
+
+        distributedLockService.withLock(lockKey, Duration.ofSeconds(120), () -> {
+            final CopyOperationDto copyOperation = copyOperationService.findOperationForUser(originId, userId);
+            if (copyOperation == null) throw new SkipExecutionException("copy_missing");
+            if (!copyOperation.isActive()) throw new SkipExecutionException("copy_inactive");
+
             executeCloseOperation(copyOperation, userDetail);
-        } finally {
-            releaseReservation(copyKey(originId, userId));
-        }
+            return null;
+        });
     }
+
 
     private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail) {
         final String originId = copyOperation.getIdOrderOrigin();
@@ -411,6 +539,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 order.getOrderId());
     }
 
+    // 4) prepareOpenOperation CORREGIDA + baseCapitalCap + quantity==ZERO handling + PreparedOpen(8 args)
     private PreparedOpen prepareOpenOperation(OperacionEvent event,
                                               UserDetailDto userDetail,
                                               MetricaWalletDto walletMetric) {
@@ -423,23 +552,35 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String userId = userDetail.getUser().getId().toString();
         final String walletId = walletMetric.getWallet().getIdWallet();
 
-        final Double capitalShare = walletMetric.getCapitalShare();
-        if (capitalShare == null || capitalShare <= 0) {
+        // capitalShare clamp (0..1)
+        Double capitalShareRaw = walletMetric.getCapitalShare();
+        if (capitalShareRaw == null || !Double.isFinite(capitalShareRaw)) {
+            log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
+            return null;
+        }
+        double capitalShare = Math.max(0.0, Math.min(1.0, capitalShareRaw));
+        if (capitalShare <= 0.0) {
             log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
             return null;
         }
 
-        final double walletBudgetD = userDetail.getDetail().getCapital() * capitalShare;
-        final BigDecimal walletMarginBudget = BigDecimal.valueOf(walletBudgetD);
-
+        final BigDecimal walletMarginBudget = BigDecimal.valueOf(userDetail.getDetail().getCapital() * capitalShare);
         if (walletMarginBudget.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_BUDGET, originId, userId, walletId);
             return null;
         }
 
-        final double baseCapital = Optional.ofNullable(walletMetric.getExposureAndCapacity().getCapitalRequired())
+        final Double capitalRequired =
+                walletMetric.getExposureAndCapacity() == null ? null : walletMetric.getExposureAndCapacity().getCapitalRequired();
+
+        double baseCapital = Optional.ofNullable(capitalRequired)
                 .filter(required -> required > 0)
                 .orElse(DEFAULT_BASE_CAPITAL);
+
+        // cap al denominador (evita ballenas incopiables)
+        if (Double.isFinite(sizingBaseCapitalCap) && sizingBaseCapitalCap > 0 && baseCapital > sizingBaseCapitalCap) {
+            baseCapital = sizingBaseCapitalCap;
+        }
 
         final BigDecimal sizeOriginal = event.getOperacion().getSize();
         if (sizeOriginal == null || sizeOriginal.compareTo(ZERO) <= 0) {
@@ -453,7 +594,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (fractionOfBaseUsed.compareTo(BigDecimal.ONE) > 0) {
             fractionOfBaseUsed = BigDecimal.ONE;
         }
-
+        if (maxFractionPerTrade != null && maxFractionPerTrade.compareTo(ZERO) > 0) {
+            fractionOfBaseUsed = fractionOfBaseUsed.min(maxFractionPerTrade);
+        }
         if (fractionOfBaseUsed.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_FRACTION, originId, userId, walletId, fractionOfBaseUsed.toPlainString());
             return null;
@@ -473,7 +616,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return null;
         }
 
-        final int leverage = Math.max(1, userDetail.getDetail().getLeverage());
+        final int leverage = Math.min(
+                USER_LEVERAGE_MAX,
+                Math.max(USER_LEVERAGE_MIN, COPY_LEVERAGE_FIXED)
+        );
 
         final BigDecimal notionalMax = marginThisTrade.multiply(BigDecimal.valueOf(leverage));
         if (notionalMax.compareTo(ZERO) <= 0) {
@@ -481,34 +627,38 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return null;
         }
 
-        final BigDecimal notionalBuffered = notionalMax.multiply(BigDecimal.ONE.subtract(MAX_BUFFER_PCT));
+        // Buffer notional (cap 30%)
+        final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
+        final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
 
-        final Map<String, BinanceFuturesSymbolInfoClientDto> symbolInfoBySymbol = getSymbolsBySymbol();
-        final BinanceFuturesSymbolInfoClientDto symbolInfo = symbolInfoBySymbol.get(symbol.toUpperCase());
-
+        final BinanceFuturesSymbolInfoClientDto symbolInfo = getSymbolsBySymbol().get(symbol.toUpperCase());
         if (symbolInfo == null) {
-            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, notionalBuffered.toPlainString());
+            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
             return null;
         }
 
         final SymbolRules rules = extractRules(symbolInfo);
         if (rules == null || rules.minNotional == null) {
-            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, notionalBuffered.toPlainString());
+            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
             return null;
         }
 
-        if (notionalBuffered.compareTo(rules.minNotional) < 0) {
-            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, notionalBuffered.toPlainString());
+        if (targetNotional.compareTo(rules.minNotional) < 0) {
+            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
             return null;
         }
 
-        BigDecimal quantity = notionalBuffered.divide(entryPrice, rules.qtyScale, RoundingMode.DOWN);
+        BigDecimal quantity = targetNotional.divide(entryPrice, rules.qtyScale, RoundingMode.DOWN);
         if (quantity.compareTo(ZERO) <= 0) {
-            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, notionalBuffered.toPlainString());
+            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
             return null;
         }
 
-        quantity = adjustQuantityToBinanceRules(symbol, quantity, entryPrice, rules, notionalBuffered);
+        quantity = adjustQuantityToBinanceRules(symbol, quantity, entryPrice, rules, notionalMax);
+        if (quantity.compareTo(ZERO) <= 0) {
+            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
+            return null;
+        }
 
         final BigDecimal notionalFinal = quantity.multiply(entryPrice);
         if (notionalFinal.compareTo(rules.minNotional) < 0) {
@@ -516,9 +666,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return null;
         }
 
+        final BigDecimal safety = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
+
         final BigDecimal marginRequired = notionalFinal
                 .divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
-                .multiply(BigDecimal.ONE.add(marginSafetyBufferPct));
+                .multiply(BigDecimal.ONE.add(safety));
 
         final String userWalletKey = userWalletKey(userId, walletId);
 
@@ -534,7 +686,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 notionalFinal.toPlainString(),
                 marginRequired.toPlainString());
 
-        final OperationDto dto = buildBuyAndSellPosition(event, quantity, userDetail);
+        final OperationDto dto = buildBuyAndSellPosition(event, quantity, userDetail, leverage);
+        dto.setClientOrderId(IdempotencyKeyUtil.openClientOrderId(originId, userId, walletId));
 
         return new PreparedOpen(
                 dto,
@@ -543,41 +696,43 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 notionalFinal,
                 marginRequired,
                 walletMarginBudget,
+                entryPrice,
                 userWalletKey
         );
     }
 
-    private OperationDto buildBuyAndSellPosition(OperacionEvent event, BigDecimal quantity, UserDetailDto userDetail) {
-        if (event.getOperacion().getTipoOperacion().equals(PositionSide.LONG)) {
-            return OperationDto.builder()
-                    .symbol(event.getOperacion().getParSymbol())
-                    .side(Side.BUY)
-                    .type(OrderType.MARKET)
-                    .positionSide(event.getOperacion().getTipoOperacion())
-                    .quantity(quantity.toPlainString())
-                    .leverage(userDetail.getDetail().getLeverage())
-                    .reduceOnly(false)
-                    .apiKey(userDetail.getUserApiKey().getApiKey())
-                    .secret(userDetail.getUserApiKey().getApiSecret())
-                    .build();
-        } else {
-            return OperationDto.builder()
-                    .symbol(event.getOperacion().getParSymbol())
-                    .side(Side.SELL)
-                    .type(OrderType.MARKET)
-                    .positionSide(event.getOperacion().getTipoOperacion())
-                    .quantity(quantity.toPlainString())
-                    .leverage(userDetail.getDetail().getLeverage())
-                    .reduceOnly(false)
-                    .apiKey(userDetail.getUserApiKey().getApiKey())
-                    .secret(userDetail.getUserApiKey().getApiSecret())
-                    .build();
+    private OperationDto buildBuyAndSellPosition(OperacionEvent event,
+                                                 BigDecimal quantity,
+                                                 UserDetailDto userDetail,
+                                                 int leverage) {
+
+        final String symbol = event.getOperacion().getParSymbol();
+        final PositionSide side = event.getOperacion().getTipoOperacion();
+
+        if (side == null) {
+            throw new SkipExecutionException("tipoOperacion inválido/null");
         }
+
+        final Side orderSide = (side.equals(PositionSide.LONG)) ? Side.BUY : Side.SELL;
+
+        return OperationDto.builder()
+                .symbol(symbol)
+                .side(orderSide)
+                .type(OrderType.MARKET)
+                .positionSide(side)
+                .quantity(quantity.toPlainString())
+                .leverage(leverage)
+                .reduceOnly(false)
+                .apiKey(userDetail.getUserApiKey().getApiKey())
+                .secret(userDetail.getUserApiKey().getApiSecret())
+                .build();
     }
+
 
     private MetricaWalletDto resolveWalletMetricOrThrowSkip(OperacionEvent event, UserDetailDto userDetail) {
         final int maxWallet = userDetail.getDetail().getMaxWallet();
-        final List<MetricaWalletDto> metrics = metricWalletService.getMetricWallets(maxWallet);
+        final List<MetricaWalletDto> metrics =
+                normalizeCapitalShares(metricWalletService.getMetricWallets(maxWallet));
 
         final MetricaWalletDto metric = getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
         if (metric == null) {
@@ -641,7 +796,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final Integer quantityPrecision = symbolDetail.getQuantityPrecision();
-        final int qtyScale = quantityPrecision != null ? Math.max(0, quantityPrecision) : 0;
+        final int qtyScaleFromBinance = quantityPrecision != null ? Math.max(0, quantityPrecision) : 0;
 
         BigDecimal stepSize = null;
         BigDecimal minQty = null;
@@ -657,6 +812,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
         }
 
+        final int stepScale = (stepSize == null) ? 0 : Math.max(0, stepSize.stripTrailingZeros().scale());
+        final int finalScale = Math.max(qtyScaleFromBinance, stepScale);
+
         BigDecimal minNotional = null;
         for (BinanceFuturesSymbolFilterDto f : symbolDetail.getFilters()) {
             if (f == null || f.getFilterType() == null) continue;
@@ -668,44 +826,50 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
         }
 
-        if (minNotional == null) {
-            minNotional = MIN_NOTIONAL_FALLBACK;
-        }
-        if (minNotional.compareTo(MIN_NOTIONAL_FALLBACK) < 0) {
-            minNotional = MIN_NOTIONAL_FALLBACK;
-        }
-
+        if (minNotional == null) minNotional = MIN_NOTIONAL_FALLBACK;
+        if (minNotional.compareTo(MIN_NOTIONAL_FALLBACK) < 0) minNotional = MIN_NOTIONAL_FALLBACK;
         minNotional = minNotional.max(USER_MIN_NOTIONAL_USDT).max(MIN_NOTIONAL_FALLBACK);
 
-        return new SymbolRules(stepSize, minQty, minNotional, qtyScale);
+        return new SymbolRules(stepSize, minQty, minNotional, finalScale);
     }
 
+
+    // 3) adjustQuantityToBinanceRules CORREGIDA (sin variables "fantasma", sin duplicados)
     private BigDecimal adjustQuantityToBinanceRules(String symbol,
                                                     BigDecimal quantity,
                                                     BigDecimal entryPrice,
                                                     SymbolRules rules,
                                                     BigDecimal notionalMax) {
 
+        if (quantity == null || entryPrice == null || rules == null || notionalMax == null) return ZERO;
+        if (quantity.compareTo(ZERO) <= 0 || entryPrice.compareTo(ZERO) <= 0 || notionalMax.compareTo(ZERO) <= 0) return ZERO;
+
         BigDecimal adjusted = quantity;
 
+        // Step rounding (floor to step)
         if (rules.stepSize != null && rules.stepSize.compareTo(ZERO) > 0) {
-            adjusted = adjusted
-                    .divide(rules.stepSize, 0, RoundingMode.DOWN)
-                    .multiply(rules.stepSize);
+            adjusted = adjusted.divide(rules.stepSize, 0, RoundingMode.DOWN).multiply(rules.stepSize);
         }
 
+        // Min qty
         if (rules.minQty != null && adjusted.compareTo(rules.minQty) < 0) {
             adjusted = rules.minQty;
         }
 
+        // Precision
         if (rules.qtyScale >= 0) {
             adjusted = adjusted.setScale(rules.qtyScale, RoundingMode.DOWN);
         }
 
+        if (adjusted.compareTo(ZERO) <= 0) return ZERO;
+
         BigDecimal notionalFinal = adjusted.multiply(entryPrice);
 
+        // Si se pasa del budget, recalculamos hacia abajo con buffer
         if (notionalFinal.compareTo(notionalMax) > 0) {
-            final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(MAX_BUFFER_PCT));
+            final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
+            final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+
             BigDecimal q = targetNotional.divide(entryPrice, rules.qtyScale, RoundingMode.DOWN);
 
             if (rules.stepSize != null && rules.stepSize.compareTo(ZERO) > 0) {
@@ -721,7 +885,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             adjusted = q;
+            if (adjusted.compareTo(ZERO) <= 0) return ZERO;
+
             notionalFinal = adjusted.multiply(entryPrice);
+
+            // Si incluso después de ajustar sigue sobre el máximo (por minQty/step), abortamos
+            if (notionalFinal.compareTo(notionalMax) > 0) {
+                log.info("event=binance.qty_skip_over_budget symbol={} notionalFinal={} notionalMax={}",
+                        symbol, notionalFinal.toPlainString(), notionalMax.toPlainString());
+                return ZERO;
+            }
         }
 
         log.debug(LOG_QTY_ADJUSTED,
@@ -733,6 +906,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         return adjusted;
     }
+
+
 
     private void createNewOperation(BinanceFuturesOrderClientResponse order,
                                     String idWallet,
@@ -749,20 +924,36 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         copyOperationService.newOperation(buildCopyOperation);
     }
 
-    private boolean isValidOrderResponse(BinanceFuturesOrderClientResponse orderResponse) {
-        return orderResponse != null
-                && orderResponse.getOrderId() != null
-                && orderResponse.getSymbol() != null
-                && orderResponse.getOrigQty() != null
-                && orderResponse.getAvgPrice() != null
-                && orderResponse.getUpdateTime() != null;
+    private boolean isValidOrderResponse(BinanceFuturesOrderClientResponse r) {
+        return r != null
+                && r.getOrderId() != null
+                && r.getSymbol() != null
+                && (r.getExecutedQty() != null || r.getCumQty() != null || r.getOrigQty() != null)
+                && r.getAvgPrice() != null
+                && r.getUpdateTime() != null;
     }
 
-    private BigDecimal safeNotional(BinanceFuturesOrderClientResponse response) {
-        if (response == null || response.getOrigQty() == null || response.getAvgPrice() == null) {
-            return ZERO;
+    private BigDecimal safeNotional(BinanceFuturesOrderClientResponse response, BigDecimal fallbackPrice) {
+        if (response == null) return ZERO;
+
+        BigDecimal qty = response.getExecutedQty();
+        if (qty == null || qty.compareTo(ZERO) <= 0) qty = response.getCumQty();
+        if (qty == null || qty.compareTo(ZERO) <= 0) qty = response.getOrigQty();
+        if (qty == null || qty.compareTo(ZERO) <= 0) return ZERO;
+
+        BigDecimal px = response.getAvgPrice();
+        if (px == null || px.compareTo(ZERO) <= 0) {
+            px = fallbackPrice;
         }
-        return response.getOrigQty().multiply(response.getAvgPrice());
+        if (px == null || px.compareTo(ZERO) <= 0) return ZERO;
+
+        return qty.multiply(px);
+    }
+
+    private boolean passesWalletFilters(MetricaWalletDto walletMetric) {
+        if (walletMetric == null || walletMetric.getScoring() == null) return false;
+        final Boolean passes = walletMetric.getScoring().getPassesFilter();
+        return Boolean.TRUE.equals(passes);
     }
 
     private String copyKey(String originId, String userId) {
@@ -773,6 +964,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return userId + "::" + walletId;
     }
 
+    private String distLockKey(String userId, String walletId) {
+        return "copy-wallet-lock::" + userWalletKey(userId, walletId);
+    }
+
     private boolean reserveMargin(String userWalletKey,
                                   String copyKey,
                                   BigDecimal marginRequired,
@@ -781,21 +976,30 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (marginRequired == null || marginRequired.compareTo(ZERO) <= 0) {
             return false;
         }
-
         if (walletMarginBudget == null || walletMarginBudget.compareTo(ZERO) <= 0) {
             return false;
         }
+
+        final BigDecimal hardCap = walletMarginBudget.multiply(BigDecimal.ONE.add(
+                walletHardcapOverPct == null ? ZERO : walletHardcapOverPct
+        ));
+
+        final BigDecimal reserve = walletMarginBudget.multiply(
+                walletReservePct == null ? ZERO : walletReservePct
+        );
 
         while (true) {
             final BigDecimal current = usedMarginByUserWallet.getOrDefault(userWalletKey, ZERO);
             final BigDecimal next = current.add(marginRequired);
 
-            if (next.compareTo(walletMarginBudget) > 0) {
+
+            if (next.add(reserve).compareTo(hardCap) > 0) {
                 return false;
             }
 
-            final boolean updated = usedMarginByUserWallet.putIfAbsent(userWalletKey, next) == null
-                    || usedMarginByUserWallet.replace(userWalletKey, current, next);
+            final boolean updated =
+                    usedMarginByUserWallet.putIfAbsent(userWalletKey, next) == null
+                            || usedMarginByUserWallet.replace(userWalletKey, current, next);
 
             if (updated) {
                 reservationByCopyKey.put(copyKey, new Reservation(userWalletKey, marginRequired));
@@ -888,6 +1092,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         private final BigDecimal notional;
         private final BigDecimal marginRequired;
         private final BigDecimal walletMarginBudget;
+        private final BigDecimal entryPrice;     // <-- NUEVO (BigDecimal)
         private final String userWalletKey;
 
         private PreparedOpen(OperationDto dto,
@@ -896,6 +1101,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                              BigDecimal notional,
                              BigDecimal marginRequired,
                              BigDecimal walletMarginBudget,
+                             BigDecimal entryPrice,
                              String userWalletKey) {
             this.dto = dto;
             this.symbol = symbol;
@@ -903,6 +1109,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             this.notional = notional;
             this.marginRequired = marginRequired;
             this.walletMarginBudget = walletMarginBudget;
+            this.entryPrice = entryPrice;
             this.userWalletKey = userWalletKey;
         }
     }
@@ -914,6 +1121,54 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         private SymbolsCache(long expiresAtMs, Map<String, BinanceFuturesSymbolInfoClientDto> bySymbol) {
             this.expiresAtMs = expiresAtMs;
             this.bySymbol = bySymbol;
+        }
+    }
+
+    private BigDecimal safePct(BigDecimal raw, BigDecimal max) {
+        if (raw == null) return ZERO;
+        if (raw.compareTo(ZERO) < 0) return ZERO;
+        if (raw.compareTo(max) > 0) return max;
+        return raw;
+    }
+
+    private List<MetricaWalletDto> normalizeCapitalShares(List<MetricaWalletDto> metrics) {
+        if (metrics == null || metrics.isEmpty()) return metrics;
+
+        double total = 0.0;
+        for (MetricaWalletDto m : metrics) {
+            if (m == null) continue;
+            Double s = m.getCapitalShare();
+            if (s != null && Double.isFinite(s) && s > 0) total += s;
+        }
+
+        if (total <= 0.0) return metrics;
+
+        if (total > 1.0) {
+            for (MetricaWalletDto m : metrics) {
+                if (m == null) continue;
+                Double s = m.getCapitalShare();
+                if (s == null || !Double.isFinite(s) || s <= 0) {
+                    m.setCapitalShare(0.0);
+                } else {
+                    m.setCapitalShare(s / total);
+                }
+            }
+        } else {
+            for (MetricaWalletDto m : metrics) {
+                if (m == null) continue;
+                Double s = m.getCapitalShare();
+                if (s == null || !Double.isFinite(s) || s < 0) m.setCapitalShare(0.0);
+            }
+        }
+
+        return metrics;
+    }
+
+    private void safelyExecuteCloseOperationStrict(String originId, UserDetailDto userDetail) {
+        try {
+            executeCloseOperationStrict(originId, userDetail);
+        } catch (Exception ex) {
+            log.error(LOG_CLOSE_ERROR, originId, userDetail.getUser().getId(), ex.toString(), ex);
         }
     }
 }

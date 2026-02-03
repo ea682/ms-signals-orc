@@ -10,29 +10,39 @@ rest-client:
   binance-service:
     info-base: ${URL_BINANCE:http://192.168.1.123:4106}
 
-
 logging:
   pattern:
     console: '%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%-5level) %clr([%t]){faint} %clr(%logger{36}){cyan} : %msg%n%wex'
 
 spring:
+  output:
+    ansi:
+      enabled: ALWAYS
+
   kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:192.168.1.123:9094}
+
     listener:
       auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:true}
+
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:operaciones-consumer}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: com.apunto.signalsorc.kafka.dto.OperacionEvent
+
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
       properties:
         spring.json.add.type.headers: false
-    bootstrap-servers: ${KAFKA_BROKERS:192.168.1.123:9094}
-    consumer:
-      group-id: operaciones-consumer
-  output:
-    ansi:
-      enabled: ALWAYS
 
   datasource:
-    url: jdbc:postgresql://postgres:5432/trading_futuros?currentSchema=futuros_operaciones
+    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=futuros_operaciones}
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:5450940}
 
@@ -47,6 +57,7 @@ spring:
         default_schema: ${DB_SCHEMA:futuros_operaciones}
         jdbc.time_zone: UTC
         format_sql: true
+
 management:
   endpoints:
     web:
@@ -56,7 +67,7 @@ management:
 app:
   kafka:
     operaciones:
-      topic: ${KAFKA_TOPIC_OPERACIONES:operaciones-eventos}
+      topic: ${KAFKA_TOPIC_OPERACIONES:futures-position-eventos}
 
 binance:
   dispatch:

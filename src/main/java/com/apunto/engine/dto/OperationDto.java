@@ -18,6 +18,13 @@ public class OperationDto {
     private String timeInForce;
     private Integer leverage;
     private boolean reduceOnly;
+
+    /**
+     * Idempotency key propagated to ms-binance-engine and mapped to Binance Futures
+     * parameter "newClientOrderId". Max 36 chars, allowed [A-Za-z0-9._-].
+     */
+    private String clientOrderId;
+
     private String apiKey;
     private String secret;
 }

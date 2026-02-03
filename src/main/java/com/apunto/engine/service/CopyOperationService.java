@@ -13,4 +13,10 @@ public interface CopyOperationService {
     List<CopyOperationDto> findOperationsByOrigin(String idOrderOrigin);
     CopyOperationDto findOperationForUser(String idOrderOrigin, String idUser);
     boolean existsByOriginAndUser(String idOrderOrigin, String idUser);
+
+    /**
+     * Suma de margen usado (buffer incluido) para posiciones activas de un usuario por wallet.
+     * Se usa como base para presupuesto en entornos con múltiples réplicas.
+     */
+    java.math.BigDecimal sumBufferedMarginActive(String idUser, String walletId, java.math.BigDecimal safety);
 }
