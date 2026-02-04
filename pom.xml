@@ -13,7 +13,7 @@
 
     <groupId>com.apunto</groupId>
     <artifactId>ms-signals-orc</artifactId>
-    <version>1.2.7</version>
+    <version>1.3.2</version>
     <name>ms-signals-orc</name>
     <description>Demo project for Spring Boot</description>
 
