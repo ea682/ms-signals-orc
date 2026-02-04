@@ -1,6 +1,7 @@
 package com.apunto.engine.repository;
 
 import com.apunto.engine.entity.CopyExecutionJobEntity;
+import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.jobs.model.CopyJobStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -85,5 +86,34 @@ public interface CopyExecutionJobRepository extends JpaRepository<CopyExecutionJ
             @Param("now") OffsetDateTime now
     );
 
+    @Modifying
+    @Query(value = """
+    INSERT INTO copy_execution_job (
+        id, origin_id, user_id, action, status, attempt, next_run_at,
+        payload, last_error_category, created_at, updated_at
+    ) VALUES (
+        :id, :originId, :userId, :action, :status, :attempt, :nextRunAt,
+        :payload, :lastErrorCategory, :createdAt, :updatedAt
+    )
+    ON CONFLICT (origin_id, user_id, action) DO NOTHING
+    """, nativeQuery = true)
+    int insertIgnore(
+            @Param("id") UUID id,
+            @Param("originId") String originId,
+            @Param("userId") String userId,
+            @Param("action") String action,
+            @Param("status") String status,
+            @Param("attempt") int attempt,
+            @Param("nextRunAt") OffsetDateTime nextRunAt,
+            @Param("payload") String payload,
+            @Param("lastErrorCategory") String lastErrorCategory,
+            @Param("createdAt") OffsetDateTime createdAt,
+            @Param("updatedAt") OffsetDateTime updatedAt
+    );
+
     long countByStatus(CopyJobStatus status);
+
+    boolean existsByOriginIdAndUserIdAndAction(String originId, String userId, CopyJobAction action);
+
+
 }
