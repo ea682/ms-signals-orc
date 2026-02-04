@@ -14,6 +14,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -32,40 +33,38 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
     @Override
     @Transactional
     public int enqueueForUsers(OperacionEvent event, List<UserDetailDto> users, CopyJobAction action) {
-        if (event == null || users == null || users.isEmpty()) {
-            return 0;
-        }
-
-        final String originId = event.getOperacion().getIdOperacion().toString();
+        final String originId = String.valueOf(event.getOperacion().getIdOperacion());
         final String payload = serializeEvent(event);
 
-        int created = 0;
+        final OffsetDateTime now = OffsetDateTime.now();
+        int enqueued = 0;
+
         for (UserDetailDto u : users) {
-            if (u == null || u.getUser() == null || u.getUser().getId() == null) continue;
+            final String userId = u.getUser().getId().toString();
 
-            CopyExecutionJobEntity job = new CopyExecutionJobEntity();
+            // INSERT idempotente: si ya existe (origin_id, user_id, action), NO lanza error.
+            int inserted = repository.insertIgnore(
+                    UUID.randomUUID(),
+                    originId,
+                    userId,
+                    action.name(),
+                    CopyJobStatus.PENDING.name(),
+                    0,
+                    now,
+                    payload,
+                    CopyJobErrorCategory.NONE.name(),
+                    now,
+                    now
+            );
 
-            job.setId(null);
-
-            job.setOriginId(originId);
-            job.setUserId(u.getUser().getId().toString());
-            job.setAction(action);
-            job.setStatus(CopyJobStatus.PENDING);
-            job.setAttempt(0);
-            job.setNextRunAt(OffsetDateTime.now());
-            job.setPayload(payload);
-            job.setLastErrorMessage("");
-            job.setLastErrorCategory(CopyJobErrorCategory.NONE);
-
-            try {
-                repository.saveAndFlush(job);
-                created++;
-            } catch (DataIntegrityViolationException dup) {
+            if (inserted == 1) {
+                enqueued++;
             }
         }
 
-        return created;
+        return enqueued;
     }
+
 
     @Override
     @Transactional
