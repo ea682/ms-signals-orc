@@ -46,8 +46,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
-            @Value("${metric-wallet.history.limit:100}") int historyLimit,
-            @Value("${metric-wallet.history.dayz:30}") int dayzLimit,
+            @Value("${metric-wallet.history.limit:30}") int historyLimit,
+            @Value("${metric-wallet.history.dayz:1}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
@@ -113,7 +113,6 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         try {
             userCopyAllocationService.syncDistribution(maxWallets, candidates);
         } catch (Exception ex) {
-            // No rompemos el engine si la persistencia falla; solo log.
             log.warn("event=user_copy_allocation.sync_failed maxWallets={} err={}", maxWallets, safeErr(ex));
         }
 
@@ -231,15 +230,24 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .filter(Objects::nonNull)
                 .filter(dto -> dto.getScoring() != null)
                 .filter(MetricWalletServiceImpl::hasClosedHistory)
-                .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPassesFilter()))
-                .filter(dto -> Boolean.TRUE.equals(dto.getScoring().getPreCopiable()))
-                .filter(dto -> 69 <= dto.getScoring().getDecisionMetricConservative())
+                .filter(dto -> dto.getWallet() != null && dto.getWallet().getHistoryDays() != null)
+                .filter(dto -> {
+                    var s = dto.getScoring();
+                    return gte(s.getDecisionMetricConservative(), 69)
+                            || gte(s.getDecisionMetricScalping(), 80)
+                            || gte(s.getDecisionMetricAggressive(), 80);
+                })
                 .filter(dto -> dayzLimit <= dto.getWallet().getHistoryDays())
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
                 .limit(maxWallets)
                 .map(this::copyForAllocation)
                 .collect(Collectors.toList());
     }
+
+    private static boolean gte(Integer value, int threshold) {
+        return value != null && value >= threshold;
+    }
+
 
     private MetricaWalletDto copyForAllocation(MetricaWalletDto src) {
         MetricaWalletDto dst = new MetricaWalletDto();
