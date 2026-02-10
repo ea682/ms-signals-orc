@@ -102,10 +102,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_CLOSE_OK = "event=binance.close.ok originId={} userId={} symbol={} qty={} orderId={}";
     private static final int USER_LEVERAGE_MIN = 1;
     private static final int USER_LEVERAGE_MAX = 10;
-    /**
-     * Política temporal: leverage fijo para copy trading.
-     * (Evita que el usuario cambie su leverage y rompa el sizing / cierre.)
-     */
     private static final int COPY_LEVERAGE_FIXED = 5;
 
     private final ProcesBinanceService procesBinanceService;

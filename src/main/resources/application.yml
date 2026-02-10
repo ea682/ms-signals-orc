@@ -6,7 +6,7 @@ rest-client:
     connect-ms: 2000
     read-ms: 50000
   metric-wallet:
-    info-base: ${URL_METRIC:http://192.168.1.123:4102}
+    info-base: ${URL_METRIC:http://localhost:4102/}
   binance-service:
     info-base: ${URL_BINANCE:http://192.168.1.123:4106}
 
