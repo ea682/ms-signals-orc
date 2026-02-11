@@ -322,13 +322,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
     }
 
-    // 5) executeNewOperationStrict (producción: lock distribuido por wallet, presupuesto desde DB)
     public void executeNewOperationStrict(OperacionEvent event, UserDetailDto userDetail, MetricaWalletDto walletMetric) {
         final String originId = event.getOperacion().getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
         final String walletId = walletMetric.getWallet().getIdWallet();
 
-        // Guardia extra (por si se llama por otro camino).
         if (!passesWalletFilters(walletMetric)) {
             throw new SkipExecutionException("wallet_filters_block");
         }
@@ -948,8 +946,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private boolean passesWalletFilters(MetricaWalletDto walletMetric) {
         if (walletMetric == null || walletMetric.getScoring() == null) return false;
-        final Boolean passes = walletMetric.getScoring().getPassesFilter();
-        return Boolean.TRUE.equals(passes);
+        return Boolean.TRUE;
     }
 
     private String copyKey(String originId, String userId) {
