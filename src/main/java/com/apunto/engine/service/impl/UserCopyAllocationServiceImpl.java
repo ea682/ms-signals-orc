@@ -57,12 +57,16 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             return;
         }
 
-        final List<UserCopyAllocationEntity> existingActive = repository.findAllByMaxWalletAndEndsAtIsNull(maxWallet);
+        final List<UserCopyAllocationEntity> existingActive =
+                repository.findAllByMaxWalletAndEndsAtIsNull(maxWallet);
+
+        final List<String> newWalletIdList = new ArrayList<>(newDist.keySet());
+        final List<UserCopyAllocationEntity> existingForNewWallets =
+                repository.findAllByMaxWalletAndWalletIdIn(maxWallet, newWalletIdList);
 
         final Map<String, UserCopyAllocationEntity> existingByWallet = new HashMap<>();
-        for (UserCopyAllocationEntity e : existingActive) {
-            if (e == null) continue;
-            final String w = normalize(e.getWalletId());
+        for (UserCopyAllocationEntity e : existingForNewWallets) {
+            String w = normalize(e.getWalletId());
             if (w != null) existingByWallet.put(w, e);
         }
 
