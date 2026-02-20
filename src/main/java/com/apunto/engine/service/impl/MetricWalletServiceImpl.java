@@ -47,7 +47,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
             @Value("${metric-wallet.history.limit:30}") int historyLimit,
-            @Value("${metric-wallet.history.dayz:1}") int dayzLimit,
+            @Value("${metric-wallet.history.dayz:15}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
@@ -164,12 +164,10 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .build(this::loadAllPositionHistory);
     }
 
-    // ✅ Loader compatible con Caffeine: 1 parámetro (key = limit)
     private List<MetricaWalletDto> loadAllPositionHistory(Integer limit) {
         return loadAllPositionHistory(limit, dayzLimit);
     }
 
-    // Implementación real
     private List<MetricaWalletDto> loadAllPositionHistory(Integer limit, Integer dayz) {
         final long startNs = System.nanoTime();
 
@@ -201,7 +199,6 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     }
 
     private HistoryResult getHistory(int limit, int dayz) {
-        // Nota: el cache está indexado por limit; dayz actualmente no altera la key.
         try {
             List<MetricaWalletDto> v = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(List.of());
             if (!v.isEmpty()) return new HistoryResult(v, "cache");
@@ -233,9 +230,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .filter(dto -> dto.getWallet() != null && dto.getWallet().getHistoryDays() != null)
                 .filter(dto -> {
                     var s = dto.getScoring();
-                    return gte(s.getDecisionMetricConservative(), 69)
-                            || gte(s.getDecisionMetricScalping(), 80)
-                            || gte(s.getDecisionMetricAggressive(), 80);
+                    return gte(s.getDecisionMetricConservative(), 60)
+                            || gte(s.getDecisionMetricScalping(), 70)
+                            || gte(s.getDecisionMetricAggressive(), 70);
                 })
                 .filter(dto -> dayzLimit <= dto.getWallet().getHistoryDays())
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
