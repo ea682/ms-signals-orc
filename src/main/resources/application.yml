@@ -86,3 +86,10 @@ engine:
   copy:
     execution-job-worker:
       enabled: true
+  metric-wallet:
+    distribution-worker:
+      enabled: true
+
+metric-wallet:
+  distribution:
+    refresh-job: 5m
