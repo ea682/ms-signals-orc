@@ -234,7 +234,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                             || gte(s.getDecisionMetricScalping(), 70)
                             || gte(s.getDecisionMetricAggressive(), 70);
                 })
-                .filter(dto -> dayzLimit <= dto.getWallet().getHistoryDays())
+                .filter(dto -> Math.floor(dto.getWallet().getHistoryDays()) >= dayzLimit)
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
                 .limit(maxWallets)
                 .map(this::copyForAllocation)
@@ -256,7 +256,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private static double decisionScore(MetricaWalletDto dto) {
         if (dto == null || dto.getScoring() == null) return 0.0;
 
-        Integer v = dto.getScoring().getDecisionMetricConservative();
+        Integer v = dto.getScoring().getDecisionMetric();
         return v != null ? v.doubleValue() : 0.0;
     }
 
