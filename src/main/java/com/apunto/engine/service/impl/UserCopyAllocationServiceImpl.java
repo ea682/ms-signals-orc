@@ -37,7 +37,6 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
         final OffsetDateTime now = OffsetDateTime.now();
 
-        // newDist: walletId -> (pct, score)
         final Map<String, Dist> newDist = new HashMap<>();
         for (MetricaWalletDto dto : candidates) {
             if (dto == null || dto.getWallet() == null) continue;
