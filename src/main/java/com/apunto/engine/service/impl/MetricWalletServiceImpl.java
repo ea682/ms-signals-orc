@@ -46,8 +46,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
-            @Value("${metric-wallet.history.limit:30}") int historyLimit,
-            @Value("${metric-wallet.history.dayz:15}") int dayzLimit,
+            @Value("${metric-wallet.history.limit:100}") int historyLimit,
+            @Value("${metric-wallet.history.dayz:20}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
@@ -76,7 +76,12 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     @Override
     public List<MetricaWalletDto> getMetricWallets(int maxWallets) {
-        return getMetricWallets(maxWallets, 0.90, 0.50);
+        return getMetricWallets(maxWallets, 0.95, 0.50);
+    }
+
+    @Override
+    public List<MetricaWalletDto> getCandidates(int maxCandidates) {
+        return List.of();
     }
 
     public List<MetricaWalletDto> getMetricWallets(int maxWallets, double maxCapitalToUse, double maxPerWallet) {
