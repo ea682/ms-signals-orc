@@ -6,4 +6,5 @@ import java.util.List;
 
 public interface MetricWalletService {
     List<MetricaWalletDto> getMetricWallets(int maxWallets);
+    List<MetricaWalletDto> getCandidates(int maxCandidates);
 }
