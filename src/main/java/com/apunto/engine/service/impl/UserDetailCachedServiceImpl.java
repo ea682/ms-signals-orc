@@ -24,7 +24,7 @@ public class UserDetailCachedServiceImpl implements UserDetailCachedService {
     @Override
     public synchronized List<UserDetailDto> getUsers() {
         if (cache == null || isExpired()) {
-            cache = userDetailService.findAll();
+            cache = userDetailService.findAllActive();
             lastUpdate = Instant.now();
         }
         return cache;

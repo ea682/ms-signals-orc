@@ -2,6 +2,7 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.client.MetricWalletsInfoClient;
 import com.apunto.engine.dto.client.MetricaWalletDto;
+import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -17,10 +18,13 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -75,39 +79,91 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     }
 
     @Override
-    public List<MetricaWalletDto> getMetricWallets(int maxWallets) {
-        return getMetricWallets(maxWallets, 0.95, 0.50);
+    public List<MetricaWalletDto> getMetricWallets() {
+        return getMetricWallets(0.95, 0.50);
     }
 
     @Override
-    public List<MetricaWalletDto> getCandidates(int maxCandidates) {
-        return List.of();
+    public List<MetricaWalletDto> getCandidatesUser(UUID idUser) {
+        if (idUser == null) return List.of();
+
+        // 1) Fuente de verdad de las wallets permitidas + distribución (allocation_pct) por usuario.
+        //    OJO: aquí NO recalculamos distribución. Eso lo hace el job y queda persistido.
+        final List<UserCopyAllocationEntity> allocations = userCopyAllocationService.getWalletUserId(idUser);
+        if (allocations == null || allocations.isEmpty()) {
+            return List.of();
+        }
+
+        // 2) Métricas cacheadas (solo informativas): scoring, capitalRequired, etc.
+        //    Importante: NO mutar lo cacheado -> devolvemos COPIAS.
+        final HistoryResult history = getHistory(historyLimit);
+        final List<MetricaWalletDto> historyValues = history == null ? List.of() : history.values();
+
+        final Map<String, MetricaWalletDto> metricByWalletId = new HashMap<>();
+        for (MetricaWalletDto m : historyValues) {
+            if (m == null || m.getWallet() == null || m.getWallet().getIdWallet() == null) continue;
+            metricByWalletId.put(normalizeWalletId(m.getWallet().getIdWallet()), m);
+        }
+
+        return allocations.stream()
+                .map(a -> {
+                    final String walletId = normalizeWalletId(a.getWalletId());
+                    if (walletId == null) return null;
+
+                    final double allocationPct = Optional.ofNullable(a.getAllocationPct())
+                            .map(java.math.BigDecimal::doubleValue)
+                            .orElse(0.0);
+
+                    final MetricaWalletDto cached = metricByWalletId.get(walletId);
+                    if (cached != null) {
+                        MetricaWalletDto out = new MetricaWalletDto();
+                        BeanUtils.copyProperties(cached, out);
+                        // capitalShare = distribución real para sizing (NO tocar el cache).
+                        out.setCapitalShare(allocationPct);
+                        return out;
+                    }
+
+                    // Caso: wallet asignada, pero no hay métrica en cache (sirve para logs/diagnóstico).
+                    // El Engine podrá distinguir "asignada pero sin métrica" vs "no asignada".
+                    return MetricaWalletDto.builder()
+                            .wallet(MetricaWalletDto.WalletDto.builder().idWallet(walletId).build())
+                            .capitalShare(allocationPct)
+                            .build();
+                })
+                .filter(Objects::nonNull)
+                .toList();
     }
 
-    public List<MetricaWalletDto> getMetricWallets(int maxWallets, double maxCapitalToUse, double maxPerWallet) {
+    private static String normalizeWalletId(String raw) {
+        if (raw == null) return null;
+        String t = raw.trim();
+        if (t.isEmpty()) return null;
+        return t.toLowerCase();
+    }
+
+    public List<MetricaWalletDto> getMetricWallets(double maxCapitalToUse, double maxPerWallet) {
         final long startNs = System.nanoTime();
 
-        if (maxWallets <= 0) return List.of();
         validateAllocationInputs(maxCapitalToUse, maxPerWallet);
 
-        HistoryResult history = getHistory(historyLimit, dayzLimit);
+        HistoryResult history = getHistory(historyLimit);
 
         if (history.values().isEmpty()) {
             long durationMs = elapsedMs(startNs);
             log.warn(
-                    "event=metric_wallets.empty_history maxWallets={} limit={} durationMs={} source={} cacheStats={}",
-                    maxWallets, historyLimit, durationMs, history.source(), allPositionHistoryCache.stats()
+                    "event=metric_wallets.empty_history limit={} durationMs={} source={} cacheStats={}",
+                    historyLimit, durationMs, history.source(), allPositionHistoryCache.stats()
             );
             return List.of();
         }
 
-        List<MetricaWalletDto> candidates = selectCandidates(history.values(), maxWallets, dayzLimit);
+        List<MetricaWalletDto> candidates = selectCandidates(history.values(), dayzLimit);
 
         if (candidates.isEmpty()) {
             long durationMs = elapsedMs(startNs);
             log.info(
-                    "event=metric_wallets.no_candidates maxWallets={} limit={} baseSize={} durationMs={} source={}",
-                    maxWallets, historyLimit, history.values().size(), durationMs, history.source()
+                    "event=metric_wallets.no_candidates limit={} baseSize={} durationMs={} source={}",
+                    historyLimit, history.values().size(), durationMs, history.source()
             );
             return List.of();
         }
@@ -116,9 +172,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         validateLimits(candidates, maxPerWallet, maxCapitalToUse);
 
         try {
-            userCopyAllocationService.syncDistribution(maxWallets, candidates);
+            userCopyAllocationService.syncDistribution(candidates);
         } catch (Exception ex) {
-            log.warn("event=user_copy_allocation.sync_failed maxWallets={} err={}", maxWallets, safeErr(ex));
+            log.warn("event=user_copy_allocation.sync_failed err={}", safeErr(ex));
         }
 
         double totalShare = candidates.stream().mapToDouble(MetricaWalletDto::getCapitalShare).sum();
@@ -126,14 +182,14 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         if (durationMs >= slowThreshold.toMillis()) {
             log.warn(
-                    "event=metric_wallets.slow maxWallets={} limit={} baseSize={} candidates={} totalShare={} durationMs={} source={} cacheStats={}",
-                    maxWallets, historyLimit, history.values().size(), candidates.size(), totalShare, durationMs, history.source(),
+                    "event=metric_wallets.slow limit={} baseSize={} candidates={} totalShare={} durationMs={} source={} cacheStats={}",
+                    historyLimit, history.values().size(), candidates.size(), totalShare, durationMs, history.source(),
                     allPositionHistoryCache.stats()
             );
         } else {
             log.debug(
-                    "event=metric_wallets.ok maxWallets={} limit={} baseSize={} candidates={} totalShare={} durationMs={} source={}",
-                    maxWallets, historyLimit, history.values().size(), candidates.size(), totalShare, durationMs, history.source()
+                    "event=metric_wallets.ok limit={} baseSize={} candidates={} totalShare={} durationMs={} source={}",
+                    historyLimit, history.values().size(), candidates.size(), totalShare, durationMs, history.source()
             );
         }
 
@@ -203,7 +259,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return resp;
     }
 
-    private HistoryResult getHistory(int limit, int dayz) {
+    private HistoryResult getHistory(int limit) {
         try {
             List<MetricaWalletDto> v = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(List.of());
             if (!v.isEmpty()) return new HistoryResult(v, "cache");
@@ -227,7 +283,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return new HistoryResult(List.of(), "empty");
     }
 
-    private List<MetricaWalletDto> selectCandidates(List<MetricaWalletDto> base, int maxWallets, int dayzLimit) {
+    private List<MetricaWalletDto> selectCandidates(List<MetricaWalletDto> base, int dayzLimit) {
         return base.stream()
                 .filter(Objects::nonNull)
                 .filter(dto -> dto.getScoring() != null)
@@ -241,7 +297,6 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 })
                 .filter(dto -> Math.floor(dto.getWallet().getHistoryDays()) >= dayzLimit)
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
-                .limit(maxWallets)
                 .map(this::copyForAllocation)
                 .collect(Collectors.toList());
     }

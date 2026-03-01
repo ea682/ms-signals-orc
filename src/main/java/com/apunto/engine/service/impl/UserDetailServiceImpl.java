@@ -25,13 +25,13 @@ public class UserDetailServiceImpl implements UserDetailService {
     private final UserApiKeyRepository userApiKeyRepository;
 
     @Override
-    public List<UserDetailDto> findAll() {
+    public List<UserDetailDto> findAllActive() {
         List<UserDetailDto> usersDetailDtos = new ArrayList<>();
         List<UserEntity>  users = userRepository.findAll();
 
         for( UserEntity user : users ) {
 
-            DetailUserEntity detailUserEntity = detailUserRepository.findByUser_Id(user.getId());
+            DetailUserEntity detailUserEntity = detailUserRepository.findByUser_Id_AndUserActive(user.getId(), Boolean.TRUE);
             UserApiKeyEntity userApiKeyEntity = userApiKeyRepository.findByUser_Id(user.getId());
 
             if(detailUserEntity.isUserActive() && detailUserEntity.isApiKeyBinar()){
