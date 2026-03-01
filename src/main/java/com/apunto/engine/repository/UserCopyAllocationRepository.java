@@ -5,10 +5,14 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.UUID;
 
 @Repository
 public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllocationEntity, Long> {
 
-    List<UserCopyAllocationEntity> findAllByMaxWalletAndWalletIdIn(Integer maxWallet, List<String> walletIds);
-    List<UserCopyAllocationEntity> findAllByMaxWalletAndEndsAtIsNull(Integer maxWallet);
+    List<UserCopyAllocationEntity> findAllByStatus(UserCopyAllocationEntity.Status status);
+    List<UserCopyAllocationEntity> findAllByIdUser(UUID idUser);
+    List<UserCopyAllocationEntity> findAllByIdUserAndWalletIdIn(UUID idUser, List<String> walletIds);
+    List<UserCopyAllocationEntity> findAllByIdUserAndEndsAtIsNull(UUID idUser);
+
 }

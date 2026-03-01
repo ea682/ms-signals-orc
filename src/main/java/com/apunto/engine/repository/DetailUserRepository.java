@@ -7,5 +7,5 @@ import java.util.UUID;
 
 public interface DetailUserRepository extends JpaRepository<DetailUserEntity, UUID> {
 
-    DetailUserEntity findByUser_Id(UUID userId);
+    DetailUserEntity findByUser_Id_AndUserActive(UUID user_id, boolean userActive);
 }

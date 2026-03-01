@@ -1,12 +1,25 @@
 package com.apunto.engine.entity;
 
 import com.apunto.engine.entity.converter.UserCopyAllocationStatusConverter;
-import jakarta.persistence.*;
-import lombok.*;
+import jakarta.persistence.Column;
+import jakarta.persistence.Convert;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.PrePersist;
+import jakarta.persistence.PreUpdate;
+import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.OffsetDateTime;
+import java.util.UUID;
 
 @Entity
 @Data
@@ -15,10 +28,9 @@ import java.time.OffsetDateTime;
 @AllArgsConstructor
 @Table(
         name = "user_copy_allocation",
-        schema = "futuros_operaciones",
         uniqueConstraints = @UniqueConstraint(
                 name = "uq_user_copy_allocation_max_wallet_wallet",
-                columnNames = {"max_wallet", "wallet_id"}
+                columnNames = {"wallet_id"}
         )
 )
 public class UserCopyAllocationEntity {
@@ -27,8 +39,8 @@ public class UserCopyAllocationEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "max_wallet", nullable = false)
-    private Integer maxWallet;
+    @Column(name = "id_user", nullable = false)
+    private UUID idUser;
 
     @Column(name = "wallet_id", nullable = false, length = 128)
     private String walletId;

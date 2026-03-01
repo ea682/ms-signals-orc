@@ -26,7 +26,7 @@ spring:
       auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:true}
 
     consumer:
-      group-id: ${KAFKA_CONSUMER_GROUP:operaciones-consumer}
+      group-id: ${KAFKA_CONSUMER_GROUP:operaciones-consumer-debug-erik}
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
@@ -42,7 +42,7 @@ spring:
         spring.json.add.type.headers: false
 
   datasource:
-    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=futuros_operaciones_dev}
+    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=${DB_SCHEMA:futuros_operaciones_dev}}
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:5450940}
 
@@ -54,7 +54,7 @@ spring:
         physical-strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
     properties:
       hibernate:
-        default_schema: ${DB_SCHEMA:futuros_operaciones}
+        default_schema: ${DB_SCHEMA:futuros_operaciones_dev}
         jdbc.time_zone: UTC
         format_sql: true
 
@@ -92,4 +92,4 @@ engine:
 
 metric-wallet:
   distribution:
-    refresh-job: 5m
+    refresh-job: 2m

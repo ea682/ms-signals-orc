@@ -9,7 +9,12 @@ import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.mapper.CopyTradingMapper;
-import com.apunto.engine.service.*;
+import com.apunto.engine.service.BinanceCopyExecutionService;
+import com.apunto.engine.service.BinanceEngineService;
+import com.apunto.engine.service.CopyOperationService;
+import com.apunto.engine.service.DistributedLockService;
+import com.apunto.engine.service.MetricWalletService;
+import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.IdempotencyKeyUtil;
 import com.apunto.engine.shared.enums.OrderType;
@@ -65,7 +70,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_OPEN_DUPLICATE_INMEM = "event=operation.open.duplicate_inmemory originId={} action=ignore";
     private static final String LOG_OPEN_SKIP_ALREADY = "event=operation.open.skip_already_processed originId={} userId={}";
     private static final String LOG_OPEN_NO_METRIC = "event=operation.open.no_metric originId={} userId={} idWallet={} maxWallet={}";
-    private static final String LOG_OPEN_SCHEDULED = "event=operation.open.scheduled originId={} users={} scheduled={} uniqueMaxWallets={} delayBetweenMs={}";
+    private static final String LOG_OPEN_WALLET_NOT_ALLOCATED = "event=operation.open.skip_wallet_not_allocated originId={} userId={} wallet={}";
+    private static final String LOG_OPEN_SCHEDULED = "event=operation.open.scheduled originId={} users={} scheduled={} uniqueUsers={} delayBetweenMs={}";
 
     private static final String LOG_CLOSE_NO_COPIES = "event=operation.close.no_copies originId={} users={}";
     private static final String LOG_CLOSE_COPY_MISSING = "event=operation.close.copy_missing originId={} userId={}";
@@ -176,10 +182,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final long baseTime = System.currentTimeMillis();
         int scheduled = 0;
 
-        final Map<Integer, List<MetricaWalletDto>> metricsByMaxWallet = new HashMap<>();
+        // Cache simple en memoria durante esta ejecución para no pegarle N veces al mismo user.
+        final Map<UUID, List<MetricaWalletDto>> metricsByUser = new HashMap<>();
 
         for (UserDetailDto userDetail : usersDetail) {
-            final String userId = userDetail.getUser().getId().toString();
+            final UUID userUuid = userDetail.getUser().getId();
+            final String userId = userUuid.toString();
 
             if (alreadyCopiedUsers.contains(userId)) {
                 log.info(LOG_OPEN_SKIP_ALREADY, originId, userId);
@@ -187,15 +195,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             final int maxWallet = userDetail.getDetail().getMaxWallet();
-            final List<MetricaWalletDto> metrics = metricsByMaxWallet.computeIfAbsent(
-                    maxWallet,
-                    mw -> normalizeCapitalShares(metricWalletService.getMetricWallets(mw))
-            );
+
+            // 1) Wallets permitidas + distribución real por usuario (user_copy_allocation)
+            // 2) Métricas (cache) solo informativas. NO se mutan: el service entrega copias.
+            final List<MetricaWalletDto> metrics = metricsByUser.computeIfAbsent(userUuid, metricWalletService::getCandidatesUser);
 
             final MetricaWalletDto walletMetric = getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
 
             if (walletMetric == null) {
-                log.warn(LOG_OPEN_NO_METRIC, originId, userId, event.getOperacion().getIdCuenta(), maxWallet);
+                // La wallet que originó la operación no está dentro de las asignadas al usuario (o no hay asignación vigente).
+                log.info(LOG_OPEN_WALLET_NOT_ALLOCATED, originId, userId, event.getOperacion().getIdCuenta());
+                continue;
+            }
+
+            // Wallet asignada pero sin métrica cacheada (caso común cuando el upstream está caído o recién ingresó).
+            if (walletMetric.getScoring() == null) {
+                log.warn(LOG_OPEN_NO_METRIC, originId, userId, walletMetric.getWallet().getIdWallet(), maxWallet);
                 continue;
             }
 
@@ -217,7 +232,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             scheduled++;
         }
 
-        log.info(LOG_OPEN_SCHEDULED, originId, usersDetail.size(), scheduled, metricsByMaxWallet.size(), delayBetweenMs);
+        log.info(LOG_OPEN_SCHEDULED, originId, usersDetail.size(), scheduled, metricsByUser.size(), delayBetweenMs);
     }
 
     @Override
@@ -533,7 +548,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 order.getOrderId());
     }
 
-    // 4) prepareOpenOperation CORREGIDA + baseCapitalCap + quantity==ZERO handling + PreparedOpen(8 args)
     private PreparedOpen prepareOpenOperation(OperacionEvent event,
                                               UserDetailDto userDetail,
                                               MetricaWalletDto walletMetric) {
@@ -546,7 +560,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String userId = userDetail.getUser().getId().toString();
         final String walletId = walletMetric.getWallet().getIdWallet();
 
-        // capitalShare clamp (0..1)
         Double capitalShareRaw = walletMetric.getCapitalShare();
         if (capitalShareRaw == null || !Double.isFinite(capitalShareRaw)) {
             log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
@@ -571,7 +584,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .filter(required -> required > 0)
                 .orElse(DEFAULT_BASE_CAPITAL);
 
-        // cap al denominador (evita ballenas incopiables)
         if (Double.isFinite(sizingBaseCapitalCap) && sizingBaseCapitalCap > 0 && baseCapital > sizingBaseCapitalCap) {
             baseCapital = sizingBaseCapitalCap;
         }
@@ -621,7 +633,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return null;
         }
 
-        // Buffer notional (cap 30%)
         final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
         final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
 
@@ -724,18 +735,25 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
 
     private MetricaWalletDto resolveWalletMetricOrThrowSkip(OperacionEvent event, UserDetailDto userDetail) {
-        final int maxWallet = userDetail.getDetail().getMaxWallet();
+        // OJO: el id de detalle (detail_user) NO es el id del usuario.
+        // Necesitamos el UUID real de usuario para consultar user_copy_allocation.
+        final UUID idUser = userDetail.getUser().getId();
         final List<MetricaWalletDto> metrics =
-                normalizeCapitalShares(metricWalletService.getMetricWallets(maxWallet));
+                normalizeCapitalShares(metricWalletService.getCandidatesUser(idUser));
 
         final MetricaWalletDto metric = getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
         if (metric == null) {
-            throw new SkipExecutionException("No existe métrica para wallet=" + event.getOperacion().getIdCuenta() + " (maxWallet=" + maxWallet + ")");
+            throw new SkipExecutionException("No existe métrica para wallet=" + event.getOperacion().getIdCuenta());
         }
 
         final Double share = metric.getCapitalShare();
         if (share == null || share <= 0) {
             throw new SkipExecutionException("capitalShare inválido para wallet=" + metric.getWallet().getIdWallet());
+        }
+
+        // Caso: asignación existe, pero no tenemos métrica (cache upstream caído / wallet recién ingresada)
+        if (metric.getScoring() == null) {
+            throw new SkipExecutionException("No existe métrica cacheada para wallet=" + metric.getWallet().getIdWallet());
         }
 
         return metric;
@@ -746,7 +764,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String w = idWalletOperation.trim();
         return metrics.stream()
-                .filter(m -> m.getWallet().getIdWallet() != null && m.getWallet().getIdWallet().trim().equalsIgnoreCase(w))
+                .filter(m -> m != null
+                        && m.getWallet() != null
+                        && m.getWallet().getIdWallet() != null
+                        && m.getWallet().getIdWallet().trim().equalsIgnoreCase(w))
                 .findFirst()
                 .orElse(null);
     }
