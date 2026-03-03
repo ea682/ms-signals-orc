@@ -28,10 +28,18 @@ public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
     @Override
     public <T> T withLock(String key, Duration maxWait, Supplier<T> action) {
         if (key == null || key.isBlank()) {
-            throw new SkipExecutionException("lock_key_blank");
+            throw new SkipExecutionException(
+                    "lock_key_blank",
+                    "Lock key vacío/null",
+                    null
+            );
         }
         if (action == null) {
-            throw new SkipExecutionException("lock_action_null");
+            throw new SkipExecutionException(
+                    "lock_action_null",
+                    "Acción del lock es null",
+                    com.apunto.engine.shared.util.LogFmt.kv("key", key)
+            );
         }
 
         final long waitMs = maxWait == null ? 0L : Math.max(0L, maxWait.toMillis());
@@ -51,7 +59,11 @@ public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
             }
 
             if (System.currentTimeMillis() >= deadline) {
-                throw new SkipExecutionException("lock_timeout");
+                throw new SkipExecutionException(
+                        "lock_timeout",
+                        "Timeout esperando advisory lock",
+                        com.apunto.engine.shared.util.LogFmt.kv("key", key, "maxWaitMs", waitMs)
+                );
             }
 
             sleep(DEFAULT_RETRY_DELAY_MS);
@@ -81,7 +93,11 @@ public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
             Thread.sleep(ms);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            throw new SkipExecutionException("lock_interrupted");
+            throw new SkipExecutionException(
+                    "lock_interrupted",
+                    "Interrumpido esperando advisory lock",
+                    null
+            );
         }
     }
 }

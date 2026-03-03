@@ -76,8 +76,20 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         if (dto.getApiKey() == null || dto.getApiKey().isBlank()) throw new SkipExecutionException(ERR_APIKEY_EMPTY);
         if (dto.getSecret() == null || dto.getSecret().isBlank()) throw new SkipExecutionException(ERR_SECRET_EMPTY);
         if (dto.getSymbol() == null || dto.getSymbol().isBlank()) throw new SkipExecutionException(ERR_SYMBOL_EMPTY);
-        if (dto.getSide() == null) throw new SkipExecutionException("side requerido");
-        if (dto.getType() == null) throw new SkipExecutionException("type requerido");
+        if (dto.getSide() == null) {
+            throw new SkipExecutionException(
+                    "order_side_missing",
+                    "side requerido",
+                    com.apunto.engine.shared.util.LogFmt.kv("symbol", dto.getSymbol())
+            );
+        }
+        if (dto.getType() == null) {
+            throw new SkipExecutionException(
+                    "order_type_missing",
+                    "type requerido",
+                    com.apunto.engine.shared.util.LogFmt.kv("symbol", dto.getSymbol())
+            );
+        }
         if (dto.getQuantity() == null || dto.getQuantity().isBlank()) throw new SkipExecutionException(ERR_QTY_EMPTY);
         if (dto.getPositionSide() == null) throw new SkipExecutionException(ERR_POSITIONSIDE_EMPTY);
     }
