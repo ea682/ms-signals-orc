@@ -154,8 +154,16 @@ public class CopyExecutionJobWorker {
 
         } catch (SkipExecutionException skip) {
             jobService.markDead(job, CopyJobErrorCategory.SKIP.name(), safeMsg(skip));
-            log.info("event=copy.job.skipped id={} originId={} userId={} action={} attempt={} workerId={} reason={}",
-                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt(), workerId, safeMsg(skip));
+            log.info("event=copy.job.skipped id={} originId={} userId={} action={} attempt={} workerId={} reasonCode={} reason=\"{}\" details=\"{}\"",
+                    job.getId(),
+                    job.getOriginId(),
+                    job.getUserId(),
+                    job.getAction(),
+                    job.getAttempt(),
+                    workerId,
+                    skip.getReasonCode(),
+                    safeMsgForLog(skip.getReason()),
+                    safeMsgForLog(skip.getDetails()));
 
         } catch (Exception ex) {
             handleFailure(job, ex);
@@ -232,7 +240,11 @@ public class CopyExecutionJobWorker {
                         && u.getUser().getId().toString().equals(userId))
                 .findFirst();
 
-        return user.orElseThrow(() -> new SkipExecutionException("Usuario no existe en cache: userId=" + userId));
+        return user.orElseThrow(() -> new SkipExecutionException(
+                "user_cache_miss",
+                "Usuario no existe en cache",
+                com.apunto.engine.shared.util.LogFmt.kv("userId", userId)
+        ));
     }
 
     private void putJobMdc(CopyExecutionJobEntity job) {
@@ -265,6 +277,11 @@ public class CopyExecutionJobWorker {
         String m = t.getMessage();
         if (m == null) return t.getClass().getSimpleName();
         return m.length() > 4000 ? m.substring(0, 4000) : m;
+    }
+
+    private String safeMsgForLog(String s) {
+        if (s == null) return "";
+        return s.length() > 4000 ? s.substring(0, 4000) : s;
     }
 
     private String buildWorkerId() {

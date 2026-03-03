@@ -343,13 +343,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String walletId = walletMetric.getWallet().getIdWallet();
 
         if (!passesWalletFilters(walletMetric)) {
-            throw new SkipExecutionException("wallet_filters_block");
+            throw new SkipExecutionException(
+                    "wallet_filters_block",
+                    "Wallet bloqueada por filtros (scoring/exposición/capacidad)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletMetric.getWallet() == null ? null : walletMetric.getWallet().getIdWallet(),
+                            "capitalShare", walletMetric.getCapitalShare(),
+                            "score", walletMetric.getScoring() == null ? null : walletMetric.getScoring().getDecisionMetric()
+                    )
+            );
         }
 
         final PreparedOpen prepared = prepareOpenOperation(event, userDetail, walletMetric);
-        if (prepared == null) {
-            throw new SkipExecutionException("No se pudo preparar la operación");
-        }
 
         final String lockKey = distLockKey(userId, walletId);
 
@@ -379,7 +384,27 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         prepared.marginRequired.toPlainString(),
                         prepared.walletMarginBudget.toPlainString(),
                         usedFromDb.toPlainString());
-                throw new SkipExecutionException("Sin presupuesto/margen disponible");
+
+                final BigDecimal available = hardCap.subtract(usedFromDb).subtract(reserve);
+                final BigDecimal missing = usedFromDb.add(prepared.marginRequired).add(reserve).subtract(hardCap);
+
+                throw new SkipExecutionException(
+                        "budget_insufficient",
+                        "Fondos insuficientes: falta " + missing.max(ZERO).toPlainString()
+                                + " de margen (requerido=" + prepared.marginRequired.toPlainString()
+                                + ", disponible=" + available.max(ZERO).toPlainString() + ")",
+                        com.apunto.engine.shared.util.LogFmt.kv(
+                                "wallet", walletId,
+                                "symbol", prepared.symbol,
+                                "marginRequired", prepared.marginRequired,
+                                "walletMarginBudget", prepared.walletMarginBudget,
+                                "usedMargin", usedFromDb,
+                                "reserve", reserve,
+                                "hardCap", hardCap,
+                                "available", available,
+                                "missingMargin", missing
+                        )
+                );
             }
 
             boolean orderPlaced = false;
@@ -507,17 +532,41 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         // Necesitamos el walletId para el lock; lo leemos primero.
         final CopyOperationDto initial = copyOperationService.findOperationForUser(originId, userId);
-        if (initial == null) throw new SkipExecutionException("copy_missing");
+        if (initial == null) {
+            throw new SkipExecutionException(
+                    "copy_missing",
+                    "No existe operación copiada para cerrar (no está persistida)",
+                    com.apunto.engine.shared.util.LogFmt.kv("originId", originId, "userId", userId)
+            );
+        }
 
         final String walletId = initial.getIdWalletOrigin();
-        if (walletId == null || walletId.isBlank()) throw new SkipExecutionException("wallet_missing");
+        if (walletId == null || walletId.isBlank()) {
+            throw new SkipExecutionException(
+                    "wallet_missing",
+                    "Wallet faltante en operación copiada",
+                    com.apunto.engine.shared.util.LogFmt.kv("originId", originId, "userId", userId)
+            );
+        }
 
         final String lockKey = distLockKey(userId, walletId);
 
         distributedLockService.withLock(lockKey, Duration.ofSeconds(120), () -> {
             final CopyOperationDto copyOperation = copyOperationService.findOperationForUser(originId, userId);
-            if (copyOperation == null) throw new SkipExecutionException("copy_missing");
-            if (!copyOperation.isActive()) throw new SkipExecutionException("copy_inactive");
+            if (copyOperation == null) {
+                throw new SkipExecutionException(
+                        "copy_missing",
+                        "No existe operación copiada para cerrar (no está persistida)",
+                        com.apunto.engine.shared.util.LogFmt.kv("originId", originId, "userId", userId, "wallet", walletId)
+                );
+            }
+            if (!copyOperation.isActive()) {
+                throw new SkipExecutionException(
+                        "copy_inactive",
+                        "Operación copiada está inactiva/cerrada",
+                        com.apunto.engine.shared.util.LogFmt.kv("originId", originId, "userId", userId, "wallet", walletId)
+                );
+            }
 
             executeCloseOperation(copyOperation, userDetail);
             return null;
@@ -563,18 +612,35 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         Double capitalShareRaw = walletMetric.getCapitalShare();
         if (capitalShareRaw == null || !Double.isFinite(capitalShareRaw)) {
             log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
-            return null;
+            throw new SkipExecutionException(
+                    "metric_invalid",
+                    "Métrica inválida: capitalShare es null o no finito",
+                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "capitalShare", capitalShareRaw)
+            );
         }
         double capitalShare = Math.max(0.0, Math.min(1.0, capitalShareRaw));
         if (capitalShare <= 0.0) {
             log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
-            return null;
+            throw new SkipExecutionException(
+                    "metric_invalid",
+                    "Métrica inválida: capitalShare <= 0",
+                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "capitalShare", capitalShare)
+            );
         }
 
         final BigDecimal walletMarginBudget = BigDecimal.valueOf(userDetail.getDetail().getCapital() * capitalShare);
         if (walletMarginBudget.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_BUDGET, originId, userId, walletId);
-            return null;
+            throw new SkipExecutionException(
+                    "budget_invalid",
+                    "Presupuesto inválido: walletMarginBudget <= 0",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "capitalTotal", userDetail.getDetail().getCapital(),
+                            "capitalShare", capitalShare,
+                            "walletMarginBudget", walletMarginBudget
+                    )
+            );
         }
 
         final Double capitalRequired =
@@ -591,7 +657,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal sizeOriginal = event.getOperacion().getSize();
         if (sizeOriginal == null || sizeOriginal.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_SIZE, originId, userId, walletId);
-            return null;
+            throw new SkipExecutionException(
+                    "size_invalid",
+                    "Operación inválida: size <= 0",
+                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "size", sizeOriginal)
+            );
         }
 
         final BigDecimal baseCapitalBd = BigDecimal.valueOf(baseCapital);
@@ -605,7 +675,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
         if (fractionOfBaseUsed.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_FRACTION, originId, userId, walletId, fractionOfBaseUsed.toPlainString());
-            return null;
+            throw new SkipExecutionException(
+                    "fraction_invalid",
+                    "Sizing inválido: fracción calculada <= 0",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "fraction", fractionOfBaseUsed,
+                            "sizeOriginal", sizeOriginal,
+                            "baseCapital", baseCapital
+                    )
+            );
         }
 
         final BigDecimal marginThisTrade = walletMarginBudget.multiply(fractionOfBaseUsed);
@@ -613,13 +692,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal entryPrice = event.getOperacion().getPrecioEntrada();
         if (entryPrice == null || entryPrice.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_ENTRY, originId, userId, walletId);
-            return null;
+            throw new SkipExecutionException(
+                    "entry_price_invalid",
+                    "Precio de entrada inválido (<=0)",
+                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "entryPrice", entryPrice)
+            );
         }
 
         final String symbol = event.getOperacion().getParSymbol();
         if (symbol == null || symbol.isBlank()) {
             log.warn(LOG_PREP_INVALID_SYMBOL, originId, userId, walletId);
-            return null;
+            throw new SkipExecutionException(
+                    "symbol_blank",
+                    "Símbolo vacío/null",
+                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "symbol", symbol)
+            );
         }
 
         final int leverage = Math.min(
@@ -630,7 +717,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal notionalMax = marginThisTrade.multiply(BigDecimal.valueOf(leverage));
         if (notionalMax.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_SKIP_NOTIONAL_ZERO, originId, userId, walletId, symbol);
-            return null;
+            throw new SkipExecutionException(
+                    "notional_max_zero",
+                    "Notional máximo <= 0 (no hay margen para operar)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "marginThisTrade", marginThisTrade,
+                            "leverage", leverage,
+                            "notionalMax", notionalMax
+                    )
+            );
         }
 
         final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
@@ -639,36 +736,113 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BinanceFuturesSymbolInfoClientDto symbolInfo = getSymbolsBySymbol().get(symbol.toUpperCase());
         if (symbolInfo == null) {
             log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
-            return null;
+            throw new SkipExecutionException(
+                    "symbol_rules_missing",
+                    "No existen reglas de Binance para el símbolo (cache/endpoint sin data)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "targetNotional", targetNotional,
+                            "notionalMax", notionalMax
+                    )
+            );
         }
 
         final SymbolRules rules = extractRules(symbolInfo);
         if (rules == null || rules.minNotional == null) {
             log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
-            return null;
+            throw new SkipExecutionException(
+                    "symbol_rules_invalid",
+                    "Reglas de Binance inválidas/incompletas (minNotional null)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "targetNotional", targetNotional
+                    )
+            );
         }
 
         if (targetNotional.compareTo(rules.minNotional) < 0) {
             log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
-            return null;
+            final BigDecimal missing = rules.minNotional.subtract(targetNotional);
+            throw new SkipExecutionException(
+                    "notional_too_small",
+                    "Operación demasiado pequeña: faltan " + missing.max(ZERO).toPlainString()
+                            + " de notional para minNotional=" + rules.minNotional.toPlainString(),
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "candidateNotional", targetNotional,
+                            "minNotional", rules.minNotional,
+                            "missingNotional", missing,
+                            "entryPrice", entryPrice,
+                            "leverage", leverage,
+                            "notionalMax", notionalMax,
+                            "marginThisTrade", marginThisTrade,
+                            "walletMarginBudget", walletMarginBudget,
+                            "fraction", fractionOfBaseUsed,
+                            "bufPct", buf
+                    )
+            );
         }
 
         BigDecimal quantity = targetNotional.divide(entryPrice, rules.qtyScale, RoundingMode.DOWN);
         if (quantity.compareTo(ZERO) <= 0) {
             log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
-            return null;
+            throw new SkipExecutionException(
+                    "qty_zero",
+                    "Cantidad calculada es 0 (por escala/rounding)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "candidateNotional", targetNotional,
+                            "entryPrice", entryPrice,
+                            "qtyScale", rules.qtyScale
+                    )
+            );
         }
 
         quantity = adjustQuantityToBinanceRules(symbol, quantity, entryPrice, rules, notionalMax);
         if (quantity.compareTo(ZERO) <= 0) {
             log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
-            return null;
+            throw new SkipExecutionException(
+                    "qty_adjusted_zero",
+                    "Cantidad quedó en 0 tras aplicar reglas Binance (step/minQty/precision/budget)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "qtyRaw", quantity,
+                            "entryPrice", entryPrice,
+                            "notionalMax", notionalMax,
+                            "stepSize", rules.stepSize,
+                            "minQty", rules.minQty,
+                            "qtyScale", rules.qtyScale
+                    )
+            );
         }
 
         final BigDecimal notionalFinal = quantity.multiply(entryPrice);
         if (notionalFinal.compareTo(rules.minNotional) < 0) {
             log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, notionalFinal.toPlainString());
-            return null;
+            final BigDecimal missing = rules.minNotional.subtract(notionalFinal);
+            throw new SkipExecutionException(
+                    "notional_too_small",
+                    "Operación demasiado pequeña tras ajuste: faltan " + missing.max(ZERO).toPlainString()
+                            + " de notional para minNotional=" + rules.minNotional.toPlainString(),
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "candidateNotional", targetNotional,
+                            "notionalFinal", notionalFinal,
+                            "minNotional", rules.minNotional,
+                            "missingNotional", missing,
+                            "entryPrice", entryPrice,
+                            "qtyFinal", quantity,
+                            "qtyScale", rules.qtyScale,
+                            "stepSize", rules.stepSize,
+                            "minQty", rules.minQty
+                    )
+            );
         }
 
         final BigDecimal safety = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
@@ -715,7 +889,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final PositionSide side = event.getOperacion().getTipoOperacion();
 
         if (side == null) {
-            throw new SkipExecutionException("tipoOperacion inválido/null");
+            throw new SkipExecutionException(
+                    "side_missing",
+                    "tipoOperacion inválido/null",
+                    com.apunto.engine.shared.util.LogFmt.kv("symbol", symbol)
+            );
         }
 
         final Side orderSide = (side.equals(PositionSide.LONG)) ? Side.BUY : Side.SELL;
@@ -743,17 +921,37 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final MetricaWalletDto metric = getWalletMetricForOperation(event.getOperacion().getIdCuenta(), metrics);
         if (metric == null) {
-            throw new SkipExecutionException("No existe métrica para wallet=" + event.getOperacion().getIdCuenta());
+            throw new SkipExecutionException(
+                    "metric_missing",
+                    "No existe métrica para la wallet asignada a la operación",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", event.getOperacion().getIdCuenta(),
+                            "user", idUser
+                    )
+            );
         }
 
         final Double share = metric.getCapitalShare();
         if (share == null || share <= 0) {
-            throw new SkipExecutionException("capitalShare inválido para wallet=" + metric.getWallet().getIdWallet());
+            throw new SkipExecutionException(
+                    "capital_share_invalid",
+                    "capitalShare inválido (<=0)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", metric.getWallet() == null ? null : metric.getWallet().getIdWallet(),
+                            "capitalShare", share
+                    )
+            );
         }
 
         // Caso: asignación existe, pero no tenemos métrica (cache upstream caído / wallet recién ingresada)
         if (metric.getScoring() == null) {
-            throw new SkipExecutionException("No existe métrica cacheada para wallet=" + metric.getWallet().getIdWallet());
+            throw new SkipExecutionException(
+                    "metric_cache_missing",
+                    "No existe scoring/métrica cacheada para la wallet (upstream caído o wallet recién ingresada)",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "wallet", metric.getWallet() == null ? null : metric.getWallet().getIdWallet()
+                    )
+            );
         }
 
         return metric;
