@@ -107,8 +107,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_CLOSE_INVALID_RESPONSE = "event=binance.close.invalid_response originId={} userId={} symbol={}";
     private static final String LOG_CLOSE_OK = "event=binance.close.ok originId={} userId={} symbol={} qty={} orderId={}";
     private static final int USER_LEVERAGE_MIN = 1;
-    private static final int USER_LEVERAGE_MAX = 10;
-    private static final int COPY_LEVERAGE_FIXED = 5;
+    private static final int USER_LEVERAGE_MAX = 20;
 
     private final ProcesBinanceService procesBinanceService;
     private final ThreadPoolTaskScheduler binanceTaskScheduler;
@@ -711,7 +710,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final int leverage = Math.min(
                 USER_LEVERAGE_MAX,
-                Math.max(USER_LEVERAGE_MIN, COPY_LEVERAGE_FIXED)
+                Math.max(USER_LEVERAGE_MIN, userDetail.getDetail().getLeverage())
         );
 
         final BigDecimal notionalMax = marginThisTrade.multiply(BigDecimal.valueOf(leverage));
