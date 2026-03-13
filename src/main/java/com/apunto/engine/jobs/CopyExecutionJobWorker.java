@@ -76,7 +76,7 @@ public class CopyExecutionJobWorker {
         this.workerId = buildWorkerId();
     }
 
-    @Scheduled(fixedDelayString = "${copy.job.worker.poll-ms:250}")
+    @Scheduled(fixedDelayString = "${copy.job.worker.poll-ms:0}")
     public void tick() {
         try {
             OffsetDateTime now = OffsetDateTime.now();

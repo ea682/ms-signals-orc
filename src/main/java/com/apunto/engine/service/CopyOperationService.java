@@ -1,8 +1,10 @@
 package com.apunto.engine.service;
 
 import com.apunto.engine.dto.CopyOperationDto;
+import com.apunto.engine.entity.CopyOperationEntity;
 
 import java.util.List;
+import java.util.Optional;
 
 public interface CopyOperationService {
     void newOperation(CopyOperationDto operation);
@@ -11,6 +13,7 @@ public interface CopyOperationService {
     CopyOperationDto findOperation(String idOrden);
 
     List<CopyOperationDto> findOperationsByOrigin(String idOrderOrigin);
+    Optional<CopyOperationEntity> findOperationByOrigin(String idOrderOrigin);
     CopyOperationDto findOperationForUser(String idOrderOrigin, String idUser);
     boolean existsByOriginAndUser(String idOrderOrigin, String idUser);
 
