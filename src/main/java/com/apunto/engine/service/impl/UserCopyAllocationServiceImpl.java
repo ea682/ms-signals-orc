@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -51,8 +52,10 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             return;
         }
 
+        final BigDecimal targetTotalPct = sumPositivePct(candidates);
+
         for (UserDetailDto user : users) {
-            if (user == null || user.getDetail() == null) continue;
+            if (user == null || user.getDetail() == null || user.getUser() == null) continue;
 
             final UUID idUser = user.getUser().getId();
             if (idUser == null) continue;
@@ -68,7 +71,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     ? candidates
                     : candidates.subList(0, maxWallet);
 
-            final Map<String, Dist> newDist = new HashMap<>();
+            // Mantener orden para que el ajuste final caiga siempre en la última wallet válida.
+            final Map<String, Dist> newDist = new LinkedHashMap<>();
+
+            // Primero limpiar las wallets válidas del top.
+            final List<MetricaWalletDto> validTop = new ArrayList<>();
+            BigDecimal topTotalPct = ZERO;
+
             for (MetricaWalletDto dto : top) {
                 if (dto == null || dto.getWallet() == null) continue;
 
@@ -78,14 +87,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 final BigDecimal pct = safePct(dto.getCapitalShare());
                 if (pct.signum() <= 0) continue;
 
-                final Integer score = safeScore(dto);
-                newDist.put(walletId, new Dist(pct, score));
+                validTop.add(dto);
+                topTotalPct = topTotalPct.add(pct);
             }
 
+            topTotalPct = topTotalPct.setScale(6, RoundingMode.HALF_UP);
+
+            // Si no hay top válido, cerrar todo lo activo del usuario.
             final List<UserCopyAllocationEntity> existingActive =
                     repository.findAllByIdUserAndEndsAtIsNull(idUser);
 
-            if (newDist.isEmpty()) {
+            if (validTop.isEmpty() || topTotalPct.signum() <= 0 || targetTotalPct.signum() <= 0) {
                 for (UserCopyAllocationEntity e : existingActive) {
                     if (e == null) continue;
                     e.setStatus(UserCopyAllocationEntity.Status.CLOSED);
@@ -97,6 +109,34 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 log.debug("event=user_copy_allocation.sync_ok reason=empty_distribution user={} closed={}",
                         idUser, existingActive.size());
                 continue;
+            }
+
+            // Factor para reescalar el top al total original de candidates.
+            // Ej: si top suma 0.657324 y candidates suma 0.950000 => factor ≈ 1.445253...
+            final BigDecimal scaleFactor = targetTotalPct.divide(topTotalPct, 18, RoundingMode.HALF_UP);
+
+            BigDecimal accumulated = ZERO;
+
+            for (int i = 0; i < validTop.size(); i++) {
+                final MetricaWalletDto dto = validTop.get(i);
+                final String walletId = normalize(dto.getWallet().getIdWallet());
+                final BigDecimal originalPct = safePct(dto.getCapitalShare());
+                final Integer score = safeScore(dto);
+
+                final boolean isLast = (i == validTop.size() - 1);
+
+                BigDecimal scaledPct;
+                if (isLast) {
+                    // Ajuste final para cerrar exacto a 6 decimales.
+                    scaledPct = targetTotalPct.subtract(accumulated).setScale(6, RoundingMode.HALF_UP);
+                } else {
+                    scaledPct = originalPct.multiply(scaleFactor).setScale(6, RoundingMode.HALF_UP);
+                    accumulated = accumulated.add(scaledPct);
+                }
+
+                if (scaledPct.signum() <= 0) continue;
+
+                newDist.put(walletId, new Dist(scaledPct, score));
             }
 
             final List<String> newWalletIdList = new ArrayList<>(newDist.keySet());
@@ -126,8 +166,8 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                             .build();
                 }
 
-                entity.setAllocationPct(d.pct);
-                entity.setScore(d.score);
+                entity.setAllocationPct(d.pct());
+                entity.setScore(d.score());
                 entity.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
                 entity.setEndsAt(null);
                 entity.setUpdatedAt(now);
@@ -155,10 +195,16 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
             repository.saveAll(toSave);
 
-            log.debug("event=user_copy_allocation.sync_ok user={} maxWallet={} candidates={} persisted={} closed={}",
-                    idUser, maxWallet, candidates.size(), newDist.size(), closed);
+            final BigDecimal persistedTotal = newDist.values().stream()
+                    .map(Dist::pct)
+                    .reduce(ZERO, BigDecimal::add)
+                    .setScale(6, RoundingMode.HALF_UP);
+
+            log.debug("event=user_copy_allocation.sync_ok user={} maxWallet={} candidates={} persisted={} closed={} targetTotalPct={} persistedTotal={}",
+                    idUser, maxWallet, candidates.size(), newDist.size(), closed, targetTotalPct, persistedTotal);
         }
     }
+
     @Override
     @Transactional(readOnly = true)
     public List<UserCopyAllocationEntity> getWalletUserId(UUID idUser) {
@@ -202,5 +248,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         Dist {
             Objects.requireNonNull(pct, "pct");
         }
+    }
+
+    private static BigDecimal sumPositivePct(List<MetricaWalletDto> wallets) {
+        if (wallets == null || wallets.isEmpty()) return ZERO.setScale(6, RoundingMode.HALF_UP);
+
+        return wallets.stream()
+                .filter(Objects::nonNull)
+                .filter(dto -> dto.getWallet() != null)
+                .map(dto -> safePct(dto.getCapitalShare()))
+                .filter(pct -> pct.signum() > 0)
+                .reduce(ZERO, BigDecimal::add)
+                .setScale(6, RoundingMode.HALF_UP);
     }
 }

@@ -1,6 +1,7 @@
 package com.apunto.engine.service.impl;
 
 import com.apunto.engine.dto.CopyOperationDto;
+import com.apunto.engine.dto.FuturesPositionDto;
 import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.dto.client.BinanceFuturesOrderClientResponse;
@@ -13,8 +14,10 @@ import com.apunto.engine.service.BinanceCopyExecutionService;
 import com.apunto.engine.service.BinanceEngineService;
 import com.apunto.engine.service.CopyOperationService;
 import com.apunto.engine.service.DistributedLockService;
+import com.apunto.engine.service.FuturesPositionService;
 import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.ProcesBinanceService;
+import com.apunto.engine.shared.enums.PositionStatus;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.IdempotencyKeyUtil;
 import com.apunto.engine.shared.enums.OrderType;
@@ -106,6 +109,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_COPY_CREATE_INVALID = "event=copyop.create.invalid_order idUser={} idWallet={} idOperation={}";
     private static final String LOG_CLOSE_INVALID_RESPONSE = "event=binance.close.invalid_response originId={} userId={} symbol={}";
     private static final String LOG_CLOSE_OK = "event=binance.close.ok originId={} userId={} symbol={} qty={} orderId={}";
+    private static final String LOG_CLOSE_SKIPPED_ORIGIN_POSITION_NOT_FOUND = "event=copy_close_skipped reason=origin_position_not_found originId={} userId={}";
+    private static final String LOG_CLOSE_SKIPPED_ORIGIN_STILL_VALIDATION_ACTIVE = "event=copy_close_skipped reason=origin_still_active originId={} userId={} originActive={}";
+
+    private static final String LOG_OPEN_SKIPPED_ALREADY_EXISTS =
+            "event=copy_open_skipped reason=copy_operation_already_exists originId={} userId={}";
+    private static final String LOG_OPEN_START =
+            "event=copy_open_start originId={} userId={}";
+    private static final String LOG_OPEN_RESOLVED_WALLET =
+            "event=copy_open_wallet_metric_resolved originId={} userId={} walletId={}";
+    private static final String LOG_OPEN_VALIDATION_OK =
+            "event=copy_open_ok originId={} userId={}";
+
     private static final int USER_LEVERAGE_MIN = 1;
     private static final int USER_LEVERAGE_MAX = 20;
 
@@ -115,7 +130,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private final CopyOperationService copyOperationService;
     private final DistributedLockService distributedLockService;
 
-    @Value("${binance.dispatch.delay-ms:100}")
+    @Value("${binance.dispatch.delay-ms:0}")
     private long delayBetweenMs;
 
     @Value("${engine.copy.margin-safety-buffer-pct:0.05}")
@@ -125,22 +140,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private long symbolsCacheTtlMs;
 
     @Value("${engine.copy.wallet-hardcap-over-pct:0.03}")
-    private BigDecimal walletHardcapOverPct; // 3% de sobre-asignación permitida
+    private BigDecimal walletHardcapOverPct;
 
     @Value("${engine.copy.wallet-reserve-pct:0.01}")
-    private BigDecimal walletReservePct; // 1% reservado como colchón interno por wallet
+    private BigDecimal walletReservePct;
 
     @Value("${engine.copy.sizing.base-capital-cap:10000}")
-    private double sizingBaseCapitalCap; // tope al denominador (evita ballenas incopiables)
+    private double sizingBaseCapitalCap;
 
-    @Value("${engine.copy.sizing.max-fraction-per-trade:0.25}")
+    @Value("${engine.copy.sizing.max-fraction-per-trade:0.50}")
     private BigDecimal maxFractionPerTrade;
 
     @Value("${engine.copy.sizing.notional-buffer-pct:0.03}")
     private BigDecimal notionalBufferPct;
 
     private final CopyTradingMapper copyTradingMapper;
-
+    private final FuturesPositionService futuresPositionService;
 
     private final ConcurrentMap<String, Long> processedOperations = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, BigDecimal> usedMarginByUserWallet = new ConcurrentHashMap<>();
@@ -236,6 +251,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     @Override
     public void closeOperation(OperacionEvent event, List<UserDetailDto> usersDetail) {
+
         Objects.requireNonNull(event, ERR_EVENT_NULL);
         Objects.requireNonNull(usersDetail, ERR_USERS_NULL);
 
@@ -291,14 +307,30 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         Objects.requireNonNull(userDetail, ERR_USER_NULL);
 
         final String originId = event.getOperacion().getIdOperacion().toString();
-        final String userId = userDetail.getUser().getId().toString();
+        final UUID userId = userDetail.getUser().getId();
+        final String userIdValue = userId.toString();
 
-        if (copyOperationService.existsByOriginAndUser(originId, userId)) {
+        log.debug(LOG_OPEN_START, originId, userId);
+
+        if (copyOperationService.existsByOriginAndUser(originId, userIdValue)) {
+            log.debug(LOG_OPEN_SKIPPED_ALREADY_EXISTS, originId, userId);
             return;
         }
 
         final MetricaWalletDto walletMetric = resolveWalletMetricOrThrowSkip(event, userDetail);
+
+        log.debug(
+                LOG_OPEN_RESOLVED_WALLET,
+                originId,
+                userId,
+                walletMetric != null && walletMetric.getWallet() != null
+                        ? walletMetric.getWallet().getIdWallet()
+                        : null
+        );
+
         executeNewOperationStrict(event, userDetail, walletMetric);
+
+        log.debug(LOG_OPEN_VALIDATION_OK, originId, userId);
     }
 
     @Override
@@ -307,15 +339,32 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         Objects.requireNonNull(userDetail, ERR_USER_NULL);
 
         final String originId = event.getOperacion().getIdOperacion().toString();
-        executeCloseOperationStrict(originId, userDetail);
-    }
+        final UUID userId = userDetail.getUser().getId();
 
-    private void safelyExecuteCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail, String originId) {
-        try {
-            executeCloseOperation(copyOperation, userDetail);
-        } catch (Exception ex) {
-            log.error(LOG_CLOSE_ERROR, originId, userDetail.getUser().getId(), ex.toString(), ex);
+        final Optional<FuturesPositionDto> positionOriginDto =
+                futuresPositionService.getIdFuturesPosition(originId);
+
+        if (positionOriginDto.isEmpty()) {
+            log.warn(LOG_CLOSE_SKIPPED_ORIGIN_POSITION_NOT_FOUND, originId, userId);
+            return;
         }
+
+        final FuturesPositionDto originPosition = positionOriginDto.get();
+        final boolean originStillActiveInEvent = event.getOperacion().isOperacionActiva();
+        final boolean originStillOpenInPosition = PositionStatus.OPEN.equals(originPosition.getIsActive());
+
+        if (originStillActiveInEvent || originStillOpenInPosition) {
+            log.warn(
+                    LOG_CLOSE_SKIPPED_ORIGIN_STILL_VALIDATION_ACTIVE,
+                    originId,
+                    userId,
+                    originStillActiveInEvent,
+                    originStillOpenInPosition
+            );
+            return;
+        }
+
+        executeCloseOperationStrict(originId, userDetail);
     }
 
     private void executeNewOperation(OperacionEvent event, UserDetailDto userDetail, MetricaWalletDto walletMetric) {
@@ -523,6 +572,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         log.warn("event=panic_close.ok symbol={} qty={} orderId={}",
                 prepared.dto.getSymbol(), qty.toPlainString(), closeResp.getOrderId());
     }
+
     public void executeCloseOperationStrict(String originId, UserDetailDto userDetail) {
         Objects.requireNonNull(originId, "originId no puede ser null");
         Objects.requireNonNull(userDetail, ERR_USER_NULL);
@@ -912,8 +962,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
 
     private MetricaWalletDto resolveWalletMetricOrThrowSkip(OperacionEvent event, UserDetailDto userDetail) {
-        // OJO: el id de detalle (detail_user) NO es el id del usuario.
-        // Necesitamos el UUID real de usuario para consultar user_copy_allocation.
+
         final UUID idUser = userDetail.getUser().getId();
         final List<MetricaWalletDto> metrics =
                 normalizeCapitalShares(metricWalletService.getCandidatesUser(idUser));
