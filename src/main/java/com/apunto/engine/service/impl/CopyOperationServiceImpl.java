@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.Objects;
 import java.math.BigDecimal;
+import java.util.Optional;
 
 @Service
 @Slf4j
@@ -103,6 +104,18 @@ public class CopyOperationServiceImpl implements CopyOperationService {
                 .stream()
                 .map(copyOperationMapper::toDto)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public Optional<CopyOperationEntity> findOperationByOrigin(String idOrderOrigin) {
+        if (idOrderOrigin == null || idOrderOrigin.isBlank()) {
+            return Optional.empty();
+        }
+
+        return copyOperationRepository.findAllByIdOrderOrigin(idOrderOrigin)
+                .stream()
+                .findFirst();
     }
 
     @Transactional(readOnly = true)

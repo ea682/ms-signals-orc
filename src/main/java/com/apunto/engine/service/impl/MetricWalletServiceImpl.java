@@ -291,9 +291,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .filter(dto -> dto.getWallet() != null && dto.getWallet().getHistoryDays() != null)
                 .filter(dto -> {
                     var s = dto.getScoring();
-                    return gte(s.getDecisionMetricConservative(), 60)
-                            || gte(s.getDecisionMetricScalping(), 70)
-                            || gte(s.getDecisionMetricAggressive(), 70);
+                    return gte(s.getDecisionMetricConservative(), 59)
+                            || gte(s.getDecisionMetricScalping(), 69)
+                            || gte(s.getDecisionMetricAggressive(), 69);
                 })
                 .filter(dto -> Math.floor(dto.getWallet().getHistoryDays()) >= dayzLimit)
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
