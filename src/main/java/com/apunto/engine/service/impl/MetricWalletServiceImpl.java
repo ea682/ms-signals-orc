@@ -149,48 +149,23 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         HistoryResult history = getHistory(historyLimit);
 
         if (history.values().isEmpty()) {
-            long durationMs = elapsedMs(startNs);
-            log.warn(
-                    "event=metric_wallets.empty_history limit={} durationMs={} source={} cacheStats={}",
-                    historyLimit, durationMs, history.source(), allPositionHistoryCache.stats()
-            );
+            log.warn("event=metric_wallets.empty_history source={}", history.source());
             return List.of();
         }
 
         List<MetricaWalletDto> candidates = selectCandidates(history.values(), dayzLimit);
 
-        if (candidates.isEmpty()) {
-            long durationMs = elapsedMs(startNs);
-            log.info(
-                    "event=metric_wallets.no_candidates limit={} baseSize={} durationMs={} source={}",
-                    historyLimit, history.values().size(), durationMs, history.source()
-            );
-            return List.of();
-        }
-
         CapitalAllocator.allocate(candidates, maxCapitalToUse, maxPerWallet);
         validateLimits(candidates, maxPerWallet, maxCapitalToUse);
 
-        try {
-            userCopyAllocationService.syncDistribution(candidates);
-        } catch (Exception ex) {
-            log.warn("event=user_copy_allocation.sync_failed err={}", safeErr(ex));
-        }
-
-        double totalShare = candidates.stream().mapToDouble(MetricaWalletDto::getCapitalShare).sum();
-        long durationMs = elapsedMs(startNs);
-
-        if (durationMs >= slowThreshold.toMillis()) {
-            log.warn(
-                    "event=metric_wallets.slow limit={} baseSize={} candidates={} totalShare={} durationMs={} source={} cacheStats={}",
-                    historyLimit, history.values().size(), candidates.size(), totalShare, durationMs, history.source(),
-                    allPositionHistoryCache.stats()
-            );
+        if ("cache".equals(history.source())) {
+            try {
+                userCopyAllocationService.syncDistribution(candidates);
+            } catch (Exception ex) {
+                log.warn("event=user_copy_allocation.sync_failed err={}", safeErr(ex));
+            }
         } else {
-            log.debug(
-                    "event=metric_wallets.ok limit={} baseSize={} candidates={} totalShare={} durationMs={} source={}",
-                    historyLimit, history.values().size(), candidates.size(), totalShare, durationMs, history.source()
-            );
+            log.warn("event=user_copy_allocation.sync_skipped reason=non_fresh_history source={}", history.source());
         }
 
         return candidates;
@@ -295,10 +270,13 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                             || gte(s.getDecisionMetricScalping(), 69)
                             || gte(s.getDecisionMetricAggressive(), 69);
                 })
-                .filter(dto -> Math.floor(dto.getWallet().getHistoryDays()) >= dayzLimit)
+                .filter(dto -> {
+                    Double d = dto.getWallet().getHistoryDays();
+                    return d != null && Double.isFinite(d) && d >= dayzLimit;
+                })
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
                 .map(this::copyForAllocation)
-                .collect(Collectors.toList());
+                .toList();
     }
 
     private static boolean gte(Integer value, int threshold) {
