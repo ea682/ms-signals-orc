@@ -50,8 +50,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
-            @Value("${metric-wallet.history.limit:100}") int historyLimit,
-            @Value("${metric-wallet.history.dayz:20}") int dayzLimit,
+            @Value("${metric-wallet.history.limit:300}") int historyLimit,
+            @Value("${metric-wallet.history.dayz:1}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
@@ -266,13 +266,13 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .filter(dto -> dto.getWallet() != null && dto.getWallet().getHistoryDays() != null)
                 .filter(dto -> {
                     var s = dto.getScoring();
-                    return gte(s.getDecisionMetricConservative(), 59)
-                            || gte(s.getDecisionMetricScalping(), 69)
-                            || gte(s.getDecisionMetricAggressive(), 69);
+                    return gte(s.getDecisionMetricConservative(), 55)
+                            || gte(s.getDecisionMetricScalping(), 59)
+                            || gte(s.getDecisionMetricAggressive(), 59);
                 })
                 .filter(dto -> {
-                    Double d = dto.getWallet().getHistoryDays();
-                    return d != null && Double.isFinite(d) && d >= dayzLimit;
+                    double d = dto.getWallet().getHistoryDays();
+                    return Double.isFinite(d) && d >= dayzLimit;
                 })
                 .sorted(Comparator.comparingDouble(MetricWalletServiceImpl::decisionScore).reversed())
                 .map(this::copyForAllocation)
