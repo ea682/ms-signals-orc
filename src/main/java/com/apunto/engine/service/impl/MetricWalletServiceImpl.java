@@ -80,7 +80,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     @Override
     public List<MetricaWalletDto> getMetricWallets() {
-        return getMetricWallets(0.95, 0.50);
+        return getMetricWallets(0.95, 0.95);
     }
 
     @Override
