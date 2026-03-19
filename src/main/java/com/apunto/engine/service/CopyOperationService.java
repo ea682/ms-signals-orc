@@ -16,6 +16,8 @@ public interface CopyOperationService {
     Optional<CopyOperationEntity> findOperationByOrigin(String idOrderOrigin);
     CopyOperationDto findOperationForUser(String idOrderOrigin, String idUser);
     boolean existsByOriginAndUser(String idOrderOrigin, String idUser);
+    List<CopyOperationDto> findActiveOperationsByUserAndWallet(String idUser, String walletId);
+    void upsertActiveOperation(CopyOperationDto operation);
 
     /**
      * Suma de margen usado (buffer incluido) para posiciones activas de un usuario por wallet.

@@ -29,8 +29,8 @@ import java.util.UUID;
 @Table(
         name = "user_copy_allocation",
         uniqueConstraints = @UniqueConstraint(
-                name = "uq_user_copy_allocation_max_wallet_wallet",
-                columnNames = {"wallet_id"}
+                name = "uq_user_copy_allocation_user_wallet",
+                columnNames = {"id_user", "wallet_id"}
         )
 )
 public class UserCopyAllocationEntity {

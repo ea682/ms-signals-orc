@@ -26,8 +26,25 @@ public final class IdempotencyKeyUtil {
         return "cpC_" + hash32Hex(originId, userId, walletId);
     }
 
+    public static String rebalanceIncreaseClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty) {
+        return "cpI_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "inc");
+    }
+
+    public static String rebalanceReduceClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty) {
+        return "cpR_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "red");
+    }
+
     private static String hash32Hex(String originId, String userId, String walletId) {
         String input = String.valueOf(originId) + "|" + String.valueOf(userId) + "|" + String.valueOf(walletId);
+        return hash32HexRaw(input);
+    }
+
+    private static String hash32Hex(String a, String b, String c, String d, String e, String f) {
+        String input = String.valueOf(a) + "|" + String.valueOf(b) + "|" + String.valueOf(c) + "|" + String.valueOf(d) + "|" + String.valueOf(e) + "|" + String.valueOf(f);
+        return hash32HexRaw(input);
+    }
+
+    private static String hash32HexRaw(String input) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));

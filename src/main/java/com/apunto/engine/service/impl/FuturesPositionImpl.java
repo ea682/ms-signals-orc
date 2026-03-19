@@ -1,13 +1,16 @@
 package com.apunto.engine.service.impl;
 
 import com.apunto.engine.dto.FuturesPositionDto;
+import com.apunto.engine.dto.OriginBasketPositionDto;
 import com.apunto.engine.entity.FuturesPositionEntity;
 import com.apunto.engine.repository.FuturesPositionRepository;
 import com.apunto.engine.service.FuturesPositionService;
+import com.apunto.engine.shared.enums.PositionStatus;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -57,10 +60,39 @@ public class FuturesPositionImpl implements FuturesPositionService {
         return result;
     }
 
+
+    @Override
+    public List<OriginBasketPositionDto> getOpenBasketByWallet(String walletId) {
+        if (walletId == null || walletId.isBlank()) {
+            return List.of();
+        }
+
+        return futuresPositionRepository
+                .findAllOpenByAccountIdOrderByCreatedAtAsc(walletId, PositionStatus.OPEN.name())
+                .stream()
+                .map(this::toOriginBasketDto)
+                .toList();
+    }
+
     private FuturesPositionDto toDto(FuturesPositionEntity entity) {
         FuturesPositionDto dto = new FuturesPositionDto();
         dto.setIdFuturesPosition(entity.getIdFuturesPosition());
         dto.setIsActive(entity.getStatus());
         return dto;
+    }
+
+    private OriginBasketPositionDto toOriginBasketDto(FuturesPositionEntity entity) {
+        return OriginBasketPositionDto.builder()
+                .originId(entity.getIdFuturesPosition() == null ? null : entity.getIdFuturesPosition().toString())
+                .walletId(entity.getAccountId())
+                .symbol(entity.getSymbol())
+                .side(entity.getSide())
+                .entryPrice(entity.getEntryPrice())
+                .markPrice(entity.getMarkPrice())
+                .marginUsedUsd(entity.getMarginUsedUsd())
+                .notionalUsd(entity.getNotionalUsd())
+                .sizeQty(entity.getSizeQty())
+                .sizeLegacy(entity.getSizeLegacy())
+                .build();
     }
 }

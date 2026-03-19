@@ -14,7 +14,9 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.JdbcType;
 import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.dialect.PostgreSQLEnumJdbcType;
 import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
@@ -54,11 +56,13 @@ public class FuturesPositionEntity {
     private String symbol;
 
     @Enumerated(EnumType.STRING)
+    @JdbcType(PostgreSQLEnumJdbcType.class)
     @Column(name = "status", nullable = false, columnDefinition = "futuros_operaciones.position_status")
     @Builder.Default
     private PositionStatus status = PositionStatus.OPEN;
 
     @Enumerated(EnumType.STRING)
+    @JdbcType(PostgreSQLEnumJdbcType.class)
     @Column(name = "side", columnDefinition = "futuros_operaciones.position_side")
     private PositionSide side;
 

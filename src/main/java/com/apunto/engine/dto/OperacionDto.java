@@ -38,6 +38,18 @@ public class OperacionDto {
     @JsonAlias({"sizeLegacy"})
     private final BigDecimal size;
 
+    /** Compat: futures_position DTO usa "sizeQty" */
+    @JsonAlias({"sizeQty"})
+    private final BigDecimal sizeQty;
+
+    /** Compat: futures_position DTO usa "notionalUsd" */
+    @JsonAlias({"notionalUsd"})
+    private final BigDecimal notionalUsd;
+
+    /** Compat: futures_position DTO usa "marginUsedUsd" */
+    @JsonAlias({"marginUsedUsd"})
+    private final BigDecimal marginUsedUsd;
+
     /** Compat: futures_position DTO usa "entryPrice" */
     @JsonAlias({"entryPrice"})
     private final BigDecimal precioEntrada;
