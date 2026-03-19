@@ -67,9 +67,31 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 continue;
             }
 
-            final List<MetricaWalletDto> top = (candidates.size() <= maxWallet)
-                    ? candidates
-                    : candidates.subList(0, maxWallet);
+            final List<MetricaWalletDto> rankedForPersist = candidates.stream()
+                    .filter(Objects::nonNull)
+                    .filter(dto -> dto.getWallet() != null)
+                    .filter(dto -> normalize(dto.getWallet().getIdWallet()) != null)
+                    .filter(dto -> safePct(dto.getCapitalShare()).signum() > 0)
+                    .sorted(
+                            Comparator
+                                    .comparing(
+                                            (MetricaWalletDto dto) -> safePct(dto.getCapitalShare()),
+                                            Comparator.reverseOrder()
+                                    )
+                                    .thenComparing(
+                                            UserCopyAllocationServiceImpl::safeScore,
+                                            Comparator.nullsLast(Comparator.reverseOrder())
+                                    )
+                                    .thenComparing(
+                                            dto -> normalize(dto.getWallet().getIdWallet()),
+                                            Comparator.nullsLast(String::compareToIgnoreCase)
+                                    )
+                    )
+                    .toList();
+
+            final List<MetricaWalletDto> top = (rankedForPersist.size() <= maxWallet)
+                    ? rankedForPersist
+                    : rankedForPersist.subList(0, maxWallet);
 
             // Mantener orden para que el ajuste final caiga siempre en la última wallet válida.
             final Map<String, Dist> newDist = new LinkedHashMap<>();
@@ -96,6 +118,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             // Si no hay top válido, cerrar todo lo activo del usuario.
             final List<UserCopyAllocationEntity> existingActive =
                     repository.findAllByIdUserAndEndsAtIsNull(idUser);
+
 
             if (validTop.isEmpty() || topTotalPct.signum() <= 0 || targetTotalPct.signum() <= 0) {
                 for (UserCopyAllocationEntity e : existingActive) {
@@ -193,7 +216,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 closed++;
             }
 
-            repository.saveAll(toSave);
+            repository.saveAllAndFlush(toSave);
 
             final BigDecimal persistedTotal = newDist.values().stream()
                     .map(Dist::pct)
