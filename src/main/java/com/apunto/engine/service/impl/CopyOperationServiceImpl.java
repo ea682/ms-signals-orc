@@ -74,6 +74,8 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
         entity.setPriceClose(operation.getPriceClose());
         entity.setDateClose(operation.getDateClose());
+        entity.setSiseUsd(operation.getSiseUsd() == null ? BigDecimal.ZERO : operation.getSiseUsd());
+        entity.setSizePar(operation.getSizePar() == null ? BigDecimal.ZERO : operation.getSizePar());
         entity.setActive(operation.isActive());
 
         copyOperationRepository.save(entity);
@@ -137,6 +139,50 @@ public class CopyOperationServiceImpl implements CopyOperationService {
             return false;
         }
         return copyOperationRepository.existsByIdOrderOriginAndIdUser(idOrderOrigin, idUser);
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public List<CopyOperationDto> findActiveOperationsByUserAndWallet(String idUser, String walletId) {
+        if (idUser == null || idUser.isBlank() || walletId == null || walletId.isBlank()) {
+            return List.of();
+        }
+
+        return copyOperationRepository.findAllByIdUserAndIdWalletOriginAndActiveTrue(idUser, walletId)
+                .stream()
+                .map(copyOperationMapper::toDto)
+                .toList();
+    }
+
+    @Transactional
+    @Override
+    public void upsertActiveOperation(CopyOperationDto operation) {
+        Objects.requireNonNull(operation, "operation no puede ser null");
+        Objects.requireNonNull(operation.getIdOrderOrigin(), "idOrderOrigin no puede ser null");
+        Objects.requireNonNull(operation.getIdUser(), "idUser no puede ser null");
+
+        CopyOperationEntity entity = copyOperationRepository
+                .findByIdOrderOriginAndIdUser(operation.getIdOrderOrigin(), operation.getIdUser())
+                .orElse(null);
+
+        if (entity == null) {
+            entity = buildCopyOperationEntity(operation);
+        } else {
+            entity.setIdOrden(operation.getIdOrden());
+            entity.setIdWalletOrigin(operation.getIdWalletOrigin());
+            entity.setParsymbol(operation.getParsymbol());
+            entity.setTypeOperation(operation.getTypeOperation());
+            entity.setLeverage(operation.getLeverage());
+            entity.setSiseUsd(operation.getSiseUsd());
+            entity.setSizePar(operation.getSizePar());
+            entity.setPriceEntry(operation.getPriceEntry());
+            entity.setPriceClose(operation.getPriceClose());
+            entity.setDateCreation(operation.getDateCreation());
+            entity.setDateClose(operation.getDateClose());
+            entity.setActive(operation.isActive());
+        }
+
+        copyOperationRepository.save(entity);
     }
 
     @Transactional(readOnly = true)

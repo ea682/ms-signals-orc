@@ -5,7 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.UUID;
 
-public interface UserApiKeyRepository extends JpaRepository<UserApiKeyEntity, Long> {
+public interface UserApiKeyRepository extends JpaRepository<UserApiKeyEntity, UUID> {
 
 
     UserApiKeyEntity findByUser_Id(UUID userId);

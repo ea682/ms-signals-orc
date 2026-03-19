@@ -23,6 +23,8 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     List<CopyOperationEntity> findAllByIdOrden(String idOrden);
 
+    List<CopyOperationEntity> findAllByIdUserAndIdWalletOriginAndActiveTrue(String idUser, String walletId);
+
     @Query(value = """
             SELECT COALESCE(SUM((size_usd / NULLIF(leverage, 0)) * (1 + :safety)), 0)
             FROM futuros_operaciones.copy_operation

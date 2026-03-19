@@ -27,7 +27,6 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -50,8 +49,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
-            @Value("${metric-wallet.history.limit:300}") int historyLimit,
-            @Value("${metric-wallet.history.dayz:10}") int dayzLimit,
+            @Value("${metric-wallet.history.limit:60}") int historyLimit,
+            @Value("${metric-wallet.history.dayz:1}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
@@ -80,7 +79,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     @Override
     public List<MetricaWalletDto> getMetricWallets() {
-        return getMetricWallets(0.95, 0.95);
+        return getMetricWallets(0.95, 0.50);
     }
 
     @Override
@@ -294,7 +293,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private static double decisionScore(MetricaWalletDto dto) {
         if (dto == null || dto.getScoring() == null) return 0.0;
 
-        Integer v = dto.getScoring().getDecisionMetric();
+        Integer v = dto.getScoring().getDecisionMetricConservative();
         return v != null ? v.doubleValue() : 0.0;
     }
 
