@@ -28,6 +28,7 @@ import java.net.InetAddress;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
@@ -179,19 +180,54 @@ public class CopyExecutionJobWorker {
 
         CopyJobErrorCategory category = classify(ex);
         String msg = safeMsg(ex);
+        ErrorSummary summary = summarizeError(ex);
+        boolean retryable = shouldRetry(category, ex);
 
-        if (attempt >= maxAttempts) {
+        if (!retryable || attempt >= maxAttempts) {
             jobService.markDead(job, category.name(), msg);
-            log.error("event=copy.job.dead id={} originId={} userId={} action={} attempts={} category={} err={}",
-                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), attempt, category, msg, ex);
+            log.error("event=copy.job.dead id={} originId={} userId={} action={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
+                    job.getId(),
+                    job.getOriginId(),
+                    job.getUserId(),
+                    job.getAction(),
+                    attempt,
+                    category,
+                    retryable,
+                    summary.errClass(),
+                    summary.errCode(),
+                    summary.httpStatus(),
+                    summary.symbol(),
+                    summary.side(),
+                    summary.positionSide(),
+                    summary.qty(),
+                    summary.binanceCode(),
+                    summary.traceId(),
+                    safeMsgForLog(summary.errMsg()),
+                    ex);
             return;
         }
 
         OffsetDateTime nextRunAt = OffsetDateTime.now().plus(computeBackoff(category, attempt));
         jobService.reschedule(job, nextRunAt, category.name(), msg);
 
-        log.warn("event=copy.job.retry_scheduled id={} originId={} userId={} action={} attempts={} category={} nextRunAt={} err={}",
-                job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), attempt, category, nextRunAt, msg);
+        log.warn("event=copy.job.retry_scheduled id={} originId={} userId={} action={} attempts={} category={} nextRunAt={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
+                job.getId(),
+                job.getOriginId(),
+                job.getUserId(),
+                job.getAction(),
+                attempt,
+                category,
+                nextRunAt,
+                summary.errClass(),
+                summary.errCode(),
+                summary.httpStatus(),
+                summary.symbol(),
+                summary.side(),
+                summary.positionSide(),
+                summary.qty(),
+                summary.binanceCode(),
+                summary.traceId(),
+                safeMsgForLog(summary.errMsg()));
     }
 
     private Duration computeBackoff(CopyJobErrorCategory category, int attempt) {
@@ -205,6 +241,101 @@ public class CopyExecutionJobWorker {
         long jitterMs = (long) (millis * (0.15 * ThreadLocalRandom.current().nextDouble())); // 0-15%
         return Duration.ofMillis(millis + jitterMs);
     }
+
+    private boolean shouldRetry(CopyJobErrorCategory category, Throwable t) {
+        if (category == CopyJobErrorCategory.VALIDATION || category == CopyJobErrorCategory.SKIP) {
+            return false;
+        }
+
+        Throwable cur = t;
+        while (cur != null) {
+            if (cur instanceof EngineException ee) {
+                if (ee.getErrorCode() == ErrorCode.BINANCE_CLIENT_ERROR) {
+                    return false;
+                }
+            }
+
+            if (cur instanceof RestClientResponseException rre) {
+                int s = rre.getRawStatusCode();
+                if (s >= 400 && s < 500 && s != 429) {
+                    return false;
+                }
+            }
+
+            cur = cur.getCause();
+        }
+
+        return true;
+    }
+
+    private ErrorSummary summarizeError(Throwable t) {
+        Throwable cur = t;
+
+        while (cur != null) {
+            if (cur instanceof EngineException ee) {
+                Map<String, Object> d = ee.getDetails() == null ? Map.of() : ee.getDetails();
+                return new ErrorSummary(
+                        cur.getClass().getSimpleName(),
+                        ee.getErrorCode() == null ? null : ee.getErrorCode().name(),
+                        asString(d.get("httpStatus")),
+                        asString(d.get("symbol")),
+                        asString(d.get("side")),
+                        asString(d.get("positionSide")),
+                        asString(d.get("quantity")),
+                        asString(d.get("binanceCode")),
+                        asString(d.get("traceId")),
+                        ee.getMessage()
+                );
+            }
+
+            if (cur instanceof RestClientResponseException rre) {
+                return new ErrorSummary(
+                        cur.getClass().getSimpleName(),
+                        null,
+                        Integer.toString(rre.getRawStatusCode()),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        rre.getStatusText()
+                );
+            }
+
+            cur = cur.getCause();
+        }
+
+        return new ErrorSummary(
+                t == null ? null : t.getClass().getSimpleName(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                safeMsg(t)
+        );
+    }
+
+    private String asString(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private record ErrorSummary(
+            String errClass,
+            String errCode,
+            String httpStatus,
+            String symbol,
+            String side,
+            String positionSide,
+            String qty,
+            String binanceCode,
+            String traceId,
+            String errMsg
+    ) {}
 
     private CopyJobErrorCategory classify(Throwable t) {
         Throwable cur = t;
@@ -281,8 +412,14 @@ public class CopyExecutionJobWorker {
 
     private String safeMsgForLog(String s) {
         if (s == null) return "";
-        return s.length() > 4000 ? s.substring(0, 4000) : s;
+        String clean = s
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .replace("\t", " ")
+                .replace('"', '\'');
+        return clean.length() > 4000 ? clean.substring(0, 4000) : clean;
     }
+
 
     private String buildWorkerId() {
         try {
