@@ -81,21 +81,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private static final String LOG_OPEN_DUPLICATE_INMEM = "event=operation.open.duplicate_inmemory originId={} action=ignore";
     private static final String LOG_OPEN_SKIP_ALREADY = "event=operation.open.skip_already_processed originId={} userId={}";
-    private static final String LOG_OPEN_NO_METRIC = "event=operation.open.no_metric originId={} userId={} idWallet={} maxWallet={}";
-    private static final String LOG_OPEN_WALLET_NOT_ALLOCATED = "event=operation.open.skip_wallet_not_allocated originId={} userId={} wallet={}";
     private static final String LOG_OPEN_SCHEDULED = "event=operation.open.scheduled originId={} users={} scheduled={} uniqueUsers={} delayBetweenMs={}";
 
     private static final String LOG_CLOSE_NO_COPIES = "event=operation.close.no_copies originId={} users={}";
     private static final String LOG_CLOSE_COPY_MISSING = "event=operation.close.copy_missing originId={} userId={}";
-    private static final String LOG_CLOSE_SKIP_INACTIVE = "event=operation.close.skip_inactive originId={} userId={}";
     private static final String LOG_CLOSE_SCHEDULED = "event=operation.close.scheduled originId={} users={} scheduled={} delayBetweenMs={}";
-    private static final String LOG_CLOSE_ERROR = "event=operation.close.error originId={} userId={} err={}";
 
-    private static final String LOG_OPEN_SKIP_PERSISTED = "event=operation.open.skip_persisted originId={} userId={}";
     private static final String LOG_OPEN_SKIP_BUDGET = "event=operation.open.skip_budget originId={} userId={} wallet={} symbol={} marginRequired={} marginBudget={} usedMargin={}";
-    private static final String LOG_OPEN_SEND = "event=binance.open.send originId={} userId={} wallet={} symbol={} qty={} leverage={} notional={} marginRequired={} marginBudget={}";
-    private static final String LOG_OPEN_OK = "event=binance.open.ok originId={} userId={} wallet={} symbol={} orderId={} notional={} marginRequired={}";
-    private static final String LOG_OPEN_ERROR = "event=binance.open.error originId={} userId={} wallet={} err={}";
+
 
     private static final String LOG_PREP_INVALID_METRIC = "event=operation.open.invalid_metric originId={} userId={} wallet={} reason=invalid_capitalShare";
     private static final String LOG_PREP_INVALID_BUDGET = "event=operation.open.invalid_budget originId={} userId={} wallet={} reason=walletBudget<=0";
@@ -112,23 +105,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_QTY_ADJUSTED = "event=binance.qty_adjusted symbol={} qtyOriginal={} qtyFinal={} notionalFinal={} notionalMax={}";
     private static final String LOG_SYMBOLS_CACHE_REFRESH = "event=binance.symbols_cache.refresh size={} ttlMs={}";
 
-    private static final String LOG_MARGIN_RELEASE = "event=margin.release copyKey={} userWalletKey={} margin={}";
-    private static final String LOG_MARGIN_RECONCILE = "event=margin.reconcile copyKey={} userWalletKey={} oldMargin={} newMargin={} delta={}";
-
     private static final String LOG_COPY_CREATE_INVALID = "event=copyop.create.invalid_order idUser={} idWallet={} idOperation={}";
     private static final String LOG_CLOSE_INVALID_RESPONSE = "event=binance.close.invalid_response originId={} userId={} symbol={}";
     private static final String LOG_CLOSE_OK = "event=binance.close.ok originId={} userId={} symbol={} qty={} orderId={}";
-    private static final String LOG_CLOSE_SKIPPED_ORIGIN_POSITION_NOT_FOUND = "event=copy_close_skipped reason=origin_position_not_found originId={} userId={}";
     private static final String LOG_CLOSE_SKIPPED_ORIGIN_STILL_VALIDATION_ACTIVE = "event=copy_close_skipped reason=origin_still_active originId={} userId={} originActive={}";
-
-    private static final String LOG_OPEN_SKIPPED_ALREADY_EXISTS =
-            "event=copy_open_skipped reason=copy_operation_already_exists originId={} userId={}";
-    private static final String LOG_OPEN_START =
-            "event=copy_open_start originId={} userId={}";
-    private static final String LOG_OPEN_RESOLVED_WALLET =
-            "event=copy_open_wallet_metric_resolved originId={} userId={} walletId={}";
-    private static final String LOG_OPEN_VALIDATION_OK =
-            "event=copy_open_ok originId={} userId={}";
+    private static final String LOG_OPEN_START = "event=copy_open_start originId={} userId={}";
+    private static final String LOG_OPEN_VALIDATION_OK = "event=copy_open_ok originId={} userId={}";
 
     private static final int USER_LEVERAGE_MIN = 1;
     private static final int USER_LEVERAGE_MAX = 20;
@@ -370,7 +352,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
 
-            final Map<String, TargetLeg> targets = buildTargetBasket(sourceBasket, walletBudget, leverage);
+            final Map<String, TargetLeg> targets = buildTargetBasket(sourceBasket, walletBudget, walletMetric, leverage);
             final Map<String, CopyOperationDto> current = copyOperationService
                     .findActiveOperationsByUserAndWallet(userId, walletId)
                     .stream()
@@ -501,7 +483,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return new ArrayList<>(byOriginId.values());
     }
 
-    private Map<String, TargetLeg> buildTargetBasket(List<OriginBasketPositionDto> sourceBasket, BigDecimal walletBudget, int leverage) {
+    private Map<String, TargetLeg> buildTargetBasket(List<OriginBasketPositionDto> sourceBasket,
+                                                     BigDecimal walletBudget,
+                                                     MetricaWalletDto walletMetric,
+                                                     int leverage) {
         if (sourceBasket == null || sourceBasket.isEmpty()) {
             return Map.of();
         }
@@ -521,6 +506,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return Map.of();
         }
 
+        final BigDecimal sourceUtilization = computeSourceUtilization(sourceBasket, walletMetric);
+        final BigDecimal allocatableMargin = walletBudget.compareTo(ZERO) <= 0
+                ? ZERO
+                : walletBudget.multiply(sourceUtilization);
+
         final Map<String, TargetLeg> result = new HashMap<>();
         for (OriginBasketPositionDto leg : sourceBasket) {
             if (leg == null || leg.getOriginId() == null || !bases.containsKey(leg.getOriginId())) {
@@ -539,18 +529,23 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     continue;
                 }
 
-                final BigDecimal weight = bases.get(leg.getOriginId()).divide(totalBase, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
-                final BigDecimal targetMargin = walletBudget.compareTo(ZERO) <= 0
-                        ? ZERO
-                        : walletBudget.multiply(weight);
+                final BigDecimal weight = bases.get(leg.getOriginId())
+                        .divide(totalBase, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+
+                final BigDecimal targetMargin = allocatableMargin.multiply(weight);
                 final BigDecimal notionalMax = targetMargin.multiply(BigDecimal.valueOf(leverage));
+
                 final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
                 final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+
                 BigDecimal rawQty = targetNotional.compareTo(ZERO) <= 0
                         ? ZERO
                         : targetNotional.divide(priceRef, rules.qtyScale, RoundingMode.DOWN);
+
                 BigDecimal targetQty = adjustQuantityToBinanceRules(symbol, rawQty, priceRef, rules, notionalMax);
-                if (targetQty == null) targetQty = ZERO;
+                if (targetQty == null) {
+                    targetQty = ZERO;
+                }
 
                 result.put(leg.getOriginId(), new TargetLeg(
                         leg.getOriginId(),
@@ -563,9 +558,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         targetQty.multiply(priceRef)
                 ));
             } catch (Exception ex) {
-                log.warn("event=rebalance.target.skip originId={} wallet={} err={}", leg.getOriginId(), leg.getWalletId(), ex.toString());
+                log.warn("event=rebalance.target.skip originId={} wallet={} err={}",
+                        leg.getOriginId(), leg.getWalletId(), ex.toString());
             }
         }
+
         return result;
     }
 
@@ -1835,4 +1832,65 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             Map.entry("SPX6900USD", "SPXUSDT"),
             Map.entry("PIUSD", "PIUSDT")
     );
+
+    private BigDecimal computeSourceUtilization(List<OriginBasketPositionDto> sourceBasket,
+                                                MetricaWalletDto walletMetric) {
+        if (sourceBasket == null || sourceBasket.isEmpty()) {
+            return ZERO;
+        }
+
+        if (walletMetric == null
+                || walletMetric.getExposureAndCapacity() == null
+                || walletMetric.getExposureAndCapacity().getCapitalRequired() == null
+                || walletMetric.getExposureAndCapacity().getCapitalRequired() <= 0) {
+            return BigDecimal.ONE;
+        }
+
+        BigDecimal sourceOpenMargin = ZERO;
+        for (OriginBasketPositionDto leg : sourceBasket) {
+            sourceOpenMargin = sourceOpenMargin.add(computeSourceMarginBase(leg));
+        }
+
+        if (sourceOpenMargin.compareTo(ZERO) <= 0) {
+            return BigDecimal.ONE;
+        }
+
+        final BigDecimal capitalRequired = BigDecimal.valueOf(
+                walletMetric.getExposureAndCapacity().getCapitalRequired()
+        );
+
+        BigDecimal utilization = sourceOpenMargin.divide(capitalRequired, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+
+        if (utilization.compareTo(ZERO) < 0) {
+            return ZERO;
+        }
+        if (utilization.compareTo(BigDecimal.ONE) > 0) {
+            return BigDecimal.ONE;
+        }
+        return utilization;
+    }
+
+    private BigDecimal computeSourceMarginBase(OriginBasketPositionDto leg) {
+        if (leg == null) {
+            return ZERO;
+        }
+
+        BigDecimal v = abs(leg.getMarginUsedUsd());
+        if (v.compareTo(ZERO) > 0) {
+            return v;
+        }
+
+        v = abs(leg.getNotionalUsd());
+        if (v.compareTo(ZERO) > 0) {
+            return v;
+        }
+
+        final BigDecimal price = resolvePriceRef(leg.getMarkPrice(), leg.getEntryPrice());
+        v = safeQty(leg.getSizeQty()).multiply(price);
+        if (v.compareTo(ZERO) > 0) {
+            return v;
+        }
+
+        return abs(leg.getSizeLegacy());
+    }
 }
