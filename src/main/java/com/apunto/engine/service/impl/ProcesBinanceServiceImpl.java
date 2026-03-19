@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -81,24 +82,25 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     err.traceId(),
                     err.path());
 
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("httpStatus", Integer.toString(err.httpStatus()));
+            details.put("errorCode", safeNull(err.errorCode()));
+            details.put("symbol", safeNull(dto.getSymbol()));
+            details.put("side", dto.getSide() == null ? "" : dto.getSide().name());
+            details.put("type", dto.getType() == null ? "" : dto.getType().name());
+            details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
+            details.put("quantity", safeNull(dto.getQuantity()));
+            details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
+            details.put("binanceCode", safeNull(err.binanceCode()));
+            details.put("binanceMsg", safeNull(safeLog(err.binanceMsg())));
+            details.put("traceId", safeNull(err.traceId()));
+            details.put("path", safeNull(err.path()));
+
             throw new EngineException(
                     ErrorCode.BINANCE_CLIENT_ERROR,
                     "Binance rechazó la orden: " + safeLog(err.binanceMsg()),
                     ex,
-                    Map.of(
-                            "httpStatus", Integer.toString(err.httpStatus()),
-                            "errorCode", safeNull(err.errorCode()),
-                            "symbol", safeNull(dto.getSymbol()),
-                            "side", dto.getSide() == null ? "" : dto.getSide().name(),
-                            "type", dto.getType() == null ? "" : dto.getType().name(),
-                            "positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name(),
-                            "quantity", safeNull(dto.getQuantity()),
-                            "reduceOnly", Boolean.toString(dto.isReduceOnly()),
-                            "binanceCode", safeNull(err.binanceCode()),
-                            "binanceMsg", safeNull(safeLog(err.binanceMsg())),
-                            "traceId", safeNull(err.traceId()),
-                            "path", safeNull(err.path())
-                    )
+                    details
             );
         }
     }
