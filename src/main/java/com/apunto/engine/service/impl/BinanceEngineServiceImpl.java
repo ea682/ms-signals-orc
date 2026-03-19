@@ -26,6 +26,7 @@ import com.apunto.engine.shared.enums.Side;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
+import com.apunto.engine.shared.util.LogFmt;
 import com.apunto.engine.shared.util.IdempotencyKeyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -547,6 +548,24 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     targetQty = ZERO;
                 }
 
+                BigDecimal targetNotionalFinal = targetQty.multiply(priceRef);
+                if (targetQty.compareTo(ZERO) > 0
+                        && rules.minNotional != null
+                        && targetNotionalFinal.compareTo(rules.minNotional) < 0) {
+                    throw new SkipExecutionException(
+                            "notional_too_small",
+                            "Target descartado porque el notional final quedó bajo el mínimo de Binance",
+                            LogFmt.kv(
+                                    "rawSymbol", leg.getSymbol(),
+                                    "symbol", symbol,
+                                    "targetQty", targetQty,
+                                    "priceRef", priceRef,
+                                    "targetNotional", targetNotionalFinal,
+                                    "minNotional", rules.minNotional
+                            )
+                    );
+                }
+
                 result.put(leg.getOriginId(), new TargetLeg(
                         leg.getOriginId(),
                         leg.getWalletId(),
@@ -555,11 +574,30 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         leverage,
                         priceRef,
                         targetQty,
-                        targetQty.multiply(priceRef)
+                        targetNotionalFinal
                 ));
+            } catch (SkipExecutionException ex) {
+                log.warn("event=rebalance.target.skip originLegId={} wallet={} rawSymbol={} symbol={} side={} priceRef={} sizeQty={} notionalUsd={} reasonCode={} reason=\"{}\" details=\"{}\"",
+                        leg.getOriginId(),
+                        leg.getWalletId(),
+                        leg.getSymbol(),
+                        leg.getSymbol(),
+                        leg.getSide(),
+                        resolvePriceRef(leg.getMarkPrice(), leg.getEntryPrice()),
+                        leg.getSizeQty(),
+                        leg.getNotionalUsd(),
+                        ex.getReasonCode(),
+                        safeLog(ex.getReason()),
+                        safeLog(ex.getDetails()));
             } catch (Exception ex) {
-                log.warn("event=rebalance.target.skip originId={} wallet={} err={}",
-                        leg.getOriginId(), leg.getWalletId(), ex.toString());
+                log.error("event=rebalance.target.error originLegId={} wallet={} rawSymbol={} side={} errClass={} err=\"{}\"",
+                        leg.getOriginId(),
+                        leg.getWalletId(),
+                        leg.getSymbol(),
+                        leg.getSide(),
+                        ex.getClass().getSimpleName(),
+                        safeLog(ex.getMessage()),
+                        ex);
             }
         }
 
@@ -1892,5 +1930,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         return abs(leg.getSizeLegacy());
+    }
+
+
+    private String safeLog(String s) {
+        return LogFmt.sanitize(s == null ? "" : s);
     }
 }

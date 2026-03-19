@@ -10,12 +10,16 @@ import com.apunto.engine.shared.dto.ApiResponse;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -30,6 +34,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     private static final String ERR_POSITIONSIDE_EMPTY = "positionSide requerido";
 
     private final BinanceClient binanceClient;
+    private final ObjectMapper objectMapper;
 
     @Override
     public BinanceFuturesOrderClientResponse operationPosition(OperationDto dto) {
@@ -51,13 +56,51 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         log.info("event=binance.futures.order.send symbol={} side={} type={} positionSide={} reduceOnly={} qty={}",
                 dto.getSymbol(), dto.getSide(), dto.getType(), dto.getPositionSide(), dto.isReduceOnly(), dto.getQuantity());
 
-        ApiResponse<BinanceFuturesOrderClientResponse> resp = binanceClient.openPosition(dto.getApiKey(), dto.getSecret(), request);
-        BinanceFuturesOrderClientResponse data = unwrap(resp, "futures.order");
+        try {
+            ApiResponse<BinanceFuturesOrderClientResponse> resp = binanceClient.openPosition(dto.getApiKey(), dto.getSecret(), request);
+            BinanceFuturesOrderClientResponse data = unwrap(resp, "futures.order");
 
-        log.info("event=binance.futures.order.ok symbol={} orderId={} avgPrice={} origQty={}",
-                data.getSymbol(), data.getOrderId(), data.getAvgPrice(), data.getOrigQty());
+            log.info("event=binance.futures.order.ok symbol={} orderId={} avgPrice={} origQty={}",
+                    data.getSymbol(), data.getOrderId(), data.getAvgPrice(), data.getOrigQty());
 
-        return data;
+            return data;
+        } catch (RestClientResponseException ex) {
+            BinanceHttpError err = parseBinanceHttpError(ex);
+
+            log.warn("event=binance.futures.order.fail symbol={} side={} type={} positionSide={} reduceOnly={} qty={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" traceId={} path={}",
+                    dto.getSymbol(),
+                    dto.getSide(),
+                    dto.getType(),
+                    dto.getPositionSide(),
+                    dto.isReduceOnly(),
+                    dto.getQuantity(),
+                    err.httpStatus(),
+                    err.errorCode(),
+                    err.binanceCode(),
+                    safeLog(err.binanceMsg()),
+                    err.traceId(),
+                    err.path());
+
+            throw new EngineException(
+                    ErrorCode.BINANCE_CLIENT_ERROR,
+                    "Binance rechazó la orden: " + safeLog(err.binanceMsg()),
+                    ex,
+                    Map.of(
+                            "httpStatus", Integer.toString(err.httpStatus()),
+                            "errorCode", safeNull(err.errorCode()),
+                            "symbol", safeNull(dto.getSymbol()),
+                            "side", dto.getSide() == null ? "" : dto.getSide().name(),
+                            "type", dto.getType() == null ? "" : dto.getType().name(),
+                            "positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name(),
+                            "quantity", safeNull(dto.getQuantity()),
+                            "reduceOnly", Boolean.toString(dto.isReduceOnly()),
+                            "binanceCode", safeNull(err.binanceCode()),
+                            "binanceMsg", safeNull(safeLog(err.binanceMsg())),
+                            "traceId", safeNull(err.traceId()),
+                            "path", safeNull(err.path())
+                    )
+            );
+        }
     }
 
     @Override
@@ -70,6 +113,64 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         List<BinanceFuturesSymbolInfoClientDto> data = unwrap(resp, "symbols");
         return data == null ? Collections.emptyList() : data;
     }
+
+
+    private BinanceHttpError parseBinanceHttpError(RestClientResponseException ex) {
+        String body = ex.getResponseBodyAsString();
+
+        try {
+            JsonNode root = objectMapper.readTree(body);
+            JsonNode data = root.path("data");
+            JsonNode details = data.path("details");
+
+            return new BinanceHttpError(
+                    ex.getRawStatusCode(),
+                    text(root.path("data"), "errorCode"),
+                    text(details, "binanceCode"),
+                    text(details, "binanceMsg"),
+                    text(root, "traceId"),
+                    text(root, "path")
+            );
+        } catch (Exception parseEx) {
+            return new BinanceHttpError(
+                    ex.getRawStatusCode(),
+                    "HTTP_ERROR",
+                    null,
+                    ex.getStatusText(),
+                    null,
+                    null
+            );
+        }
+    }
+
+    private String text(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isMissingNode() || value.isNull() ? null : value.asText();
+    }
+
+    private String safeLog(String s) {
+        if (s == null) return "";
+        String clean = s
+                .replace("\n", " ")
+                .replace("\r", " ")
+                .replace("\t", " ")
+                .replace('"', '\'');
+        return clean.length() > 1000 ? clean.substring(0, 1000) : clean;
+    }
+
+
+    private String safeNull(String s) {
+        return s == null ? "" : s;
+    }
+
+    private record BinanceHttpError(
+            int httpStatus,
+            String errorCode,
+            String binanceCode,
+            String binanceMsg,
+            String traceId,
+            String path
+    ) {}
 
     private void validateOperation(OperationDto dto) {
         if (dto == null) throw new SkipExecutionException(ERR_DTO_NULL);
