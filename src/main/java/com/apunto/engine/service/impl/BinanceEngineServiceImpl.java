@@ -294,29 +294,63 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
         final UUID userId = userDetail.getUser().getId();
+        final String walletId = originOperation.getIdCuenta();
 
-        final Optional<FuturesPositionDto> positionOriginDto = futuresPositionService.getIdFuturesPosition(originId);
+        final Optional<FuturesPositionDto> positionOriginDto =
+                futuresPositionService.getIdFuturesPosition(originId);
+
+        final PositionStatus sourcePositionStatus = positionOriginDto
+                .map(FuturesPositionDto::getIsActive)
+                .orElse(null);
+
         final boolean originStillActiveInEvent = originOperation.isOperacionActiva();
-        final boolean originStillOpenInPosition = positionOriginDto
-                .map(dto -> PositionStatus.OPEN.equals(dto.getIsActive()))
-                .orElse(false);
+        final boolean originStillOpenInPosition = PositionStatus.OPEN.equals(sourcePositionStatus);
 
-        if (originStillActiveInEvent) {
+        log.debug(
+                "event=copy_close_start originId={} userId={} walletId={} originActiveInEvent={} sourcePositionFound={} sourcePositionStatus={}",
+                originId,
+                userId,
+                walletId,
+                originStillActiveInEvent,
+                positionOriginDto.isPresent(),
+                sourcePositionStatus
+        );
+
+        if (originStillActiveInEvent || originStillOpenInPosition) {
+            final String reason = originStillActiveInEvent
+                    ? "origin_still_active_in_event"
+                    : "origin_still_open_in_source";
+
             log.warn(
-                    LOG_CLOSE_SKIPPED_ORIGIN_STILL_VALIDATION_ACTIVE,
+                    "event=copy_close_skipped reason={} originId={} userId={} walletId={} originActiveInEvent={} sourcePositionFound={} sourcePositionStatus={}",
+                    reason,
                     originId,
                     userId,
+                    walletId,
                     originStillActiveInEvent,
-                    originStillOpenInPosition
+                    positionOriginDto.isPresent(),
+                    sourcePositionStatus
             );
             return;
         }
 
-        if (originStillOpenInPosition) {
-            log.info("event=copy_close_db_lag originId={} userId={} dbStatusStillOpen=true", originId, userId);
-        }
+        log.info(
+                "event=copy_close_validation_ok originId={} userId={} walletId={} originActiveInEvent=false sourcePositionFound={} sourcePositionStatus={}",
+                originId,
+                userId,
+                walletId,
+                positionOriginDto.isPresent(),
+                sourcePositionStatus
+        );
 
         reconcileWalletBasketForUser(event, userDetail);
+
+        log.info(
+                "event=copy_close_completed originId={} userId={} walletId={}",
+                originId,
+                userId,
+                walletId
+        );
     }
 
     private OperacionDto requireOperacion(OperacionEvent event) {
