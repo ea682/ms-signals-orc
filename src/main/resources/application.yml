@@ -64,6 +64,23 @@ management:
       exposure:
         include: health,info,prometheus
 
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+  metrics:
+    distribution:
+      percentiles-histogram:
+        "signals.copy.ingest.duration": true
+        "signals.copy.job.queue.wait": true
+        "signals.copy.job.execution": true
+
+      slo:
+        "signals.copy.ingest.duration": [ 50ms, 100ms, 250ms, 500ms, 1s, 2s ]
+        "signals.copy.job.queue.wait": [ 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s, 10s ]
+        "signals.copy.job.execution": [ 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s ]
+
 app:
   kafka:
     operaciones:
@@ -93,3 +110,4 @@ engine:
 metric-wallet:
   distribution:
     refresh-job: 2m
+
