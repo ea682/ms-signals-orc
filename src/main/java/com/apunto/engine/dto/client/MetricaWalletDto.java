@@ -21,6 +21,7 @@ public class MetricaWalletDto {
     private ScoringDto scoring;
     private CopySimulationDto copySimulation;
     private ExposureAndCapacityDto exposureAndCapacity;
+    private CapitalModelDto capitalModel;
     private TradeStatsDto tradeStats;
     private PerformanceDto performance;
     private RiskDto risk;
@@ -121,6 +122,26 @@ public class MetricaWalletDto {
 
         private Double transactionCostImpactUSDT;
         private Double transactionCostImpactPctOfPnlCopy;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class CapitalModelDto {
+        private Double sourceTotalCapitalUSDT;
+        private Double capitalReferenceUSDT;
+        private Double capitalReferenceBufferedUSDT;
+        private String capitalReferenceType;
+        private String capitalReferenceConfidence;
+        private OffsetDateTime referenceAsOf;
+
+        private Double peakConcurrentMarginUSDT;
+        private Double currentOpenMarginUSDT;
+        private Double maxSingleTradeMarginUSDT;
+
+        private Double currentOpenUtilizationPct;
+        private Double maxSingleTradeUtilizationPct;
+
+        private List<String> notes;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
