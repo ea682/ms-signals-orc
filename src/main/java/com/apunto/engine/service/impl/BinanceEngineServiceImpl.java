@@ -93,14 +93,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private static final String LOG_PREP_INVALID_METRIC = "event=operation.open.invalid_metric originId={} userId={} wallet={} reason=invalid_capitalShare";
     private static final String LOG_PREP_INVALID_BUDGET = "event=operation.open.invalid_budget originId={} userId={} wallet={} reason=walletBudget<=0";
+    private static final String LOG_PREP_INVALID_CAPITAL_REFERENCE = "event=operation.open.invalid_capital_reference originId={} userId={} wallet={} reference={}";
     private static final String LOG_PREP_INVALID_SIZE = "event=operation.open.invalid_size originId={} userId={} wallet={} reason=size<=0";
+    private static final String LOG_PREP_INVALID_SOURCE_MARGIN = "event=operation.open.invalid_source_margin originId={} userId={} wallet={} sourceMargin={}";
     private static final String LOG_PREP_INVALID_FRACTION = "event=operation.open.invalid_fraction originId={} userId={} wallet={} fraction={}";
+    private static final String LOG_PREP_BUDGET_CLAMPED = "event=operation.open.budget_clamped originId={} userId={} wallet={} symbol={} requestedMargin={} allowedMargin={} usedMargin={} walletBudget={} reserve={} hardCap={}";
+    private static final String LOG_PREP_SKIP_NO_ROOM = "event=operation.open.skip_no_room originId={} userId={} wallet={} symbol={} walletBudget={} usedMargin={} reserve={} hardCap={}";
     private static final String LOG_PREP_INVALID_ENTRY = "event=operation.open.invalid_entry_price originId={} userId={} wallet={} reason=entryPrice<=0";
     private static final String LOG_PREP_INVALID_SYMBOL = "event=operation.open.invalid_symbol originId={} userId={} wallet={} reason=symbol_blank";
     private static final String LOG_PREP_SKIP_TOO_SMALL = "event=operation.open.skip_too_small originId={} userId={} wallet={} symbol={} notionalMax={}";
     private static final String LOG_PREP_SKIP_SYMBOL_RULES = "event=operation.open.skip_symbol_rules originId={} userId={} wallet={} symbol={} notionalMax={}";
     private static final String LOG_PREP_SKIP_NOTIONAL_ZERO = "event=operation.open.skip_notional_zero originId={} userId={} wallet={} symbol={}";
-    private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} fraction={} walletBudget={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={}";
+    private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} sourceMargin={} capitalReference={} fraction={} walletBudget={} usedMargin={} availableBufferedMargin={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={}";
     private static final BigDecimal MAX_MARGIN_SAFETY_PCT = new BigDecimal("0.30");
 
     private static final String LOG_QTY_ADJUSTED = "event=binance.qty_adjusted symbol={} qtyOriginal={} qtyFinal={} notionalFinal={} notionalMax={}";
@@ -281,7 +285,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return;
         }
 
-        reconcileWalletBasketForUser(event, userDetail);
+        executeDirectOpenForUser(event, userDetail);
 
         log.debug(LOG_OPEN_VALIDATION_OK, originId, userId);
     }
@@ -294,63 +298,142 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
         final UUID userId = userDetail.getUser().getId();
-        final String walletId = originOperation.getIdCuenta();
 
-        final Optional<FuturesPositionDto> positionOriginDto =
-                futuresPositionService.getIdFuturesPosition(originId);
-
-        final PositionStatus sourcePositionStatus = positionOriginDto
-                .map(FuturesPositionDto::getIsActive)
-                .orElse(null);
-
+        final Optional<FuturesPositionDto> positionOriginDto = futuresPositionService.getIdFuturesPosition(originId);
         final boolean originStillActiveInEvent = originOperation.isOperacionActiva();
-        final boolean originStillOpenInPosition = PositionStatus.OPEN.equals(sourcePositionStatus);
+        final boolean originStillOpenInPosition = positionOriginDto
+                .map(dto -> PositionStatus.OPEN.equals(dto.getIsActive()))
+                .orElse(false);
 
-        log.debug(
-                "event=copy_close_start originId={} userId={} walletId={} originActiveInEvent={} sourcePositionFound={} sourcePositionStatus={}",
-                originId,
-                userId,
-                walletId,
-                originStillActiveInEvent,
-                positionOriginDto.isPresent(),
-                sourcePositionStatus
-        );
-
-        if (originStillActiveInEvent || originStillOpenInPosition) {
-            final String reason = originStillActiveInEvent
-                    ? "origin_still_active_in_event"
-                    : "origin_still_open_in_source";
-
+        if (originStillActiveInEvent) {
             log.warn(
-                    "event=copy_close_skipped reason={} originId={} userId={} walletId={} originActiveInEvent={} sourcePositionFound={} sourcePositionStatus={}",
-                    reason,
+                    "event=copy_close_skipped reason=origin_still_active originId={} userId={} originActive={} dbStatusStillOpen={}",
                     originId,
                     userId,
-                    walletId,
                     originStillActiveInEvent,
-                    positionOriginDto.isPresent(),
-                    sourcePositionStatus
+                    originStillOpenInPosition
             );
             return;
         }
 
-        log.info(
-                "event=copy_close_validation_ok originId={} userId={} walletId={} originActiveInEvent=false sourcePositionFound={} sourcePositionStatus={}",
-                originId,
-                userId,
-                walletId,
-                positionOriginDto.isPresent(),
-                sourcePositionStatus
-        );
+        if (originStillOpenInPosition) {
+            log.info("event=copy_close_db_lag originId={} userId={} dbStatusStillOpen=true", originId, userId);
+        }
 
-        reconcileWalletBasketForUser(event, userDetail);
+        executeDirectCloseForUser(event, userDetail);
+    }
 
-        log.info(
-                "event=copy_close_completed originId={} userId={} walletId={}",
-                originId,
-                userId,
-                walletId
-        );
+    private void executeDirectOpenForUser(OperacionEvent event, UserDetailDto userDetail) {
+        final OperacionDto originOperation = requireOperacion(event);
+        final String originId = originOperation.getIdOperacion().toString();
+        final String userId = userDetail.getUser().getId().toString();
+        final String walletId = originOperation.getIdCuenta();
+
+        if (walletId == null || walletId.isBlank()) {
+            throw new SkipExecutionException("wallet_missing La operación origen no trae idCuenta/wallet");
+        }
+
+        distributedLockService.withLock(distLockKey(userId, walletId), Duration.ofSeconds(120), () -> {
+            final CopyOperationDto existingCopy = copyOperationService.findOperationForUser(originId, userId);
+            if (existingCopy != null) {
+                final String reason = existingCopy.isActive() ? "copy_already_active" : "copy_already_recorded";
+                log.info("event=copy_open_skipped reason={} originId={} userId={} wallet={} active={}",
+                        reason,
+                        originId,
+                        userId,
+                        walletId,
+                        existingCopy.isActive());
+                return null;
+            }
+
+            final MetricaWalletDto walletMetric = resolveWalletMetric(walletId, userDetail);
+            if (walletMetric == null) {
+                log.info("event=copy_open_skipped reason=metric_missing originId={} userId={} wallet={}",
+                        originId,
+                        userId,
+                        walletId);
+                return null;
+            }
+
+            if (!passesWalletFilters(walletMetric)) {
+                log.info("event=copy_open_skipped reason=wallet_filtered originId={} userId={} wallet={}",
+                        originId,
+                        userId,
+                        walletId);
+                return null;
+            }
+
+            final PreparedOpen prepared = prepareOpenOperation(event, userDetail, walletMetric);
+            BinanceFuturesOrderClientResponse order = null;
+            try {
+                order = procesBinanceService.operationPosition(prepared.dto);
+                createNewOperation(order, walletId, originOperation.getIdOperacion(), userId, prepared.leverage);
+                log.info("event=copy_open_completed originId={} userId={} wallet={} symbol={} orderId={} qty={} notional={}",
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.symbol,
+                        order.getOrderId(),
+                        safeQty(copyTradingMapper.resolveFilledQty(order)).toPlainString(),
+                        prepared.notional.toPlainString());
+                return null;
+            } catch (RuntimeException ex) {
+                if (order != null) {
+                    try {
+                        tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, order, userDetail);
+                    } catch (Exception panicEx) {
+                        log.error("event=copy_open_panic_close_failed originId={} userId={} wallet={} symbol={} panicErrClass={} panicErr=\"{}\"",
+                                originId,
+                                userId,
+                                walletId,
+                                prepared.symbol,
+                                panicEx.getClass().getSimpleName(),
+                                safeLog(panicEx.getMessage()),
+                                panicEx);
+                    }
+                }
+                throw ex;
+            }
+        });
+    }
+
+    private void executeDirectCloseForUser(OperacionEvent event, UserDetailDto userDetail) {
+        final OperacionDto originOperation = requireOperacion(event);
+        final String originId = originOperation.getIdOperacion().toString();
+        final String userId = userDetail.getUser().getId().toString();
+        final String walletId = originOperation.getIdCuenta();
+
+        if (walletId == null || walletId.isBlank()) {
+            throw new SkipExecutionException("wallet_missing La operación origen no trae idCuenta/wallet");
+        }
+
+        distributedLockService.withLock(distLockKey(userId, walletId), Duration.ofSeconds(120), () -> {
+            final CopyOperationDto currentCopy = copyOperationService.findOperationForUser(originId, userId);
+            if (currentCopy == null) {
+                log.info("event=copy_close_skipped reason=copy_missing originId={} userId={} wallet={}",
+                        originId,
+                        userId,
+                        walletId);
+                return null;
+            }
+
+            if (!currentCopy.isActive()) {
+                log.info("event=copy_close_skipped reason=copy_already_inactive originId={} userId={} wallet={}",
+                        originId,
+                        userId,
+                        walletId);
+                return null;
+            }
+
+            executeCloseOperation(currentCopy, userDetail);
+            log.info("event=copy_close_completed originId={} userId={} wallet={} symbol={} qty={}",
+                    originId,
+                    userId,
+                    walletId,
+                    currentCopy.getParsymbol(),
+                    safeQty(currentCopy.getSizePar()).toPlainString());
+            return null;
+        });
     }
 
     private OperacionDto requireOperacion(OperacionEvent event) {
@@ -977,7 +1060,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         Objects.requireNonNull(userDetail, ERR_USER_NULL);
         Objects.requireNonNull(walletMetric, "walletMetric no puede ser null");
 
-        final String originId = event.getOperacion().getIdOperacion().toString();
+        final OperacionDto originOperation = requireOperacion(event);
+        final String originId = originOperation.getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
         final String walletId = walletMetric.getWallet().getIdWallet();
 
@@ -1015,30 +1099,37 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final Double capitalRequired =
-                walletMetric.getExposureAndCapacity() == null ? null : walletMetric.getExposureAndCapacity().getCapitalRequired();
-
-        double baseCapital = Optional.ofNullable(capitalRequired)
-                .filter(required -> required > 0)
-                .orElse(DEFAULT_BASE_CAPITAL);
-
-        if (Double.isFinite(sizingBaseCapitalCap) && sizingBaseCapitalCap > 0 && baseCapital > sizingBaseCapitalCap) {
-            baseCapital = sizingBaseCapitalCap;
-        }
-
-        final BigDecimal sizeOriginal = event.getOperacion().getSize();
-        if (sizeOriginal == null || sizeOriginal.compareTo(ZERO) <= 0) {
-            log.warn(LOG_PREP_INVALID_SIZE, originId, userId, walletId);
+        final BigDecimal capitalReference = resolveCapitalReference(walletMetric);
+        if (capitalReference.compareTo(ZERO) <= 0) {
+            log.warn(LOG_PREP_INVALID_CAPITAL_REFERENCE, originId, userId, walletId, capitalReference.toPlainString());
             throw new SkipExecutionException(
-                    "size_invalid",
-                    "Operación inválida: size <= 0",
-                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "size", sizeOriginal)
+                    "capital_reference_invalid",
+                    "Capital de referencia inválido para sizing",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "capitalReference", capitalReference
+                    )
             );
         }
 
-        final BigDecimal baseCapitalBd = BigDecimal.valueOf(baseCapital);
-        BigDecimal fractionOfBaseUsed = sizeOriginal.divide(baseCapitalBd, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        final BigDecimal sourceMargin = resolveSourceMarginForSizing(originOperation, walletMetric);
+        if (sourceMargin.compareTo(ZERO) <= 0) {
+            log.warn(LOG_PREP_INVALID_SOURCE_MARGIN, originId, userId, walletId, sourceMargin.toPlainString());
+            throw new SkipExecutionException(
+                    "source_margin_invalid",
+                    "Operación inválida: no se pudo resolver margen fuente > 0",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "sourceMargin", sourceMargin,
+                            "marginUsedUsd", originOperation.getMarginUsedUsd(),
+                            "notionalUsd", originOperation.getNotionalUsd(),
+                            "size", originOperation.getSize(),
+                            "sizeQty", originOperation.getSizeQty()
+                    )
+            );
+        }
 
+        BigDecimal fractionOfBaseUsed = sourceMargin.divide(capitalReference, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
         if (fractionOfBaseUsed.compareTo(BigDecimal.ONE) > 0) {
             fractionOfBaseUsed = BigDecimal.ONE;
         }
@@ -1050,18 +1141,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             throw new SkipExecutionException(
                     "fraction_invalid",
                     "Sizing inválido: fracción calculada <= 0",
-                    com.apunto.engine.shared.util.LogFmt.kv(
+                    LogFmt.kv(
                             "wallet", walletId,
                             "fraction", fractionOfBaseUsed,
-                            "sizeOriginal", sizeOriginal,
-                            "baseCapital", baseCapital
+                            "sourceMargin", sourceMargin,
+                            "capitalReference", capitalReference
                     )
             );
         }
 
-        final BigDecimal marginThisTrade = walletMarginBudget.multiply(fractionOfBaseUsed);
-
-        final BigDecimal entryPrice = event.getOperacion().getPrecioEntrada();
+        final BigDecimal entryPrice = originOperation.getPrecioEntrada();
         if (entryPrice == null || entryPrice.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_ENTRY, originId, userId, walletId);
             throw new SkipExecutionException(
@@ -1071,7 +1160,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final String rawSymbol = event.getOperacion().getParSymbol();
+        final String rawSymbol = originOperation.getParSymbol();
         if (rawSymbol == null || rawSymbol.isBlank()) {
             log.warn(LOG_PREP_INVALID_SYMBOL, originId, userId, walletId);
             throw new SkipExecutionException(
@@ -1092,6 +1181,82 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 USER_LEVERAGE_MAX,
                 Math.max(USER_LEVERAGE_MIN, userDetail.getDetail().getLeverage())
         );
+
+        final BigDecimal safety = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
+        final BigDecimal usedMargin = copyOperationService.sumBufferedMarginActive(userId, walletId, safety);
+        final BigDecimal reserve = walletMarginBudget.multiply(safePct(walletReservePct, BigDecimal.ONE));
+        final BigDecimal hardCap = walletMarginBudget.multiply(BigDecimal.ONE.add(safePct(walletHardcapOverPct, BigDecimal.ONE)));
+        final BigDecimal availableBufferedMargin = hardCap.subtract(reserve).subtract(usedMargin).max(ZERO);
+
+        if (availableBufferedMargin.compareTo(ZERO) <= 0) {
+            log.warn(LOG_PREP_SKIP_NO_ROOM,
+                    originId,
+                    userId,
+                    walletId,
+                    symbol,
+                    walletMarginBudget.toPlainString(),
+                    usedMargin.toPlainString(),
+                    reserve.toPlainString(),
+                    hardCap.toPlainString());
+            throw new SkipExecutionException(
+                    "wallet_budget_exhausted",
+                    "No hay presupuesto disponible en la wallet para una nueva apertura",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "walletBudget", walletMarginBudget,
+                            "usedMargin", usedMargin,
+                            "reserve", reserve,
+                            "hardCap", hardCap,
+                            "availableBufferedMargin", availableBufferedMargin
+                    )
+            );
+        }
+
+        final BigDecimal requestedMarginThisTrade = walletMarginBudget.multiply(fractionOfBaseUsed);
+        BigDecimal allowedMarginThisTrade = availableBufferedMargin
+                .divide(BigDecimal.ONE.add(safety), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
+                .max(ZERO);
+        BigDecimal marginThisTrade = requestedMarginThisTrade.min(allowedMarginThisTrade);
+
+        if (marginThisTrade.compareTo(ZERO) <= 0) {
+            log.warn(LOG_PREP_SKIP_NO_ROOM,
+                    originId,
+                    userId,
+                    walletId,
+                    symbol,
+                    walletMarginBudget.toPlainString(),
+                    usedMargin.toPlainString(),
+                    reserve.toPlainString(),
+                    hardCap.toPlainString());
+            throw new SkipExecutionException(
+                    "wallet_budget_exhausted",
+                    "El margen disponible luego de buffers es 0",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "walletBudget", walletMarginBudget,
+                            "usedMargin", usedMargin,
+                            "reserve", reserve,
+                            "hardCap", hardCap,
+                            "availableBufferedMargin", availableBufferedMargin,
+                            "requestedMargin", requestedMarginThisTrade,
+                            "allowedMargin", allowedMarginThisTrade
+                    )
+            );
+        }
+
+        if (marginThisTrade.compareTo(requestedMarginThisTrade) < 0) {
+            log.info(LOG_PREP_BUDGET_CLAMPED,
+                    originId,
+                    userId,
+                    walletId,
+                    symbol,
+                    requestedMarginThisTrade.toPlainString(),
+                    marginThisTrade.toPlainString(),
+                    usedMargin.toPlainString(),
+                    walletMarginBudget.toPlainString(),
+                    reserve.toPlainString(),
+                    hardCap.toPlainString());
+        }
 
         final BigDecimal notionalMax = marginThisTrade.multiply(BigDecimal.valueOf(leverage));
         if (notionalMax.compareTo(ZERO) <= 0) {
@@ -1161,7 +1326,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                             "marginThisTrade", marginThisTrade,
                             "walletMarginBudget", walletMarginBudget,
                             "fraction", fractionOfBaseUsed,
-                            "bufPct", buf
+                            "bufPct", buf,
+                            "sourceMargin", sourceMargin,
+                            "capitalReference", capitalReference,
+                            "usedMargin", usedMargin,
+                            "availableBufferedMargin", availableBufferedMargin
                     )
             );
         }
@@ -1225,11 +1394,34 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final BigDecimal safety = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
-
         final BigDecimal marginRequired = notionalFinal
                 .divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
                 .multiply(BigDecimal.ONE.add(safety));
+
+        if (marginRequired.compareTo(availableBufferedMargin) > 0) {
+            log.warn(LOG_OPEN_SKIP_BUDGET,
+                    originId,
+                    userId,
+                    walletId,
+                    symbol,
+                    marginRequired.toPlainString(),
+                    walletMarginBudget.toPlainString(),
+                    usedMargin.toPlainString());
+            throw new SkipExecutionException(
+                    "wallet_budget_exceeded",
+                    "La operación excede el presupuesto restante de la wallet",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "marginRequired", marginRequired,
+                            "availableBufferedMargin", availableBufferedMargin,
+                            "walletBudget", walletMarginBudget,
+                            "usedMargin", usedMargin,
+                            "reserve", reserve,
+                            "hardCap", hardCap
+                    )
+            );
+        }
 
         final String userWalletKey = userWalletKey(userId, walletId);
 
@@ -1238,8 +1430,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 userId,
                 walletId,
                 symbol,
+                sourceMargin.toPlainString(),
+                capitalReference.toPlainString(),
                 fractionOfBaseUsed.toPlainString(),
                 walletMarginBudget.toPlainString(),
+                usedMargin.toPlainString(),
+                availableBufferedMargin.toPlainString(),
                 marginThisTrade.toPlainString(),
                 leverage,
                 notionalFinal.toPlainString(),
@@ -1905,16 +2101,89 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             Map.entry("PIUSD", "PIUSDT")
     );
 
+    private BigDecimal resolveCapitalReference(MetricaWalletDto walletMetric) {
+        if (walletMetric == null) {
+            return BigDecimal.valueOf(DEFAULT_BASE_CAPITAL);
+        }
+
+        if (walletMetric.getCapitalModel() != null) {
+            final BigDecimal sourceTotalCapital = safeMetricDecimal(walletMetric.getCapitalModel().getSourceTotalCapitalUSDT());
+            if (sourceTotalCapital.compareTo(ZERO) > 0) {
+                return sourceTotalCapital;
+            }
+
+            final BigDecimal capitalReference = safeMetricDecimal(walletMetric.getCapitalModel().getCapitalReferenceUSDT());
+            if (capitalReference.compareTo(ZERO) > 0) {
+                return capitalReference;
+            }
+
+            final BigDecimal capitalReferenceBuffered = safeMetricDecimal(walletMetric.getCapitalModel().getCapitalReferenceBufferedUSDT());
+            if (capitalReferenceBuffered.compareTo(ZERO) > 0) {
+                return capitalReferenceBuffered;
+            }
+        }
+
+        if (walletMetric.getExposureAndCapacity() != null) {
+            final BigDecimal capitalRequired = safeMetricDecimal(walletMetric.getExposureAndCapacity().getCapitalRequired());
+            if (capitalRequired.compareTo(ZERO) > 0) {
+                return capitalRequired;
+            }
+        }
+
+        return BigDecimal.valueOf(DEFAULT_BASE_CAPITAL);
+    }
+
+    private BigDecimal resolveSourceMarginForSizing(OperacionDto originOperation, MetricaWalletDto walletMetric) {
+        if (originOperation == null) {
+            return ZERO;
+        }
+
+        BigDecimal margin = abs(originOperation.getMarginUsedUsd());
+        if (margin.compareTo(ZERO) > 0) {
+            return margin;
+        }
+
+        final int leverageRef = resolveSourceLeverageReference(walletMetric);
+
+        BigDecimal notional = abs(originOperation.getNotionalUsd());
+        if (notional.compareTo(ZERO) > 0 && leverageRef > 0) {
+            return notional.divide(BigDecimal.valueOf(leverageRef), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+
+        final BigDecimal priceRef = resolvePriceRef(originOperation.getPrecioMercado(), originOperation.getPrecioEntrada());
+        notional = safeQty(originOperation.getSizeQty()).multiply(priceRef);
+        if (notional.compareTo(ZERO) > 0 && leverageRef > 0) {
+            return notional.divide(BigDecimal.valueOf(leverageRef), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+
+        return abs(originOperation.getSize());
+    }
+
+    private int resolveSourceLeverageReference(MetricaWalletDto walletMetric) {
+        if (walletMetric != null && walletMetric.getExposureAndCapacity() != null) {
+            final Integer leverageMedian = walletMetric.getExposureAndCapacity().getLeverageMedian();
+            if (leverageMedian != null && leverageMedian > 0) {
+                return leverageMedian;
+            }
+        }
+        return USER_LEVERAGE_MIN;
+    }
+
+    private BigDecimal safeMetricDecimal(Double value) {
+        if (value == null || !Double.isFinite(value) || value <= 0) {
+            return ZERO;
+        }
+        return BigDecimal.valueOf(value);
+    }
+
     private BigDecimal computeSourceUtilization(List<OriginBasketPositionDto> sourceBasket,
                                                 MetricaWalletDto walletMetric) {
         if (sourceBasket == null || sourceBasket.isEmpty()) {
             return ZERO;
         }
 
-        if (walletMetric == null
-                || walletMetric.getExposureAndCapacity() == null
-                || walletMetric.getExposureAndCapacity().getCapitalRequired() == null
-                || walletMetric.getExposureAndCapacity().getCapitalRequired() <= 0) {
+        final BigDecimal capitalReference = resolveCapitalReference(walletMetric);
+        if (capitalReference.compareTo(ZERO) <= 0) {
             return BigDecimal.ONE;
         }
 
@@ -1927,11 +2196,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return BigDecimal.ONE;
         }
 
-        final BigDecimal capitalRequired = BigDecimal.valueOf(
-                walletMetric.getExposureAndCapacity().getCapitalRequired()
-        );
-
-        BigDecimal utilization = sourceOpenMargin.divide(capitalRequired, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        BigDecimal utilization = sourceOpenMargin.divide(capitalReference, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
 
         if (utilization.compareTo(ZERO) < 0) {
             return ZERO;
