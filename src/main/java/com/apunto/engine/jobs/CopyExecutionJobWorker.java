@@ -5,6 +5,7 @@ import com.apunto.engine.entity.CopyExecutionJobEntity;
 import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.jobs.model.CopyJobErrorCategory;
+import com.apunto.engine.metric.TradingMetrics;
 import com.apunto.engine.service.BinanceCopyExecutionService;
 import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.UserDetailCachedService;
@@ -53,7 +54,7 @@ public class CopyExecutionJobWorker {
     private final UserDetailCachedService userDetailCachedService;
     private final ObjectMapper objectMapper;
     private final ThreadPoolTaskExecutor executor;
-
+    private final TradingMetrics tradingMetrics;
     private final String workerId;
 
     @Value("${copy.job.worker.max-batch:50}")
@@ -67,13 +68,15 @@ public class CopyExecutionJobWorker {
             BinanceCopyExecutionService binanceCopyExecutionService,
             UserDetailCachedService userDetailCachedService,
             ObjectMapper objectMapper,
-            @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor executor
+            @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor executor,
+            TradingMetrics tradingMetrics
     ) {
         this.jobService = jobService;
         this.binanceCopyExecutionService = binanceCopyExecutionService;
         this.userDetailCachedService = userDetailCachedService;
         this.objectMapper = objectMapper;
         this.executor = executor;
+        this.tradingMetrics = tradingMetrics;
         this.workerId = buildWorkerId();
     }
 
@@ -92,6 +95,8 @@ public class CopyExecutionJobWorker {
 
             List<CopyExecutionJobEntity> jobs = jobService.claimBatch(workerId, maxBatch);
             if (jobs.isEmpty()) return;
+
+            tradingMetrics.claimedBatch(jobs.size());
 
             ExecSnapshot s = execSnapshot();
             log.info("event=copy.job.claimed workerId={} batch={} execPool={} execActive={} execQueue={} execQueueRemaining={}",
@@ -133,6 +138,7 @@ public class CopyExecutionJobWorker {
 
         try {
             putJobMdc(job);
+            tradingMetrics.jobQueueWait(job);
 
             log.info("event=copy.job.started id={} originId={} userId={} action={} attempt={} workerId={}",
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt(), workerId);
@@ -149,12 +155,19 @@ public class CopyExecutionJobWorker {
 
             jobService.markDone(job);
 
+            tradingMetrics.jobExecution(job, "done", System.nanoTime() - t0);
+            tradingMetrics.jobResult(job, "done", null);
+
             long ms = Duration.ofNanos(System.nanoTime() - t0).toMillis();
             log.info("event=copy.job.completed id={} originId={} userId={} action={} attempt={} workerId={} durationMs={}",
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt(), workerId, ms);
 
         } catch (SkipExecutionException skip) {
             jobService.markDead(job, CopyJobErrorCategory.SKIP.name(), safeMsg(skip));
+
+            tradingMetrics.jobExecution(job, "skipped", System.nanoTime() - t0);
+            tradingMetrics.jobResult(job, "skipped", skip.getReasonCode());
+
             log.info("event=copy.job.skipped id={} originId={} userId={} action={} attempt={} workerId={} reasonCode={} reason=\"{}\" details=\"{}\"",
                     job.getId(),
                     job.getOriginId(),
@@ -168,6 +181,9 @@ public class CopyExecutionJobWorker {
 
         } catch (Exception ex) {
             handleFailure(job, ex);
+
+            tradingMetrics.jobExecution(job, "failed", System.nanoTime() - t0);
+            tradingMetrics.jobResult(job, "failed", ex.getClass().getSimpleName());
 
         } finally {
             MDC.clear();
