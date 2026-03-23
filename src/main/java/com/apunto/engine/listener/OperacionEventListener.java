@@ -1,6 +1,7 @@
 package com.apunto.engine.listener;
 
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.metric.TradingMetrics;
 import com.apunto.engine.service.OperacionEventIngestService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Component;
 public class OperacionEventListener {
 
     private final OperacionEventIngestService operacionEventIngestService;
+    private final TradingMetrics tradingMetrics;
 
     @KafkaListener(
             topics = "${app.kafka.operaciones.topic:${KAFKA_TOPIC_OPERACIONES:operaciones-eventos}}",
@@ -44,6 +46,7 @@ public class OperacionEventListener {
         MDC.put("kafka.offset", String.valueOf(offset));
 
         try {
+            tradingMetrics.kafkaReceived(topic);
             log.info("event=kafka.received key={} ts={}", key, timestamp);
 
             operacionEventIngestService.ingest(event);

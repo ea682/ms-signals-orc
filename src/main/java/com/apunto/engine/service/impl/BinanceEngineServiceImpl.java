@@ -842,21 +842,35 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal currentQty = safeQty(currentCopy.getSizePar());
         final BigDecimal targetQty = target.targetQty();
         final BigDecimal deltaQty = currentQty.subtract(targetQty);
+
         final OperationDto dto = buildReduceOrder(
                 target,
                 deltaQty,
                 userDetail,
-                IdempotencyKeyUtil.rebalanceReduceClientOrderId(triggerOriginId, target.originId(), userDetail.getUser().getId().toString(), target.walletId(), targetQty.stripTrailingZeros().toPlainString())
+                IdempotencyKeyUtil.rebalanceReduceClientOrderId(
+                        triggerOriginId,
+                        target.originId(),
+                        userDetail.getUser().getId().toString(),
+                        target.walletId(),
+                        targetQty.stripTrailingZeros().toPlainString()
+                )
         );
+
         final BinanceFuturesOrderClientResponse response = procesBinanceService.operationPosition(dto);
+
         if (!isValidOrderResponse(response)) {
             throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Respuesta inválida de Binance");
         }
+
         final BigDecimal filledQty = safeQty(copyTradingMapper.resolveFilledQty(response));
         if (filledQty.compareTo(ZERO) <= 0) {
             return currentCopy;
         }
+
         final BigDecimal remainingQty = currentQty.subtract(filledQty);
+
+        final OffsetDateTime eventTime = copyTradingMapper.toUtcOffsetDateTime(response.getUpdateTime());
+
         if (remainingQty.compareTo(ZERO) <= 0 || targetQty.compareTo(ZERO) <= 0) {
             final CopyOperationDto closed = CopyOperationDto.builder()
                     .idOperation(currentCopy.getIdOperation())
@@ -872,16 +886,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .priceEntry(currentCopy.getPriceEntry())
                     .priceClose(response.getAvgPrice())
                     .dateCreation(currentCopy.getDateCreation())
-                    .dateClose(OffsetDateTime.now())
+                    .dateClose(eventTime)
                     .active(false)
                     .build();
+
             copyOperationService.closeOperation(closed);
             return closed;
         }
 
         final BigDecimal currentUsd = safeUsd(currentCopy.getSiseUsd(), currentQty, currentCopy.getPriceEntry());
-        final BigDecimal unitUsd = currentQty.compareTo(ZERO) <= 0 ? ZERO : currentUsd.divide(currentQty, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        final BigDecimal unitUsd = currentQty.compareTo(ZERO) <= 0
+                ? ZERO
+                : currentUsd.divide(currentQty, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
         final BigDecimal remainingUsd = unitUsd.multiply(remainingQty);
+
         final CopyOperationDto updated = CopyOperationDto.builder()
                 .idOperation(currentCopy.getIdOperation())
                 .idOrden(currentCopy.getIdOrden())
@@ -899,6 +917,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .dateClose(null)
                 .active(true)
                 .build();
+
         copyOperationService.upsertActiveOperation(updated);
         return updated;
     }
