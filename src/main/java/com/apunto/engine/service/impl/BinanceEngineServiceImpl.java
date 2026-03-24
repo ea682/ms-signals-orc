@@ -299,26 +299,72 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String originId = originOperation.getIdOperacion().toString();
         final UUID userId = userDetail.getUser().getId();
 
-        final Optional<FuturesPositionDto> positionOriginDto = futuresPositionService.getIdFuturesPosition(originId);
         final boolean originStillActiveInEvent = originOperation.isOperacionActiva();
-        final boolean originStillOpenInPosition = positionOriginDto
-                .map(dto -> PositionStatus.OPEN.equals(dto.getIsActive()))
-                .orElse(false);
+
+        final Optional<FuturesPositionDto> positionOriginDto =
+                futuresPositionService.getIdFuturesPosition(originId);
+
+        final PositionStatus sourceStatus = positionOriginDto
+                .map(FuturesPositionDto::getIsActive)
+                .orElse(null);
+
+        final boolean sourcePositionExists = sourceStatus != null;
+        final boolean originStillOpenInDb = PositionStatus.OPEN.equals(sourceStatus);
+        final boolean originClosedInDb =
+                PositionStatus.CLOSED.equals(sourceStatus)
+                        || PositionStatus.LIQUIDATED.equals(sourceStatus)
+                        || PositionStatus.CANCELLED.equals(sourceStatus);
 
         if (originStillActiveInEvent) {
             log.warn(
-                    "event=copy_close_skipped reason=origin_still_active originId={} userId={} originActive={} dbStatusStillOpen={}",
+                    "event=copy_close_skipped reason=origin_still_active originId={} userId={} originActive={} dbStatus={}",
                     originId,
                     userId,
                     originStillActiveInEvent,
-                    originStillOpenInPosition
+                    sourceStatus
             );
             return;
         }
 
-        if (originStillOpenInPosition) {
-            log.info("event=copy_close_db_lag originId={} userId={} dbStatusStillOpen=true", originId, userId);
+        if (!sourcePositionExists) {
+            log.warn(
+                    "event=copy_close_skipped reason=source_position_not_found originId={} userId={} originActive={} dbStatus=null",
+                    originId,
+                    userId,
+                    originStillActiveInEvent
+            );
+            return;
         }
+
+        if (originStillOpenInDb) {
+            log.warn(
+                    "event=copy_close_skipped reason=source_still_open_in_db originId={} userId={} originActive={} dbStatus={}",
+                    originId,
+                    userId,
+                    originStillActiveInEvent,
+                    sourceStatus
+            );
+            return;
+        }
+
+        if (!originClosedInDb) {
+            log.warn(
+                    "event=copy_close_skipped reason=source_not_in_terminal_state originId={} userId={} originActive={} dbStatus={}",
+                    originId,
+                    userId,
+                    originStillActiveInEvent,
+                    sourceStatus
+            );
+            return;
+        }
+
+        log.info(
+                "event=copy_close_validation_ok originId={} userId={} originActive={} dbStatus={}",
+                originId,
+                userId,
+                originStillActiveInEvent,
+                sourceStatus
+        );
 
         executeDirectCloseForUser(event, userDetail);
     }
