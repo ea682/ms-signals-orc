@@ -62,8 +62,7 @@ import java.util.stream.Collectors;
 public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCopyExecutionService {
 
     private static final double DEFAULT_BASE_CAPITAL = 1_000.0;
-    private static final BigDecimal MIN_NOTIONAL_FALLBACK = new BigDecimal("7");
-    private static final BigDecimal USER_MIN_NOTIONAL_USDT = new BigDecimal("7");
+    private static final BigDecimal MIN_NOTIONAL_FALLBACK = new BigDecimal("5");
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal REBALANCE_TOLERANCE_PCT = new BigDecimal("0.02");
 
@@ -156,6 +155,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     @Value("${engine.copy.sizing.notional-buffer-pct:0.03}")
     private BigDecimal notionalBufferPct;
+
+    @Value("${copy.rules.min-notional-floor-usdt:0}")
+    private BigDecimal configuredMinNotionalFloor;
 
     private final CopyTradingMapper copyTradingMapper;
     private final FuturesPositionService futuresPositionService;
@@ -713,8 +715,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 BigDecimal targetNotionalFinal = targetQty.multiply(priceRef);
                 if (targetQty.compareTo(ZERO) > 0
-                        && rules.minNotional != null
-                        && targetNotionalFinal.compareTo(rules.minNotional) < 0) {
+                        && rules.effectiveMinNotional != null
+                        && targetNotionalFinal.compareTo(rules.effectiveMinNotional) < 0) {
                     throw new SkipExecutionException(
                             "notional_too_small",
                             "Target descartado porque el notional final quedó bajo el mínimo de Binance",
@@ -724,7 +726,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                     "targetQty", targetQty,
                                     "priceRef", priceRef,
                                     "targetNotional", targetNotionalFinal,
-                                    "minNotional", rules.minNotional
+                                    "minNotional", rules.effectiveMinNotional,
+                                    "exchangeMinNotional", rules.exchangeMinNotional,
+                                    "effectiveMinNotional", rules.effectiveMinNotional,
+                                    "minNotionalFloor", configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor
                             )
                     );
                 }
@@ -1359,31 +1364,37 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final SymbolRules rules = extractRules(symbolInfo);
-        if (rules == null || rules.minNotional == null) {
+        if (rules == null || rules.effectiveMinNotional == null) {
             log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
             throw new SkipExecutionException(
                     "symbol_rules_invalid",
-                    "Reglas de Binance inválidas/incompletas (minNotional null)",
+                    "Reglas de Binance inválidas/incompletas (effectiveMinNotional null)",
                     com.apunto.engine.shared.util.LogFmt.kv(
                             "wallet", walletId,
                             "symbol", symbol,
-                            "targetNotional", targetNotional
+                            "targetNotional", targetNotional,
+                            "exchangeMinNotional", rules == null ? null : rules.exchangeMinNotional,
+                            "effectiveMinNotional", rules == null ? null : rules.effectiveMinNotional,
+                            "minNotionalFloor", configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor
                     )
             );
         }
 
-        if (targetNotional.compareTo(rules.minNotional) < 0) {
+        if (targetNotional.compareTo(rules.effectiveMinNotional) < 0) {
             log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
-            final BigDecimal missing = rules.minNotional.subtract(targetNotional);
+            final BigDecimal missing = rules.effectiveMinNotional.subtract(targetNotional);
             throw new SkipExecutionException(
                     "notional_too_small",
                     "Operación demasiado pequeña: faltan " + missing.max(ZERO).toPlainString()
-                            + " de notional para minNotional=" + rules.minNotional.toPlainString(),
+                            + " de notional para minNotional=" + rules.effectiveMinNotional.toPlainString(),
                     com.apunto.engine.shared.util.LogFmt.kv(
                             "wallet", walletId,
                             "symbol", symbol,
                             "candidateNotional", targetNotional,
-                            "minNotional", rules.minNotional,
+                            "minNotional", rules.effectiveMinNotional,
+                            "exchangeMinNotional", rules.exchangeMinNotional,
+                            "effectiveMinNotional", rules.effectiveMinNotional,
+                            "minNotionalFloor", configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor,
                             "missingNotional", missing,
                             "entryPrice", entryPrice,
                             "leverage", leverage,
@@ -1436,19 +1447,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final BigDecimal notionalFinal = quantity.multiply(entryPrice);
-        if (notionalFinal.compareTo(rules.minNotional) < 0) {
+        if (notionalFinal.compareTo(rules.effectiveMinNotional) < 0) {
             log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, notionalFinal.toPlainString());
-            final BigDecimal missing = rules.minNotional.subtract(notionalFinal);
+            final BigDecimal missing = rules.effectiveMinNotional.subtract(notionalFinal);
             throw new SkipExecutionException(
                     "notional_too_small",
                     "Operación demasiado pequeña tras ajuste: faltan " + missing.max(ZERO).toPlainString()
-                            + " de notional para minNotional=" + rules.minNotional.toPlainString(),
+                            + " de notional para minNotional=" + rules.effectiveMinNotional.toPlainString(),
                     com.apunto.engine.shared.util.LogFmt.kv(
                             "wallet", walletId,
                             "symbol", symbol,
                             "candidateNotional", targetNotional,
                             "notionalFinal", notionalFinal,
-                            "minNotional", rules.minNotional,
+                            "minNotional", rules.effectiveMinNotional,
+                            "exchangeMinNotional", rules.exchangeMinNotional,
+                            "effectiveMinNotional", rules.effectiveMinNotional,
+                            "minNotionalFloor", configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor,
                             "missingNotional", missing,
                             "entryPrice", entryPrice,
                             "qtyFinal", quantity,
@@ -1797,7 +1811,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final int stepScale = stepSize == null ? 0 : Math.max(0, stepSize.stripTrailingZeros().scale());
         final int finalScale = Math.max(qtyScaleFromBinance, stepScale);
 
-        BigDecimal minNotional = null;
+        BigDecimal exchangeMinNotional = null;
         for (BinanceFuturesSymbolFilterDto f : symbolDetail.getFilters()) {
             if (f == null || f.getFilterType() == null) {
                 continue;
@@ -1805,20 +1819,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
             if (FILTER_TYPE_MIN_NOTIONAL.equalsIgnoreCase(f.getFilterType())
                     || FILTER_TYPE_NOTIONAL.equalsIgnoreCase(f.getFilterType())) {
-                minNotional = safeBigDecimal(f.getNotional());
+                exchangeMinNotional = safeBigDecimal(f.getNotional());
                 break;
             }
         }
 
-        if (minNotional == null) {
-            minNotional = MIN_NOTIONAL_FALLBACK;
+        if (exchangeMinNotional == null) {
+            exchangeMinNotional = MIN_NOTIONAL_FALLBACK;
         }
-        if (minNotional.compareTo(MIN_NOTIONAL_FALLBACK) < 0) {
-            minNotional = MIN_NOTIONAL_FALLBACK;
-        }
-        minNotional = minNotional.max(USER_MIN_NOTIONAL_USDT).max(MIN_NOTIONAL_FALLBACK);
 
-        return new SymbolRules(stepSize, minQty, minNotional, finalScale);
+        final BigDecimal minNotionalFloor =
+                configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor.max(ZERO);
+
+        final BigDecimal effectiveMinNotional = exchangeMinNotional.max(minNotionalFloor);
+
+        return new SymbolRules(stepSize, minQty, exchangeMinNotional, effectiveMinNotional, finalScale);
     }
 
     private BigDecimal adjustQuantityToBinanceRules(String symbol,
@@ -1996,13 +2011,19 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final class SymbolRules {
         private final BigDecimal stepSize;
         private final BigDecimal minQty;
-        private final BigDecimal minNotional;
+        private final BigDecimal exchangeMinNotional;
+        private final BigDecimal effectiveMinNotional;
         private final int qtyScale;
 
-        private SymbolRules(BigDecimal stepSize, BigDecimal minQty, BigDecimal minNotional, int qtyScale) {
+        private SymbolRules(BigDecimal stepSize,
+                            BigDecimal minQty,
+                            BigDecimal exchangeMinNotional,
+                            BigDecimal effectiveMinNotional,
+                            int qtyScale) {
             this.stepSize = stepSize;
             this.minQty = minQty;
-            this.minNotional = minNotional;
+            this.exchangeMinNotional = exchangeMinNotional;
+            this.effectiveMinNotional = effectiveMinNotional;
             this.qtyScale = qtyScale;
         }
     }
