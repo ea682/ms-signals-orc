@@ -376,38 +376,86 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String originId = originOperation.getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
         final String walletId = originOperation.getIdCuenta();
+        final String symbol = safeLog(originOperation.getParSymbol());
 
         if (walletId == null || walletId.isBlank()) {
             throw new SkipExecutionException("wallet_missing La operación origen no trae idCuenta/wallet");
         }
 
-        distributedLockService.withLock(distLockKey(userId, walletId), Duration.ofSeconds(120), () -> {
+        final String lockKey = distLockKey(userId, walletId);
+
+        log.info(
+                "event=copy_open_lock_wait originId={} userId={} wallet={} symbol={} lockKey=\"{}\"",
+                originId,
+                userId,
+                walletId,
+                symbol,
+                lockKey
+        );
+
+        distributedLockService.withLock(lockKey, Duration.ofSeconds(120), () -> {
+            log.info(
+                    "event=copy_open_lock_acquired originId={} userId={} wallet={} symbol={} lockKey=\"{}\"",
+                    originId,
+                    userId,
+                    walletId,
+                    symbol,
+                    lockKey
+            );
+
             final CopyOperationDto existingCopy = copyOperationService.findOperationForUser(originId, userId);
             if (existingCopy != null) {
                 final String reason = existingCopy.isActive() ? "copy_already_active" : "copy_already_recorded";
-                log.info("event=copy_open_skipped reason={} originId={} userId={} wallet={} active={}",
+                log.info(
+                        "event=copy_open_skipped reason={} originId={} userId={} wallet={} symbol={} active={} copyId={} copyOrderId={}",
                         reason,
                         originId,
                         userId,
                         walletId,
-                        existingCopy.isActive());
+                        symbol,
+                        existingCopy.isActive(),
+                        existingCopy.getIdOperation(),
+                        existingCopy.getIdOrden()
+                );
                 return null;
             }
 
-            final MetricaWalletDto walletMetric = resolveWalletMetric(walletId, userDetail);
+            final MetricaWalletDto walletMetric = resolveWalletMetric(originId, walletId, userDetail);
             if (walletMetric == null) {
-                log.info("event=copy_open_skipped reason=metric_missing originId={} userId={} wallet={}",
+                log.warn(
+                        "event=copy_open_skipped reason=metric_missing originId={} userId={} wallet={} symbol={} note=wallet_not_present_in_candidates",
                         originId,
                         userId,
-                        walletId);
+                        walletId,
+                        symbol
+                );
                 return null;
             }
+
+            final boolean hasScoring = walletMetric.getScoring() != null;
+            final Integer decisionMetricConservative = hasScoring
+                    ? walletMetric.getScoring().getDecisionMetricConservative()
+                    : null;
+            final Boolean passesFilter = hasScoring
+                    ? walletMetric.getScoring().getPassesFilter()
+                    : null;
+            final Boolean preCopiable = hasScoring
+                    ? walletMetric.getScoring().getPreCopiable()
+                    : null;
 
             if (!passesWalletFilters(walletMetric)) {
-                log.info("event=copy_open_skipped reason=wallet_filtered originId={} userId={} wallet={}",
+                log.info(
+                        "event=copy_open_skipped reason=wallet_filtered originId={} userId={} wallet={} symbol={} hasScoring={} decisionMetricConservative={} passesFilter={} preCopiable={} capitalShare={}",
                         originId,
                         userId,
-                        walletId);
+                        walletId,
+                        symbol,
+                        hasScoring,
+                        decisionMetricConservative,
+                        passesFilter,
+                        preCopiable,
+                        BigDecimal.valueOf(walletMetric.getCapitalShare()).setScale(6, RoundingMode.HALF_UP).toPlainString()
+                );
                 return null;
             }
 
@@ -426,6 +474,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         prepared.notional.toPlainString());
                 return null;
             } catch (RuntimeException ex) {
+                log.error(
+                        "event=copy_open_failed originId={} userId={} wallet={} symbol={} errClass={} err=\"{}\"",
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.symbol,
+                        ex.getClass().getSimpleName(),
+                        safeLog(ex.getMessage()),
+                        ex
+                );
+
                 if (order != null) {
                     try {
                         tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, order, userDetail);
@@ -599,8 +658,112 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private MetricaWalletDto resolveWalletMetric(String walletId, UserDetailDto userDetail) {
-        final List<MetricaWalletDto> metrics = normalizeCapitalShares(metricWalletService.getCandidatesUser(userDetail.getUser().getId()));
-        return getWalletMetricForOperation(walletId, metrics);
+        return resolveWalletMetric(null, walletId, userDetail);
+    }
+
+    private MetricaWalletDto resolveWalletMetric(String originId, String walletId, UserDetailDto userDetail) {
+        final UUID userId = userDetail.getUser().getId();
+        final List<MetricaWalletDto> metrics = normalizeCapitalShares(metricWalletService.getCandidatesUser(userId));
+        final String walletKey = normalizeSymbolKey(walletId);
+
+        final long candidates = metrics.size();
+        final long candidatesWithWallet = metrics.stream()
+                .filter(Objects::nonNull)
+                .filter(m -> m.getWallet() != null && m.getWallet().getIdWallet() != null)
+                .count();
+        final long candidatesWithScoring = metrics.stream()
+                .filter(Objects::nonNull)
+                .filter(m -> m.getScoring() != null)
+                .count();
+
+        final List<MetricaWalletDto> matches = metrics.stream()
+                .filter(Objects::nonNull)
+                .filter(m -> m.getWallet() != null && m.getWallet().getIdWallet() != null)
+                .filter(m -> Objects.equals(normalizeSymbolKey(m.getWallet().getIdWallet()), walletKey))
+                .toList();
+
+        final long matchedWithScoring = matches.stream()
+                .filter(m -> m.getScoring() != null)
+                .count();
+        final long matchedWithoutScoring = matches.size() - matchedWithScoring;
+
+        log.info(
+                "event=copy_open_metric_lookup originId={} userId={} wallet={} walletKey={} candidates={} candidatesWithWallet={} candidatesWithScoring={} matched={} matchedWithScoring={} matchedWithoutScoring={} sampleWallets=\"{}\"",
+                originId,
+                userId,
+                walletId,
+                walletKey,
+                candidates,
+                candidatesWithWallet,
+                candidatesWithScoring,
+                matches.size(),
+                matchedWithScoring,
+                matchedWithoutScoring,
+                sampleWalletIds(metrics, 8)
+        );
+
+        if (matches.isEmpty()) {
+            log.warn(
+                    "event=copy_open_metric_lookup_miss originId={} userId={} wallet={} walletKey={} candidates={} candidatesWithScoring={} sampleWallets=\"{}\"",
+                    originId,
+                    userId,
+                    walletId,
+                    walletKey,
+                    candidates,
+                    candidatesWithScoring,
+                    sampleWalletIds(metrics, 8)
+            );
+            return null;
+        }
+
+        if (matches.size() > 1) {
+            log.warn(
+                    "event=copy_open_metric_lookup_duplicate originId={} userId={} wallet={} walletKey={} matched={} matchedWallets=\"{}\"",
+                    originId,
+                    userId,
+                    walletId,
+                    walletKey,
+                    matches.size(),
+                    sampleWalletIds(matches, 8)
+            );
+        }
+
+        final MetricaWalletDto selected = matches.get(0);
+        final boolean hasScoring = selected.getScoring() != null;
+
+        log.info(
+                "event=copy_open_metric_lookup_hit originId={} userId={} wallet={} selectedWallet={} capitalShare={} hasScoring={} decisionMetricConservative={} passesFilter={} preCopiable={} historyDays={} countOperation={}",
+                originId,
+                userId,
+                walletId,
+                selected.getWallet() != null ? selected.getWallet().getIdWallet() : null,
+                BigDecimal.valueOf(selected.getCapitalShare()).setScale(6, RoundingMode.HALF_UP).toPlainString(),
+                hasScoring,
+                hasScoring ? selected.getScoring().getDecisionMetricConservative() : null,
+                hasScoring ? selected.getScoring().getPassesFilter() : null,
+                hasScoring ? selected.getScoring().getPreCopiable() : null,
+                selected.getWallet() != null ? selected.getWallet().getHistoryDays() : null,
+                selected.getWallet() != null ? selected.getWallet().getCountOperation() : null
+        );
+
+        return selected;
+    }
+
+    private String sampleWalletIds(List<MetricaWalletDto> metrics, int limit) {
+        if (metrics == null || metrics.isEmpty()) {
+            return "";
+        }
+
+        return metrics.stream()
+                .filter(Objects::nonNull)
+                .map(MetricaWalletDto::getWallet)
+                .filter(Objects::nonNull)
+                .map(MetricaWalletDto.WalletDto::getIdWallet)
+                .filter(Objects::nonNull)
+                .map(this::normalizeSymbolKey)
+                .distinct()
+                .limit(limit)
+                .collect(Collectors.joining(","));
     }
 
     private BigDecimal resolveWalletBudget(UserDetailDto userDetail, MetricaWalletDto walletMetric) {
