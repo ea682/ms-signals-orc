@@ -84,30 +84,60 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     @Override
     public List<MetricaWalletDto> getCandidatesUser(UUID idUser) {
-        if (idUser == null) return List.of();
-
-        // 1) Fuente de verdad de las wallets permitidas + distribución (allocation_pct) por usuario.
-        //    OJO: aquí NO recalculamos distribución. Eso lo hace el job y queda persistido.
-        final List<UserCopyAllocationEntity> allocations = userCopyAllocationService.getWalletUserId(idUser);
-        if (allocations == null || allocations.isEmpty()) {
+        if (idUser == null) {
+            log.warn("event=metric_wallets.candidates.invalid_request userId=null");
             return List.of();
         }
 
-        // 2) Métricas cacheadas (solo informativas): scoring, capitalRequired, etc.
-        //    Importante: NO mutar lo cacheado -> devolvemos COPIAS.
+        final List<UserCopyAllocationEntity> allocations = userCopyAllocationService.getWalletUserId(idUser);
+        if (allocations == null || allocations.isEmpty()) {
+            log.warn("event=metric_wallets.candidates.empty_allocations userId={}", idUser);
+            return List.of();
+        }
+
         final HistoryResult history = getHistory(historyLimit);
+        final String historySource = history == null ? "null" : history.source();
         final List<MetricaWalletDto> historyValues = history == null ? List.of() : history.values();
 
         final Map<String, MetricaWalletDto> metricByWalletId = new HashMap<>();
         for (MetricaWalletDto m : historyValues) {
-            if (m == null || m.getWallet() == null || m.getWallet().getIdWallet() == null) continue;
+            if (m == null || m.getWallet() == null || m.getWallet().getIdWallet() == null) {
+                continue;
+            }
             metricByWalletId.put(normalizeWalletId(m.getWallet().getIdWallet()), m);
         }
 
-        return allocations.stream()
+        log.info(
+                "event=metric_wallets.candidates.lookup userId={} allocations={} historySource={} historySize={} sampleAllocations={} sampleHistory={}",
+                idUser,
+                allocations.size(),
+                historySource,
+                historyValues.size(),
+                allocations.stream()
+                        .map(UserCopyAllocationEntity::getWalletId)
+                        .filter(Objects::nonNull)
+                        .map(MetricWalletServiceImpl::normalizeWalletId)
+                        .distinct()
+                        .limit(8)
+                        .toList(),
+                historyValues.stream()
+                        .map(MetricaWalletDto::getWallet)
+                        .filter(Objects::nonNull)
+                        .map(MetricaWalletDto.WalletDto::getIdWallet)
+                        .filter(Objects::nonNull)
+                        .map(MetricWalletServiceImpl::normalizeWalletId)
+                        .distinct()
+                        .limit(8)
+                        .toList()
+        );
+
+        final List<MetricaWalletDto> result = allocations.stream()
                 .map(a -> {
                     final String walletId = normalizeWalletId(a.getWalletId());
-                    if (walletId == null) return null;
+                    if (walletId == null) {
+                        log.warn("event=metric_wallets.candidates.skip_allocation userId={} reason=wallet_null allocationId={}", idUser, a.getId());
+                        return null;
+                    }
 
                     final double allocationPct = Optional.ofNullable(a.getAllocationPct())
                             .map(java.math.BigDecimal::doubleValue)
@@ -117,13 +147,28 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                     if (cached != null) {
                         MetricaWalletDto out = new MetricaWalletDto();
                         BeanUtils.copyProperties(cached, out);
-                        // capitalShare = distribución real para sizing (NO tocar el cache).
                         out.setCapitalShare(allocationPct);
+
+                        log.info(
+                                "event=metric_wallets.candidates.match userId={} wallet={} allocationPct={} hasScoring={} decisionMetricConservative={} historySource={}",
+                                idUser,
+                                walletId,
+                                allocationPct,
+                                out.getScoring() != null,
+                                out.getScoring() != null ? out.getScoring().getDecisionMetricConservative() : null,
+                                historySource
+                        );
                         return out;
                     }
 
-                    // Caso: wallet asignada, pero no hay métrica en cache (sirve para logs/diagnóstico).
-                    // El Engine podrá distinguir "asignada pero sin métrica" vs "no asignada".
+                    log.warn(
+                            "event=metric_wallets.candidates.placeholder userId={} wallet={} allocationPct={} historySource={} note=allocation_present_but_metric_not_cached",
+                            idUser,
+                            walletId,
+                            allocationPct,
+                            historySource
+                    );
+
                     return MetricaWalletDto.builder()
                             .wallet(MetricaWalletDto.WalletDto.builder().idWallet(walletId).build())
                             .capitalShare(allocationPct)
@@ -131,6 +176,31 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 })
                 .filter(Objects::nonNull)
                 .toList();
+
+        final long withScoring = result.stream()
+                .filter(Objects::nonNull)
+                .filter(r -> r.getScoring() != null)
+                .count();
+        final long placeholders = result.size() - withScoring;
+
+        log.info(
+                "event=metric_wallets.candidates.result userId={} resultSize={} withScoring={} placeholders={} sampleResult={}",
+                idUser,
+                result.size(),
+                withScoring,
+                placeholders,
+                result.stream()
+                        .map(MetricaWalletDto::getWallet)
+                        .filter(Objects::nonNull)
+                        .map(MetricaWalletDto.WalletDto::getIdWallet)
+                        .filter(Objects::nonNull)
+                        .map(MetricWalletServiceImpl::normalizeWalletId)
+                        .distinct()
+                        .limit(8)
+                        .toList()
+        );
+
+        return result;
     }
 
     private static String normalizeWalletId(String raw) {
