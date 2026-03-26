@@ -6,6 +6,8 @@ import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailService;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -34,6 +36,8 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     private final UserCopyAllocationRepository repository;
     private final UserDetailService userDetailService;
+    @PersistenceContext
+    private EntityManager entityManager;
 
     @Override
     @Transactional
@@ -67,10 +71,27 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 continue;
             }
 
+            entityManager.flush();
+            entityManager.clear();
+            final List<UserCopyAllocationEntity> existingActive =
+                    repository.findAllByIdUserAndEndsAtIsNull(idUser);
+
+            final Set<String> blockedWallets = new HashSet<>();
+            for (UserCopyAllocationEntity e : existingActive) {
+                if (e == null) continue;
+                if (!e.isActive()) {
+                    final String walletId = normalize(e.getWalletId());
+                    if (walletId != null) {
+                        blockedWallets.add(walletId);
+                    }
+                }
+            }
+
             final List<MetricaWalletDto> rankedForPersist = candidates.stream()
                     .filter(Objects::nonNull)
                     .filter(dto -> dto.getWallet() != null)
                     .filter(dto -> normalize(dto.getWallet().getIdWallet()) != null)
+                    .filter(dto -> !blockedWallets.contains(normalize(dto.getWallet().getIdWallet())))
                     .filter(dto -> safePct(dto.getCapitalShare()).signum() > 0)
                     .sorted(
                             Comparator
@@ -93,10 +114,8 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     ? rankedForPersist
                     : rankedForPersist.subList(0, maxWallet);
 
-            // Mantener orden para que el ajuste final caiga siempre en la última wallet válida.
             final Map<String, Dist> newDist = new LinkedHashMap<>();
 
-            // Primero limpiar las wallets válidas del top.
             final List<MetricaWalletDto> validTop = new ArrayList<>();
             BigDecimal topTotalPct = ZERO;
 
@@ -115,27 +134,32 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
             topTotalPct = topTotalPct.setScale(6, RoundingMode.HALF_UP);
 
-            // Si no hay top válido, cerrar todo lo activo del usuario.
-            final List<UserCopyAllocationEntity> existingActive =
-                    repository.findAllByIdUserAndEndsAtIsNull(idUser);
-
-
             if (validTop.isEmpty() || topTotalPct.signum() <= 0 || targetTotalPct.signum() <= 0) {
+                final List<UserCopyAllocationEntity> toClose = new ArrayList<>();
+
                 for (UserCopyAllocationEntity e : existingActive) {
                     if (e == null) continue;
+                    if (!e.isActive()) continue;
+
                     e.setStatus(UserCopyAllocationEntity.Status.CLOSED);
                     e.setEndsAt(now);
                     e.setUpdatedAt(now);
+                    toClose.add(e);
                 }
-                repository.saveAll(existingActive);
 
-                log.debug("event=user_copy_allocation.sync_ok reason=empty_distribution user={} closed={}",
-                        idUser, existingActive.size());
+                if (!toClose.isEmpty()) {
+                    repository.saveAll(toClose);
+                }
+
+                log.debug(
+                        "event=user_copy_allocation.sync_ok reason=empty_distribution user={} closed={} blocked={}",
+                        idUser,
+                        toClose.size(),
+                        blockedWallets.size()
+                );
                 continue;
             }
 
-            // Factor para reescalar el top al total original de candidates.
-            // Ej: si top suma 0.657324 y candidates suma 0.950000 => factor ≈ 1.445253...
             final BigDecimal scaleFactor = targetTotalPct.divide(topTotalPct, 18, RoundingMode.HALF_UP);
 
             BigDecimal accumulated = ZERO;
@@ -150,7 +174,6 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
                 BigDecimal scaledPct;
                 if (isLast) {
-                    // Ajuste final para cerrar exacto a 6 decimales.
                     scaledPct = targetTotalPct.subtract(accumulated).setScale(6, RoundingMode.HALF_UP);
                 } else {
                     scaledPct = originalPct.multiply(scaleFactor).setScale(6, RoundingMode.HALF_UP);
@@ -186,9 +209,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     entity = UserCopyAllocationEntity.builder()
                             .idUser(idUser)
                             .walletId(walletId)
+                            .isActive(true)
                             .build();
                 }
 
+                if (!entity.isActive()) {
+                    continue;
+                }
                 entity.setAllocationPct(d.pct());
                 entity.setScore(d.score());
                 entity.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
@@ -203,6 +230,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
             for (UserCopyAllocationEntity e : existingActive) {
                 if (e == null) continue;
+                if (!e.isActive()) continue;
 
                 final String walletId = normalize(e.getWalletId());
                 if (walletId == null) continue;
@@ -223,8 +251,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     .reduce(ZERO, BigDecimal::add)
                     .setScale(6, RoundingMode.HALF_UP);
 
-            log.debug("event=user_copy_allocation.sync_ok user={} maxWallet={} candidates={} persisted={} closed={} targetTotalPct={} persistedTotal={}",
-                    idUser, maxWallet, candidates.size(), newDist.size(), closed, targetTotalPct, persistedTotal);
+            log.debug(
+                    "event=user_copy_allocation.sync_ok user={} maxWallet={} candidates={} persisted={} closed={} blocked={} targetTotalPct={} persistedTotal={}",
+                    idUser,
+                    maxWallet,
+                    candidates.size(),
+                    newDist.size(),
+                    closed,
+                    blockedWallets.size(),
+                    targetTotalPct,
+                    persistedTotal
+            );
         }
     }
 
@@ -233,13 +270,12 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     public List<UserCopyAllocationEntity> getWalletUserId(UUID idUser) {
         if (idUser == null) return List.of();
 
-        // Fuente de verdad: SOLO asignaciones vigentes (endsAt IS NULL) y activas.
-        // Esto permite pausar/cerrar sin afectar históricos.
         return repository.findAllByIdUserAndEndsAtIsNull(idUser)
                 .stream()
                 .filter(Objects::nonNull)
+                .filter(UserCopyAllocationEntity::isActive)
                 .filter(e -> e.getStatus() == UserCopyAllocationEntity.Status.ACTIVE)
-                // Orden estable para que la UI y el engine consuman siempre en el mismo orden.
+
                 .sorted(Comparator
                         .comparing(UserCopyAllocationEntity::getScore, Comparator.nullsLast(Comparator.reverseOrder()))
                         .thenComparing(UserCopyAllocationEntity::getAllocationPct, Comparator.nullsLast(Comparator.reverseOrder()))
@@ -264,7 +300,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     private static String normalize(String s) {
         if (s == null) return null;
         String t = s.trim();
-        return t.isEmpty() ? null : t;
+        return t.isEmpty() ? null : t.toLowerCase();
     }
 
     private record Dist(BigDecimal pct, Integer score) {

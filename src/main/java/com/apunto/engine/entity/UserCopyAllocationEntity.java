@@ -61,6 +61,9 @@ public class UserCopyAllocationEntity {
     @Column(name = "ends_at", columnDefinition = "timestamp with time zone")
     private OffsetDateTime endsAt;
 
+    @Column(name = "is_active")
+    private boolean isActive;
+
     public enum Status {
         ACTIVE,
         PAUSED,

@@ -6,7 +6,7 @@ rest-client:
     connect-ms: 2000
     read-ms: 50000
   metric-wallet:
-    info-base: ${URL_METRIC:http://localhost:4102/}
+    info-base: ${URL_METRIC:http://192.168.1.123:4102/}
   binance-service:
     info-base: ${URL_BINANCE:http://192.168.1.123:4106}
 
@@ -42,7 +42,7 @@ spring:
         spring.json.add.type.headers: false
 
   datasource:
-    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=${DB_SCHEMA:futuros_operaciones_dev}}
+    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=${DB_SCHEMA:futuros_operaciones}}
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:5450940}
 
