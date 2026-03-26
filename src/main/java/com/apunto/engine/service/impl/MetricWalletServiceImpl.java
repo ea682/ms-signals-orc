@@ -49,8 +49,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
-            @Value("${metric-wallet.history.limit:60}") int historyLimit,
-            @Value("${metric-wallet.history.dayz:1}") int dayzLimit,
+            @Value("${metric-wallet.history.limit:170}") int historyLimit,
+            @Value("${metric-wallet.history.dayz:12}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
