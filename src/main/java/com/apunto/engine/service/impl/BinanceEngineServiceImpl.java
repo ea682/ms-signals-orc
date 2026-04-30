@@ -150,7 +150,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     @Value("${engine.copy.sizing.base-capital-cap:10000}")
     private double sizingBaseCapitalCap;
 
-    @Value("${engine.copy.sizing.max-fraction-per-trade:0.50}")
+    @Value("${engine.copy.sizing.max-fraction-per-trade:0.1}")
     private BigDecimal maxFractionPerTrade;
 
     @Value("${engine.copy.sizing.notional-buffer-pct:0.03}")
