@@ -38,6 +38,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private final Duration cacheRefreshAfter;
     private final Duration cacheExpireAfter;
     private final Duration slowThreshold;
+    private final double maxPerWallet;
+    private final double maxCapitalToUse;
 
     private final MetricWalletsInfoClient metricWalletsInfoClient;
     private final UserCopyAllocationService userCopyAllocationService;
@@ -50,11 +52,13 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
             @Value("${metric-wallet.history.limit:100}") int historyLimit,
-            @Value("${metric-wallet.history.dayz:25}") int dayzLimit,
+            @Value("${metric-wallet.history.dayz:12}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
             @Value("${metric-wallet.history.cache.refresh-after:6m}") Duration cacheRefreshAfter,
             @Value("${metric-wallet.history.cache.expire-after:10m}") Duration cacheExpireAfter,
-            @Value("${metric-wallet.history.slow-threshold:250ms}") Duration slowThreshold
+            @Value("${metric-wallet.history.slow-threshold:250ms}") Duration slowThreshold,
+            @Value("${metric-wallet.allocation.max-capital-to-use:0.90}") double maxCapitalToUse,
+            @Value("${metric-wallet.allocation.max-per-wallet:0.90}") double maxPerWallet
     ) {
         this.metricWalletsInfoClient = Objects.requireNonNull(metricWalletsInfoClient, "metricWalletsInfoClient");
         this.userCopyAllocationService = Objects.requireNonNull(userCopyAllocationService, "userCopyAllocationService");
@@ -70,6 +74,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         this.slowThreshold = slowThreshold;
 
         this.allPositionHistoryCache = buildHistoryCache();
+        this.maxCapitalToUse = maxCapitalToUse;
+        this.maxPerWallet = maxPerWallet;
 
         log.info(
                 "event=metric_wallets.config historyLimit={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={}",
@@ -79,7 +85,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     @Override
     public List<MetricaWalletDto> getMetricWallets() {
-        return getMetricWallets(0.95, 0.50);
+        return getMetricWallets(maxCapitalToUse, maxPerWallet);
     }
 
     @Override
