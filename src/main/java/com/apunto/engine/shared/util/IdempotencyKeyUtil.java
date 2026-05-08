@@ -2,6 +2,7 @@ package com.apunto.engine.shared.util;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 
 /**
  * Generates deterministic idempotency keys that comply with Binance Futures constraints
@@ -49,14 +50,14 @@ public final class IdempotencyKeyUtil {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
 
-            // Use first 16 bytes (128 bits) => 32 hex chars.
-            StringBuilder sb = new StringBuilder(HASH_HEX_LEN);
+            char[] out = new char[HASH_HEX_LEN];
             for (int i = 0; i < 16; i++) {
-                sb.append(String.format("%02x", digest[i]));
+                int b = digest[i] & 0xff;
+                out[i * 2] = Character.forDigit((b >>> 4) & 0x0f, 16);
+                out[i * 2 + 1] = Character.forDigit(b & 0x0f, 16);
             }
-            return sb.toString();
-        } catch (Exception e) {
-            // Extremely unlikely; fallback to a deterministic-ish safe string.
+            return new String(out);
+        } catch (NoSuchAlgorithmException ex) {
             int h = input.hashCode();
             return String.format("%032x", h);
         }

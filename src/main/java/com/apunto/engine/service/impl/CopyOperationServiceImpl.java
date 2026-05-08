@@ -56,32 +56,39 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         Objects.requireNonNull(operation.getIdOrderOrigin(), "idOrderOrigin no puede ser null");
         Objects.requireNonNull(operation.getIdUser(), "idUser no puede ser null");
 
-        CopyOperationEntity entity = copyOperationRepository
-                .findByIdOrderOriginAndIdUser(operation.getIdOrderOrigin(), operation.getIdUser())
-                .orElse(null);
+        final BigDecimal sizeUsd = operation.getSiseUsd() == null ? BigDecimal.ZERO : operation.getSiseUsd();
+        final BigDecimal sizePar = operation.getSizePar() == null ? BigDecimal.ZERO : operation.getSizePar();
 
-        if (entity == null) {
-            log.warn("event=copy_operation.close_missing originId={} userId={}",
+        int updated = 0;
+        if (operation.getIdOperation() != null) {
+            updated = copyOperationRepository.closeActiveById(
+                    operation.getIdOperation(),
+                    operation.getPriceClose(),
+                    operation.getDateClose(),
+                    sizeUsd,
+                    sizePar
+            );
+        }
+
+        if (updated == 0) {
+            updated = copyOperationRepository.closeActiveByOriginAndUser(
+                    operation.getIdOrderOrigin(),
+                    operation.getIdUser(),
+                    operation.getPriceClose(),
+                    operation.getDateClose(),
+                    sizeUsd,
+                    sizePar
+            );
+        }
+
+        if (updated == 0) {
+            log.info("event=copy_operation.close_noop originId={} userId={} reason=missing_or_already_closed",
                     operation.getIdOrderOrigin(), operation.getIdUser());
             return;
         }
 
-        if (!entity.isActive()) {
-            log.info("event=copy_operation.close_already_closed originId={} userId={}",
-                    operation.getIdOrderOrigin(), operation.getIdUser());
-            return;
-        }
-
-        entity.setPriceClose(operation.getPriceClose());
-        entity.setDateClose(operation.getDateClose());
-        entity.setSiseUsd(operation.getSiseUsd() == null ? BigDecimal.ZERO : operation.getSiseUsd());
-        entity.setSizePar(operation.getSizePar() == null ? BigDecimal.ZERO : operation.getSizePar());
-        entity.setActive(operation.isActive());
-
-        copyOperationRepository.save(entity);
-
-        log.info("event=copy_operation.close_ok originId={} userId={} active=false",
-                operation.getIdOrderOrigin(), operation.getIdUser());
+        log.info("event=copy_operation.close_ok originId={} userId={} active=false updated={}",
+                operation.getIdOrderOrigin(), operation.getIdUser(), updated);
     }
 
     @Transactional(readOnly = true)

@@ -23,7 +23,7 @@ public class MetricWalletDistributionJobWorker {
         try {
             metricWalletService.getMetricWallets();
             log.info("event=metric_wallets.distribution_refreshed maxWallets=50");
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             log.warn("event=metric_wallets.distribution_refresh_failed err={}", e.toString(), e);
         }
     }

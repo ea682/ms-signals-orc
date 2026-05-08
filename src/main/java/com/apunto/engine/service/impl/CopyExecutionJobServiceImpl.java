@@ -8,15 +8,18 @@ import com.apunto.engine.jobs.model.CopyJobErrorCategory;
 import com.apunto.engine.jobs.model.CopyJobStatus;
 import com.apunto.engine.repository.CopyExecutionJobRepository;
 import com.apunto.engine.service.CopyExecutionJobService;
+import com.apunto.engine.shared.exception.EngineException;
+import com.apunto.engine.shared.exception.ErrorCode;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -25,8 +28,29 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
 
+    private static final String CLAIM_SQL = """
+            UPDATE copy_execution_job j
+            SET status = 'PROCESSING',
+                locked_at = :now,
+                locked_by = :workerId,
+                updated_at = :now
+            WHERE j.id IN (
+                SELECT id
+                FROM copy_execution_job
+                WHERE status = 'PENDING'
+                  AND next_run_at <= :now
+                ORDER BY next_run_at ASC, id ASC
+                LIMIT :limit
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            """;
+
     private final CopyExecutionJobRepository repository;
     private final ObjectMapper objectMapper;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     @Override
     @Transactional
@@ -70,29 +94,58 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
     public List<CopyExecutionJobEntity> claimBatch(String workerId, int limit) {
         if (limit <= 0) return List.of();
 
-        OffsetDateTime now = OffsetDateTime.now();
-        List<UUID> ids = repository.findClaimableIdsForUpdateSkipLocked(now, limit);
-        if (ids == null || ids.isEmpty()) return List.of();
+        final OffsetDateTime now = OffsetDateTime.now();
+        final String safeWorkerId = workerId == null || workerId.isBlank() ? "unknown-worker" : workerId;
 
-        repository.markProcessing(ids, workerId, now);
+        @SuppressWarnings("unchecked")
+        final List<CopyExecutionJobEntity> claimed = entityManager
+                .createNativeQuery(CLAIM_SQL, CopyExecutionJobEntity.class)
+                .setParameter("now", now)
+                .setParameter("workerId", safeWorkerId)
+                .setParameter("limit", limit)
+                .getResultList();
 
-        List<CopyExecutionJobEntity> out = new ArrayList<>(ids.size());
-        repository.findAllById(ids).forEach(out::add);
-        return out;
+        if (claimed == null || claimed.isEmpty()) {
+            return List.of();
+        }
+
+        log.debug("event=copy.job.claimed_atomic workerId={} count={} limit={}", safeWorkerId, claimed.size(), limit);
+        return claimed;
     }
 
     @Override
     @Transactional
     public void markDone(CopyExecutionJobEntity job) {
-        OffsetDateTime now = OffsetDateTime.now();
-        repository.markDoneOrRequeueIfPayloadChanged(
+        final OffsetDateTime now = OffsetDateTime.now();
+        final String none = CopyJobErrorCategory.NONE.name();
+
+        final int markedDone = repository.markDoneIfPayloadUnchanged(
                 job.getId(),
                 job.getPayload(),
                 job.getAttempt(),
-                now,
-                CopyJobErrorCategory.NONE.name(),
+                none,
                 now
         );
+
+        if (markedDone == 1) {
+            return;
+        }
+
+        final int requeued = repository.requeueDoneWhenPayloadChanged(
+                job.getId(),
+                job.getPayload(),
+                none,
+                now
+        );
+
+        if (requeued == 1) {
+            log.info("event=copy.job.requeued_payload_changed id={} originId={} userId={} action={}",
+                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction());
+            return;
+        }
+
+        log.warn("event=copy.job.mark_done_noop id={} originId={} userId={} action={} status={} note=row_not_found_or_already_changed",
+                job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getStatus());
     }
 
     @Override
@@ -121,7 +174,7 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
         try {
             return objectMapper.writeValueAsString(event);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("No se pudo serializar OperacionEvent a JSON", e);
+            throw new EngineException(ErrorCode.INTERNAL_ERROR, "No se pudo serializar OperacionEvent a JSON", e);
         }
     }
 

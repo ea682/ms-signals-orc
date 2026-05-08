@@ -520,7 +520,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 if (order != null) {
                     try {
                         tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, order, userDetail);
-                    } catch (Exception panicEx) {
+                    } catch (RuntimeException panicEx) {
                         log.error("event=copy_open_panic_close_failed originId={} userId={} wallet={} symbol={} panicErrClass={} panicErr=\"{}\"",
                                 originId,
                                 userId,
@@ -639,6 +639,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 final TargetLeg target = targets.get(copyOriginId);
                 if (target == null) {
+                    if (canOpenOrResize) {
+                        log.info("event=rebalance.copy.close_no_target originId={} userId={} wallet={} symbol={} reason=target_not_copiable",
+                                copyOriginId, userId, walletId, copy.getParsymbol());
+                        executeFullClose(copy, userDetail);
+                        current.remove(copyOriginId);
+                    }
                     continue;
                 }
 
@@ -833,10 +839,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private String formatCapitalShare(MetricaWalletDto walletMetric) {
-        if (walletMetric == null || !Double.isFinite(walletMetric.getCapitalShare())) {
+        if (walletMetric == null) {
             return "null";
         }
-        return BigDecimal.valueOf(walletMetric.getCapitalShare())
+        final Double capitalShare = walletMetric.getCapitalShare();
+        if (capitalShare == null || !Double.isFinite(capitalShare)) {
+            return "null";
+        }
+        return BigDecimal.valueOf(capitalShare)
                 .setScale(6, RoundingMode.HALF_UP)
                 .toPlainString();
     }
@@ -891,6 +901,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return Map.of();
         }
 
+        final Map<String, BinanceFuturesSymbolInfoClientDto> symbolsBySymbol = getSymbolsBySymbol();
         final Map<String, TargetLeg> result = new HashMap<>();
         for (OriginBasketPositionDto leg : sourceBasket) {
             if (leg == null || leg.getOriginId() == null) {
@@ -928,7 +939,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     continue;
                 }
 
-                final BinanceFuturesSymbolInfoClientDto symbolInfo = getSymbolsBySymbol().get(symbol);
+                final BinanceFuturesSymbolInfoClientDto symbolInfo = symbolsBySymbol.get(symbol);
                 if (symbolInfo == null) {
                     throw new SkipExecutionException(
                             "symbol_rules_missing",
@@ -1057,7 +1068,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         ex.getReasonCode(),
                         safeLog(ex.getReason()),
                         safeLog(ex.getDetails()));
-            } catch (Exception ex) {
+            } catch (RuntimeException ex) {
                 log.error("event=rebalance.target.error originLegId={} wallet={} rawSymbol={} side={} errClass={} err=\"{}\"",
                         leg.getOriginId(),
                         leg.getWalletId(),
@@ -1351,7 +1362,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (qty == null || qty.compareTo(ZERO) <= 0) {
             try {
                 qty = new BigDecimal(prepared.dto.getQuantity());
-            } catch (Exception ignored) {
+            } catch (NumberFormatException ignored) {
+                // Fallback below uses zero quantity when the prepared DTO quantity is not numeric.
             }
         }
         if (qty == null || qty.compareTo(ZERO) <= 0) {
@@ -1513,6 +1525,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final String rawSymbol = originOperation.getParSymbol();
+        final String symbol = resolveCanonicalSymbol(rawSymbol);
+        final Map<String, BinanceFuturesSymbolInfoClientDto> symbolsBySymbol = getSymbolsBySymbol();
         if (rawSymbol == null || rawSymbol.isBlank()) {
             log.warn(LOG_PREP_INVALID_SYMBOL, originId, userId, walletId);
             throw new SkipExecutionException(
@@ -1522,7 +1536,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final String symbol = resolveCanonicalSymbol(rawSymbol);
         final String normalizedRawSymbol = normalizeSymbolKey(rawSymbol);
         if (!symbol.equals(normalizedRawSymbol)) {
             log.info("event=symbol.resolved originId={} userId={} wallet={} rawSymbol={} canonicalSymbol={}",
@@ -1629,7 +1642,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
         final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
 
-        final BinanceFuturesSymbolInfoClientDto symbolInfo = getSymbolsBySymbol().get(symbol);
+        final BinanceFuturesSymbolInfoClientDto symbolInfo = symbolsBySymbol.get(symbol);
         if (symbolInfo == null) {
             log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
             throw new SkipExecutionException(
@@ -2048,7 +2061,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             return multiplierRaw;
-        } catch (Exception e) {
+        } catch (NumberFormatException ex) {
             return null;
         }
     }
@@ -2265,7 +2278,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 return null;
             }
             return new BigDecimal(raw);
-        } catch (Exception e) {
+        } catch (NumberFormatException ex) {
             return null;
         }
     }
