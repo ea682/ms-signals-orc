@@ -12,9 +12,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -42,8 +40,9 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
         for (UserDetailDto u : users) {
             final String userId = u.getUser().getId().toString();
 
-            // INSERT idempotente: si ya existe (origin_id, user_id, action), NO lanza error.
-            int inserted = repository.insertIgnore(
+            // UPSERT idempotente: refresca el payload incluso cuando un job anterior quedó DONE/DEAD
+            // o cuando llega un payload nuevo mientras el job actual está PROCESSING.
+            int inserted = repository.upsertPending(
                     UUID.randomUUID(),
                     originId,
                     userId,
@@ -86,8 +85,14 @@ public class CopyExecutionJobServiceImpl implements CopyExecutionJobService {
     @Transactional
     public void markDone(CopyExecutionJobEntity job) {
         OffsetDateTime now = OffsetDateTime.now();
-        repository.finish(job.getId(), CopyJobStatus.DONE.name(), job.getAttempt(), now,
-                CopyJobErrorCategory.NONE.name(), null, null, now);
+        repository.markDoneOrRequeueIfPayloadChanged(
+                job.getId(),
+                job.getPayload(),
+                job.getAttempt(),
+                now,
+                CopyJobErrorCategory.NONE.name(),
+                now
+        );
     }
 
     @Override
