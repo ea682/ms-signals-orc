@@ -10,6 +10,7 @@ import com.apunto.engine.shared.dto.ApiResponse;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -133,7 +134,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     text(root, "traceId"),
                     text(root, "path")
             );
-        } catch (Exception parseEx) {
+        } catch (JsonProcessingException parseEx) {
             return new BinanceHttpError(
                     ex.getRawStatusCode(),
                     "HTTP_ERROR",

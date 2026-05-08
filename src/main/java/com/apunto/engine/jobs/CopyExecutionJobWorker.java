@@ -13,6 +13,7 @@ import com.apunto.engine.shared.exception.BinanceRateLimitException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
@@ -26,11 +27,12 @@ import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -107,7 +109,7 @@ public class CopyExecutionJobWorker {
                 submitOrRescheduleOnReject(job);
             }
 
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             log.error("event=copy.tick.error workerId={} errClass={} err={}",
                     workerId, e.getClass().getSimpleName(), e.toString(), e);
         }
@@ -143,7 +145,7 @@ public class CopyExecutionJobWorker {
             log.info("event=copy.job.started id={} originId={} userId={} action={} attempt={} workerId={}",
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt(), workerId);
 
-            OperacionEvent event = objectMapper.readValue(job.getPayload(), OperacionEvent.class);
+            OperacionEvent event = readPayload(job);
 
             UserDetailDto user = resolveUserOrSkip(job.getUserId());
 
@@ -179,7 +181,7 @@ public class CopyExecutionJobWorker {
                     safeMsgForLog(skip.getReason()),
                     safeMsgForLog(skip.getDetails()));
 
-        } catch (Exception ex) {
+        } catch (RuntimeException ex) {
             handleFailure(job, ex);
 
             tradingMetrics.jobExecution(job, "failed", System.nanoTime() - t0);
@@ -190,7 +192,7 @@ public class CopyExecutionJobWorker {
         }
     }
 
-    private void handleFailure(CopyExecutionJobEntity job, Exception ex) {
+    private void handleFailure(CopyExecutionJobEntity job, RuntimeException ex) {
         int attempt = job.getAttempt() + 1;
         job.setAttempt(attempt);
 
@@ -379,19 +381,32 @@ public class CopyExecutionJobWorker {
         return CopyJobErrorCategory.UNKNOWN;
     }
 
-    private UserDetailDto resolveUserOrSkip(String userId) {
-        List<UserDetailDto> users = userDetailCachedService.getUsers();
-        Optional<UserDetailDto> user = users.stream()
-                .filter(u -> u.getUser() != null
-                        && u.getUser().getId() != null
-                        && u.getUser().getId().toString().equals(userId))
-                .findFirst();
+    private OperacionEvent readPayload(CopyExecutionJobEntity job) {
+        try {
+            return objectMapper.readValue(job.getPayload(), OperacionEvent.class);
+        } catch (JsonProcessingException ex) {
+            Map<String, Object> details = new HashMap<>();
+            if (job.getId() != null) details.put("jobId", job.getId().toString());
+            if (job.getOriginId() != null) details.put("originId", job.getOriginId());
+            if (job.getUserId() != null) details.put("userId", job.getUserId());
+            if (job.getAction() != null) details.put("action", job.getAction().name());
 
-        return user.orElseThrow(() -> new SkipExecutionException(
-                "user_cache_miss",
-                "Usuario no existe en cache",
-                com.apunto.engine.shared.util.LogFmt.kv("userId", userId)
-        ));
+            throw new EngineException(
+                    ErrorCode.INTERNAL_ERROR,
+                    "No se pudo deserializar payload de copy_execution_job",
+                    ex,
+                    details
+            );
+        }
+    }
+
+    private UserDetailDto resolveUserOrSkip(String userId) {
+        return userDetailCachedService.getUserById(userId)
+                .orElseThrow(() -> new SkipExecutionException(
+                        "user_cache_miss",
+                        "Usuario no existe en cache",
+                        com.apunto.engine.shared.util.LogFmt.kv("userId", userId)
+                ));
     }
 
     private void putJobMdc(CopyExecutionJobEntity job) {
@@ -412,7 +427,7 @@ public class CopyExecutionJobWorker {
             int qSize = tpe.getQueue().size();
             int qRemaining = tpe.getQueue().remainingCapacity();
             return new ExecSnapshot(pool, active, qSize, qRemaining);
-        } catch (Exception e) {
+        } catch (IllegalStateException ex) {
             return new ExecSnapshot(-1, -1, -1, -1);
         }
     }
@@ -440,7 +455,7 @@ public class CopyExecutionJobWorker {
     private String buildWorkerId() {
         try {
             return InetAddress.getLocalHost().getHostName() + "-" + System.nanoTime();
-        } catch (Exception e) {
+        } catch (UnknownHostException ex) {
             return "worker-" + System.nanoTime();
         }
     }

@@ -2,10 +2,13 @@ package com.apunto.engine.repository;
 
 import com.apunto.engine.entity.CopyOperationEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -24,6 +27,46 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
     List<CopyOperationEntity> findAllByIdOrden(String idOrden);
 
     List<CopyOperationEntity> findAllByIdUserAndIdWalletOriginAndActiveTrue(String idUser, String walletId);
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            UPDATE CopyOperationEntity c
+            SET c.priceClose = :priceClose,
+                c.dateClose = :dateClose,
+                c.siseUsd = :sizeUsd,
+                c.sizePar = :sizePar,
+                c.active = false
+            WHERE c.idOperation = :idOperation
+              AND c.active = true
+            """)
+    int closeActiveById(
+            @Param("idOperation") UUID idOperation,
+            @Param("priceClose") BigDecimal priceClose,
+            @Param("dateClose") OffsetDateTime dateClose,
+            @Param("sizeUsd") BigDecimal sizeUsd,
+            @Param("sizePar") BigDecimal sizePar
+    );
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            UPDATE CopyOperationEntity c
+            SET c.priceClose = :priceClose,
+                c.dateClose = :dateClose,
+                c.siseUsd = :sizeUsd,
+                c.sizePar = :sizePar,
+                c.active = false
+            WHERE c.idOrderOrigin = :idOrderOrigin
+              AND c.idUser = :idUser
+              AND c.active = true
+            """)
+    int closeActiveByOriginAndUser(
+            @Param("idOrderOrigin") String idOrderOrigin,
+            @Param("idUser") String idUser,
+            @Param("priceClose") BigDecimal priceClose,
+            @Param("dateClose") OffsetDateTime dateClose,
+            @Param("sizeUsd") BigDecimal sizeUsd,
+            @Param("sizePar") BigDecimal sizePar
+    );
 
     @Query(value = """
             SELECT COALESCE(SUM((size_usd / NULLIF(leverage, 0)) * (1 + :safety)), 0)
