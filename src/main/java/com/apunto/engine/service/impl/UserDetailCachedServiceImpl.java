@@ -8,30 +8,82 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor
 public class UserDetailCachedServiceImpl implements UserDetailCachedService {
 
+    private static final Duration TTL = Duration.ofMinutes(5);
+    private static final UserSnapshot EMPTY_SNAPSHOT = new UserSnapshot(List.of(), Map.of(), null);
+
     private final UserDetailService userDetailService;
 
-    private List<UserDetailDto> cache;
-    private Instant lastUpdate;
-
-    private static final Duration TTL = Duration.ofMinutes(5);
+    private volatile UserSnapshot snapshot = EMPTY_SNAPSHOT;
 
     @Override
-    public synchronized List<UserDetailDto> getUsers() {
-        if (cache == null || isExpired()) {
-            cache = userDetailService.findAllActive();
-            lastUpdate = Instant.now();
-        }
-        return cache;
+    public List<UserDetailDto> getUsers() {
+        return currentSnapshot().users();
     }
 
-    private boolean isExpired() {
-        if (lastUpdate == null) return true;
-        return Duration.between(lastUpdate, Instant.now()).compareTo(TTL) >= 0;
+    @Override
+    public Optional<UserDetailDto> getUserById(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(currentSnapshot().byUserId().get(userId));
+    }
+
+    private UserSnapshot currentSnapshot() {
+        UserSnapshot current = snapshot;
+        if (!isExpired(current)) {
+            return current;
+        }
+        return refreshSnapshotIfNeeded();
+    }
+
+    private synchronized UserSnapshot refreshSnapshotIfNeeded() {
+        UserSnapshot current = snapshot;
+        if (!isExpired(current)) {
+            return current;
+        }
+
+        final List<UserDetailDto> loadedUsers = Optional.ofNullable(userDetailService.findAllActive()).orElse(List.of());
+        final List<UserDetailDto> users = loadedUsers.stream()
+                .filter(Objects::nonNull)
+                .toList();
+        final Map<String, UserDetailDto> byUserId = new HashMap<>(Math.max(16, users.size() * 2));
+
+        for (UserDetailDto userDetail : users) {
+            if (userDetail == null || userDetail.getUser() == null || userDetail.getUser().getId() == null) {
+                continue;
+            }
+            byUserId.put(userDetail.getUser().getId().toString(), userDetail);
+        }
+
+        final UserSnapshot refreshed = new UserSnapshot(List.copyOf(users), Map.copyOf(byUserId), Instant.now());
+        snapshot = refreshed;
+        return refreshed;
+    }
+
+    private boolean isExpired(UserSnapshot current) {
+        return current == null
+                || current.lastUpdate() == null
+                || Duration.between(current.lastUpdate(), Instant.now()).compareTo(TTL) >= 0;
+    }
+
+    private record UserSnapshot(List<UserDetailDto> users,
+                                Map<String, UserDetailDto> byUserId,
+                                Instant lastUpdate) {
+        private UserSnapshot {
+            users = users == null ? List.of() : users;
+            byUserId = byUserId == null ? Map.of() : byUserId;
+            Objects.requireNonNull(users, "users");
+            Objects.requireNonNull(byUserId, "byUserId");
+        }
     }
 }

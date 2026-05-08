@@ -145,15 +145,9 @@ public interface CopyExecutionJobRepository extends JpaRepository<CopyExecutionJ
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query(value = """
             UPDATE copy_execution_job
-            SET status = CASE
-                    WHEN payload IS DISTINCT FROM :payload THEN 'PENDING'
-                    ELSE 'DONE'
-                END,
+            SET status = 'DONE',
                 attempt = :attempt,
-                next_run_at = CASE
-                    WHEN payload IS DISTINCT FROM :payload THEN :now
-                    ELSE :nextRunAt
-                END,
+                next_run_at = :now,
                 locked_at = NULL,
                 locked_by = NULL,
                 last_error_category = :errorCategory,
@@ -161,12 +155,36 @@ public interface CopyExecutionJobRepository extends JpaRepository<CopyExecutionJ
                 last_error_at = NULL,
                 updated_at = :now
             WHERE id = :id
+              AND status = 'PROCESSING'
+              AND payload = :payload
             """, nativeQuery = true)
-    int markDoneOrRequeueIfPayloadChanged(
+    int markDoneIfPayloadUnchanged(
             @Param("id") UUID id,
             @Param("payload") String payload,
             @Param("attempt") int attempt,
-            @Param("nextRunAt") OffsetDateTime nextRunAt,
+            @Param("errorCategory") String errorCategory,
+            @Param("now") OffsetDateTime now
+    );
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = """
+            UPDATE copy_execution_job
+            SET status = 'PENDING',
+                attempt = 0,
+                next_run_at = :now,
+                locked_at = NULL,
+                locked_by = NULL,
+                last_error_category = :errorCategory,
+                last_error_message = NULL,
+                last_error_at = NULL,
+                updated_at = :now
+            WHERE id = :id
+              AND status = 'PROCESSING'
+              AND payload IS DISTINCT FROM :payload
+            """, nativeQuery = true)
+    int requeueDoneWhenPayloadChanged(
+            @Param("id") UUID id,
+            @Param("payload") String payload,
             @Param("errorCategory") String errorCategory,
             @Param("now") OffsetDateTime now
     );

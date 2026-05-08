@@ -5,6 +5,8 @@ import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserCopyAllocationService;
+import com.apunto.engine.shared.exception.EngineException;
+import com.apunto.engine.shared.exception.ErrorCode;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.extern.slf4j.Slf4j;
@@ -236,7 +238,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         if ("cache".equals(history.source())) {
             try {
                 userCopyAllocationService.syncDistribution(candidates);
-            } catch (Exception ex) {
+            } catch (RuntimeException ex) {
                 log.warn("event=user_copy_allocation.sync_failed err={}", safeErr(ex));
             }
         } else {
@@ -251,7 +253,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         try {
             List<MetricaWalletDto> v = allPositionHistoryCache.get(historyLimit);
             log.info("event=metric_wallets.cache_primed limit={} size={}", historyLimit, v.size());
-        } catch (Exception ex) {
+        } catch (RuntimeException ex) {
             log.warn("event=metric_wallets.cache_prime_failed limit={} err={}", historyLimit, safeErr(ex));
         }
     }
@@ -261,7 +263,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         try {
             allPositionHistoryCache.refresh(historyLimit);
             log.debug("event=metric_wallets.cache_refresh_triggered limit={}", historyLimit);
-        } catch (Exception ex) {
+        } catch (RuntimeException ex) {
             log.warn("event=metric_wallets.cache_refresh_failed limit={} err={}", historyLimit, safeErr(ex));
         }
     }
@@ -285,7 +287,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         List<MetricaWalletDto> resp;
         try {
             resp = metricWalletsInfoClient.allPositionHistory(limit, dayz);
-        } catch (Exception ex) {
+        } catch (RuntimeException ex) {
             long durationMs = elapsedMs(startNs);
             log.warn("event=metric_wallets.history_client_failed limit={} durationMs={} err={}", limit, durationMs, safeErr(ex));
             return List.of();
@@ -313,7 +315,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         try {
             List<MetricaWalletDto> v = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(List.of());
             if (!v.isEmpty()) return new HistoryResult(v, "cache");
-        } catch (Exception ex) {
+        } catch (RuntimeException ex) {
             log.warn(
                     "event=metric_wallets.history_load_failed limit={} err={} cacheStats={}",
                     limit, safeErr(ex), allPositionHistoryCache.stats()
@@ -387,12 +389,14 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         double max = wallets.stream().mapToDouble(MetricaWalletDto::getCapitalShare).max().orElse(0.0);
 
         if (total - maxCapitalToUse > 1e-9) {
-            throw new IllegalStateException(
+            throw new EngineException(
+                    ErrorCode.INTERNAL_ERROR,
                     String.format("Total capitalShare (%.6f) excede maxCapitalToUse (%.6f)", total, maxCapitalToUse)
             );
         }
         if (max - maxPerWallet > 1e-9) {
-            throw new IllegalStateException(
+            throw new EngineException(
+                    ErrorCode.INTERNAL_ERROR,
                     String.format("Una wallet tiene capitalShare (%.6f) mayor a maxPerWallet (%.6f)", max, maxPerWallet)
             );
         }

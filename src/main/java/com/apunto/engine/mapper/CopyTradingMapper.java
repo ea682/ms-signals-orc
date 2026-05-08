@@ -44,11 +44,8 @@ public interface CopyTradingMapper {
         // Para copy trading dejamos el leverage fijo (policy) o usamos el leverage guardado en la copia.
         // Evita inconsistencias al cerrar cuando el usuario cambia su leverage.
         int closeLeverage = 5;
-        try {
-            if (copyOperation.getLeverage() != null) {
-                closeLeverage = copyOperation.getLeverage().intValue();
-            }
-        } catch (Exception ignored) {
+        if (copyOperation.getLeverage() != null) {
+            closeLeverage = Math.max(1, copyOperation.getLeverage().intValue());
         }
 
         if ("LONG".equals(copyOperation.getTypeOperation())) {

@@ -88,16 +88,17 @@ app:
 
 binance:
   dispatch:
-    delay-ms: 100
-    pool-size: 4
+    delay-ms: ${BINANCE_DISPATCH_DELAY_MS:0}
+    pool-size: ${BINANCE_DISPATCH_POOL_SIZE:8}
 
 copy:
   job:
     worker:
-      pool-size: 16
-      max-batch: 200
-      poll-ms: 200
-      max-attempts: 12
+      pool-size: ${COPY_JOB_WORKER_POOL_SIZE:24}
+      queue: ${COPY_JOB_WORKER_QUEUE:5000}
+      max-batch: ${COPY_JOB_WORKER_MAX_BATCH:500}
+      poll-ms: ${COPY_JOB_WORKER_POLL_MS:50}
+      max-attempts: ${COPY_JOB_WORKER_MAX_ATTEMPTS:12}
 
 engine:
   copy:

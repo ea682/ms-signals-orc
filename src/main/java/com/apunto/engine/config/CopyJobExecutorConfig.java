@@ -14,8 +14,8 @@ public class CopyJobExecutorConfig {
 
     @Bean(name = "copyJobExecutor")
     public ThreadPoolTaskExecutor copyJobExecutor(
-            @Value("${copy.job.worker.pool-size:8}") int threads,
-            @Value("${copy.job.worker.queue:1000}") int queueCapacity
+            @Value("${copy.job.worker.pool-size:16}") int threads,
+            @Value("${copy.job.worker.queue:5000}") int queueCapacity
     ) {
         ThreadPoolTaskExecutor exec = new ThreadPoolTaskExecutor();
         exec.setCorePoolSize(threads);
@@ -42,6 +42,7 @@ public class CopyJobExecutorConfig {
         exec.setAwaitTerminationSeconds(30);
 
         exec.initialize();
+        exec.getThreadPoolExecutor().prestartAllCoreThreads();
         return exec;
     }
 }

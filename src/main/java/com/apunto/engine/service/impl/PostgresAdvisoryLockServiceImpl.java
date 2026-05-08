@@ -83,7 +83,7 @@ public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
         try (PreparedStatement ps = con.prepareStatement("SELECT pg_advisory_unlock(hashtext(?))")) {
             ps.setString(1, key);
             ps.execute();
-        } catch (Exception e) {
+        } catch (SQLException e) {
             log.warn("event=lock.unlock.failed key={} err={}", key, e.toString());
         }
     }

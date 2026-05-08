@@ -54,7 +54,7 @@ public class OperacionEventListener {
             acknowledgment.acknowledge();
             log.info("event=kafka.ack key={}", key);
 
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             log.error("event=kafka.handler.error key={} errorClass={} msg={}",
                     key, e.getClass().getSimpleName(), e.getMessage(), e);
             throw e;
