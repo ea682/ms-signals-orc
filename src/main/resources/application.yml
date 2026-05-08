@@ -103,6 +103,12 @@ engine:
   copy:
     execution-job-worker:
       enabled: true
+    reconcile:
+      on-open: ${ENGINE_COPY_RECONCILE_ON_OPEN:true}
+      on-close: ${ENGINE_COPY_RECONCILE_ON_CLOSE:true}
+    sizing:
+      max-fraction-per-trade: ${ENGINE_COPY_MAX_FRACTION_PER_TRADE:0.10}
+      notional-buffer-pct: ${ENGINE_COPY_NOTIONAL_BUFFER_PCT:0.03}
   metric-wallet:
     distribution-worker:
       enabled: true
