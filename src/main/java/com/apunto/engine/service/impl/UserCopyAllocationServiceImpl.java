@@ -284,6 +284,23 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 .toList();
     }
 
+
+    @Override
+    @Transactional(readOnly = true)
+    public Set<UUID> getActiveUserIdsByWallet(String walletId) {
+        final String normalizedWallet = normalize(walletId);
+        if (normalizedWallet == null) {
+            return Set.of();
+        }
+
+        return repository.findActiveByWalletId(normalizedWallet)
+                .stream()
+                .filter(Objects::nonNull)
+                .map(UserCopyAllocationEntity::getIdUser)
+                .filter(Objects::nonNull)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
     private static Integer safeScore(MetricaWalletDto dto) {
         if (dto == null || dto.getScoring() == null) return null;
         return dto.getScoring().getDecisionMetricConservative();
