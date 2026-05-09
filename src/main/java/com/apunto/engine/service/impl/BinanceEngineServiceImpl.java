@@ -166,6 +166,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     @Value("${engine.copy.reconcile.on-close:true}")
     private boolean reconcileOnClose;
 
+    @Value("${engine.copy.reconcile.max-missing-open-age:PT60S}")
+    private Duration maxMissingOpenAge;
+
+    @Value("${engine.copy.reconcile.max-missing-open-price-drift-pct:0.003}")
+    private BigDecimal maxMissingOpenPriceDriftPct;
+
+    @Value("${engine.copy.reconcile.skip-stale-increase:true}")
+    private boolean skipStaleIncrease;
+
+    @Value("${engine.copy.reconcile.max-increase-source-age:PT60S}")
+    private Duration maxIncreaseSourceAge;
+
     @Value("${copy.rules.min-notional-floor-usdt:0}")
     private BigDecimal configuredMinNotionalFloor;
 
@@ -676,6 +688,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 final CopyOperationDto currentCopy = current.get(target.originId());
                 if (currentCopy == null) {
+                    if (shouldSkipMissingReconcileOpen(target, triggerOriginId, userId, walletId, originOperation.isOperacionActiva())) {
+                        continue;
+                    }
                     final BigDecimal required = computeBufferedMargin(target.targetQty(), target.priceRef(), target.leverage());
                     if (walletBudget.compareTo(ZERO) <= 0 || usedMargin.add(required).add(reserve).compareTo(hardCap) > 0) {
                         log.warn(LOG_OPEN_SKIP_BUDGET, target.originId(), userId, walletId, target.symbol(), required.toPlainString(), walletBudget.toPlainString(), usedMargin.toPlainString());
@@ -690,6 +705,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 final BigDecimal currentQty = safeQty(currentCopy.getSizePar());
                 final BigDecimal targetQty = safeQty(target.targetQty());
                 if (shouldIncrease(currentQty, targetQty)) {
+                    if (shouldSkipStaleIncrease(target, triggerOriginId, userId, walletId, originOperation.isOperacionActiva())) {
+                        continue;
+                    }
                     final BigDecimal deltaQty = targetQty.subtract(currentQty);
                     final BigDecimal required = computeBufferedMargin(deltaQty, target.priceRef(), target.leverage());
                     if (walletBudget.compareTo(ZERO) <= 0 || usedMargin.add(required).add(reserve).compareTo(hardCap) > 0) {
@@ -875,6 +893,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         .notionalUsd(inferredNotional)
                         .sizeQty(originOperation.getSizeQty())
                         .sizeLegacy(originOperation.getSize())
+                        .createdAt(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
+                        .updatedAt(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
+                        .sourceTs(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
                         .build());
             } else {
                 log.debug("event=rebalance.source.patch_skipped reason=db_position_is_newer originId={}", originId);
@@ -1053,7 +1074,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         leverage,
                         priceRef,
                         targetQty,
-                        targetNotionalFinal
+                        targetNotionalFinal,
+                        leg.getEntryPrice(),
+                        leg.getCreatedAt(),
+                        leg.getUpdatedAt(),
+                        leg.getSourceTs()
                 ));
             } catch (SkipExecutionException ex) {
                 log.warn("event=rebalance.target.skip originLegId={} wallet={} rawSymbol={} symbol={} side={} priceRef={} sizeQty={} notionalUsd={} reasonCode={} reason=\"{}\" details=\"{}\"",
@@ -1081,6 +1106,199 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         return result;
+    }
+
+    private boolean shouldSkipMissingReconcileOpen(TargetLeg target,
+                                                   String triggerOriginId,
+                                                   String userId,
+                                                   String walletId,
+                                                   boolean triggerIsOpen) {
+        if (target == null) {
+            return true;
+        }
+
+        if (!triggerIsOpen) {
+            log.info(
+                    "event=rebalance.copy.open_skip reason=trigger_is_close originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    target.originId(),
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    target.symbol()
+            );
+            return true;
+        }
+
+        if (!Objects.equals(target.originId(), triggerOriginId)) {
+            log.info(
+                    "event=rebalance.copy.open_skip reason=non_trigger_missing_position originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    target.originId(),
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    target.symbol()
+            );
+            return true;
+        }
+
+        final OffsetDateTime sourceCreatedAt = target.sourceCreatedAt();
+        if (sourceCreatedAt == null) {
+            log.warn(
+                    "event=rebalance.copy.open_skip reason=source_created_at_missing originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    target.originId(),
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    target.symbol()
+            );
+            return true;
+        }
+
+        final Duration maxAge = positiveDurationOrNull(maxMissingOpenAge);
+        if (maxAge != null) {
+            final Duration age = Duration.between(sourceCreatedAt.toInstant(), Instant.now());
+            if (age.compareTo(maxAge) > 0) {
+                log.warn(
+                        "event=rebalance.copy.open_skip reason=stale_source_position originId={} triggerOriginId={} userId={} wallet={} symbol={} sourceCreatedAt={} ageMs={} maxAgeMs={}",
+                        target.originId(),
+                        triggerOriginId,
+                        userId,
+                        walletId,
+                        target.symbol(),
+                        sourceCreatedAt,
+                        age.toMillis(),
+                        maxAge.toMillis()
+                );
+                return true;
+            }
+        }
+
+        final BigDecimal driftLimit = safePct(maxMissingOpenPriceDriftPct, BigDecimal.ONE);
+        final BigDecimal drift = computeEntryPriceDriftPct(target);
+        if (driftLimit.compareTo(ZERO) > 0 && drift.compareTo(driftLimit) > 0) {
+            log.warn(
+                    "event=rebalance.copy.open_skip reason=entry_price_drift originId={} triggerOriginId={} userId={} wallet={} symbol={} entryPrice={} priceRef={} driftPct={} maxDriftPct={}",
+                    target.originId(),
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    target.symbol(),
+                    toPlain(target.entryPrice()),
+                    toPlain(target.priceRef()),
+                    drift.toPlainString(),
+                    driftLimit.toPlainString()
+            );
+            return true;
+        }
+
+        return false;
+    }
+
+    private boolean shouldSkipStaleIncrease(TargetLeg target,
+                                            String triggerOriginId,
+                                            String userId,
+                                            String walletId,
+                                            boolean triggerIsOpen) {
+        if (target == null) {
+            return true;
+        }
+
+        if (!triggerIsOpen) {
+            log.info(
+                    "event=rebalance.copy.increase_skip reason=trigger_is_close originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    target.originId(),
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    target.symbol()
+            );
+            return true;
+        }
+
+        if (!Objects.equals(target.originId(), triggerOriginId)) {
+            log.info(
+                    "event=rebalance.copy.increase_skip reason=non_trigger_position originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    target.originId(),
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    target.symbol()
+            );
+            return true;
+        }
+
+        if (!skipStaleIncrease) {
+            return false;
+        }
+
+        final Duration maxAge = positiveDurationOrNull(maxIncreaseSourceAge);
+        if (maxAge == null) {
+            return false;
+        }
+
+        final OffsetDateTime sourceUpdatedAt = firstNonNull(target.sourceUpdatedAt(), target.sourceTs(), target.sourceCreatedAt());
+        if (sourceUpdatedAt == null) {
+            log.warn(
+                    "event=rebalance.copy.increase_skip reason=source_update_time_missing originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    target.originId(),
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    target.symbol()
+            );
+            return true;
+        }
+
+        final Duration age = Duration.between(sourceUpdatedAt.toInstant(), Instant.now());
+        if (age.compareTo(maxAge) <= 0) {
+            return false;
+        }
+
+        log.warn(
+                "event=rebalance.copy.increase_skip reason=stale_source_update originId={} triggerOriginId={} userId={} wallet={} symbol={} sourceUpdatedAt={} ageMs={} maxAgeMs={}",
+                target.originId(),
+                triggerOriginId,
+                userId,
+                walletId,
+                target.symbol(),
+                sourceUpdatedAt,
+                age.toMillis(),
+                maxAge.toMillis()
+        );
+        return true;
+    }
+
+    private Duration positiveDurationOrNull(Duration value) {
+        if (value == null || value.isZero() || value.isNegative()) {
+            return null;
+        }
+        return value;
+    }
+
+    private OffsetDateTime firstNonNull(OffsetDateTime first, OffsetDateTime second, OffsetDateTime third) {
+        if (first != null) return first;
+        if (second != null) return second;
+        return third;
+    }
+
+    private BigDecimal computeEntryPriceDriftPct(TargetLeg target) {
+        if (target == null) {
+            return ZERO;
+        }
+        final BigDecimal entry = target.entryPrice();
+        final BigDecimal price = target.priceRef();
+        if (entry == null || price == null || entry.compareTo(ZERO) <= 0 || price.compareTo(ZERO) <= 0) {
+            return ZERO;
+        }
+        return price.subtract(entry).abs().divide(entry, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+    }
+
+    private OffsetDateTime toUtcOffsetDateTime(Instant instant) {
+        return instant == null ? null : OffsetDateTime.ofInstant(instant, java.time.ZoneOffset.UTC);
+    }
+
+    private String toPlain(BigDecimal value) {
+        return value == null ? "null" : value.toPlainString();
     }
 
     private BigDecimal inferEconomicNotionalFromEvent(OperacionDto originOperation) {
@@ -2290,7 +2508,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                              int leverage,
                              BigDecimal priceRef,
                              BigDecimal targetQty,
-                             BigDecimal targetNotional) {
+                             BigDecimal targetNotional,
+                             BigDecimal entryPrice,
+                             OffsetDateTime sourceCreatedAt,
+                             OffsetDateTime sourceUpdatedAt,
+                             OffsetDateTime sourceTs) {
     }
 
     private static final class SymbolRules {

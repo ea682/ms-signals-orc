@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 
 @Data
 @Builder
@@ -23,4 +24,7 @@ public class OriginBasketPositionDto {
     private BigDecimal notionalUsd;
     private BigDecimal sizeQty;
     private BigDecimal sizeLegacy;
+    private OffsetDateTime createdAt;
+    private OffsetDateTime updatedAt;
+    private OffsetDateTime sourceTs;
 }

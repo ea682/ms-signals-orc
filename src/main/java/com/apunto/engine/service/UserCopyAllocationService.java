@@ -4,6 +4,7 @@ import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 public interface UserCopyAllocationService {
@@ -12,6 +13,5 @@ public interface UserCopyAllocationService {
 
     List<UserCopyAllocationEntity> getWalletUserId(UUID idUser);
 
-
-
+    Set<UUID> getActiveUserIdsByWallet(String walletId);
 }
