@@ -93,6 +93,9 @@ binance:
 
 copy:
   job:
+    ingest:
+      filter-by-wallet-allocation: ${COPY_JOB_INGEST_FILTER_BY_WALLET_ALLOCATION:true}
+      fallback-all-users-on-empty-allocation: ${COPY_JOB_INGEST_FALLBACK_ALL_USERS_ON_EMPTY_ALLOCATION:false}
     worker:
       pool-size: ${COPY_JOB_WORKER_POOL_SIZE:24}
       queue: ${COPY_JOB_WORKER_QUEUE:5000}
@@ -107,6 +110,10 @@ engine:
     reconcile:
       on-open: ${ENGINE_COPY_RECONCILE_ON_OPEN:true}
       on-close: ${ENGINE_COPY_RECONCILE_ON_CLOSE:true}
+      max-missing-open-age: ${ENGINE_COPY_RECONCILE_MAX_MISSING_OPEN_AGE:PT60S}
+      max-missing-open-price-drift-pct: ${ENGINE_COPY_RECONCILE_MAX_MISSING_OPEN_PRICE_DRIFT_PCT:0.003}
+      skip-stale-increase: ${ENGINE_COPY_RECONCILE_SKIP_STALE_INCREASE:true}
+      max-increase-source-age: ${ENGINE_COPY_RECONCILE_MAX_INCREASE_SOURCE_AGE:PT60S}
     sizing:
       max-fraction-per-trade: ${ENGINE_COPY_MAX_FRACTION_PER_TRADE:0.10}
       notional-buffer-pct: ${ENGINE_COPY_NOTIONAL_BUFFER_PCT:0.03}

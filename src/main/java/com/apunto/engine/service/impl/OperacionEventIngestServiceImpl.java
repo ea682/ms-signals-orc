@@ -1,19 +1,24 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.metric.TradingMetrics;
 import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.OperacionEventIngestService;
+import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -26,11 +31,18 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private static final String ERR_ID_NULL = "El idOperacion no puede ser null";
 
     private static final String LOG_ENQUEUED =
-            "event=copy.execution.enqueued originId={} tipo={} usersCached={} enqueued={}";
+            "event=copy.execution.enqueued originId={} wallet={} tipo={} usersCached={} eligibleUsers={} enqueued={} allocationFilter={}";
 
     private final UserDetailCachedService userDetailCachedService;
+    private final UserCopyAllocationService userCopyAllocationService;
     private final CopyExecutionJobService copyExecutionJobService;
     private final TradingMetrics tradingMetrics;
+
+    @Value("${copy.job.ingest.filter-by-wallet-allocation:true}")
+    private boolean filterByWalletAllocation;
+
+    @Value("${copy.job.ingest.fallback-all-users-on-empty-allocation:false}")
+    private boolean fallbackAllUsersOnEmptyAllocation;
 
     @Override
     public int ingest(OperacionEvent event) {
@@ -44,17 +56,20 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             Objects.requireNonNull(event.getOperacion(), ERR_OPERACION_NULL);
             Objects.requireNonNull(event.getOperacion().getIdOperacion(), ERR_ID_NULL);
 
+            final OperacionDto operacion = event.getOperacion();
             tipo = event.getTipo().name();
 
-            final String originId = event.getOperacion().getIdOperacion().toString();
+            final String originId = operacion.getIdOperacion().toString();
+            final String walletId = operacion.getIdCuenta();
             final CopyJobAction action = mapAction(event.getTipo());
 
             final List<UserDetailDto> usersCached = safeUsers(userDetailCachedService.getUsers());
-            final int enqueued = copyExecutionJobService.enqueueForUsers(event, usersCached, action);
+            final List<UserDetailDto> eligibleUsers = resolveEligibleUsers(walletId, usersCached);
+            final int enqueued = copyExecutionJobService.enqueueForUsers(event, eligibleUsers, action);
 
-            tradingMetrics.jobsEnqueued(action.name(), usersCached.size(), enqueued);
+            tradingMetrics.jobsEnqueued(action.name(), eligibleUsers.size(), enqueued);
 
-            log.info(LOG_ENQUEUED, originId, event.getTipo(), usersCached.size(), enqueued);
+            log.info(LOG_ENQUEUED, originId, walletId, event.getTipo(), usersCached.size(), eligibleUsers.size(), enqueued, filterByWalletAllocation);
             return enqueued;
 
         } catch (RuntimeException ex) {
@@ -63,6 +78,32 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         } finally {
             tradingMetrics.ingestDuration(tipo, result, System.nanoTime() - t0);
         }
+    }
+
+    private List<UserDetailDto> resolveEligibleUsers(String walletId, List<UserDetailDto> usersCached) {
+        if (!filterByWalletAllocation) {
+            return usersCached;
+        }
+        if (walletId == null || walletId.isBlank()) {
+            log.warn("event=copy.execution.user_filter_skipped reason=wallet_missing usersCached={}", usersCached.size());
+            return fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
+        }
+
+        final Set<UUID> activeUserIds = userCopyAllocationService.getActiveUserIdsByWallet(walletId);
+        if (activeUserIds.isEmpty()) {
+            log.info("event=copy.execution.user_filter wallet={} matchedUsers=0 fallbackAllUsers={}", walletId, fallbackAllUsersOnEmptyAllocation);
+            return fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
+        }
+
+        final List<UserDetailDto> eligible = usersCached.stream()
+                .filter(Objects::nonNull)
+                .filter(u -> u.getUser() != null && u.getUser().getId() != null)
+                .filter(u -> activeUserIds.contains(u.getUser().getId()))
+                .toList();
+
+        log.debug("event=copy.execution.user_filter wallet={} activeAllocations={} usersCached={} eligible={}",
+                walletId, activeUserIds.size(), usersCached.size(), eligible.size());
+        return eligible;
     }
 
     private CopyJobAction mapAction(OperacionEvent.Tipo tipo) {

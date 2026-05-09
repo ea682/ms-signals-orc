@@ -93,6 +93,9 @@ public class FuturesPositionImpl implements FuturesPositionService {
                 .notionalUsd(entity.getNotionalUsd())
                 .sizeQty(entity.getSizeQty())
                 .sizeLegacy(entity.getSizeLegacy())
+                .createdAt(entity.getCreatedAt())
+                .updatedAt(entity.getUpdatedAt())
+                .sourceTs(entity.getSourceTs())
                 .build();
     }
 }
