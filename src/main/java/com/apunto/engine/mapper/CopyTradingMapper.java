@@ -41,12 +41,7 @@ public interface CopyTradingMapper {
     }
 
     default OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
-        // Para copy trading dejamos el leverage fijo (policy) o usamos el leverage guardado en la copia.
-        // Evita inconsistencias al cerrar cuando el usuario cambia su leverage.
-        int closeLeverage = 5;
-        if (copyOperation.getLeverage() != null) {
-            closeLeverage = Math.max(1, copyOperation.getLeverage().intValue());
-        }
+        // Los cierres MARKET reduceOnly no deben mandar leverage; ms-binance usa fast path directo a /order.
 
         if ("LONG".equals(copyOperation.getTypeOperation())) {
             return OperationDto.builder()
@@ -55,7 +50,7 @@ public interface CopyTradingMapper {
                     .type(OrderType.MARKET)
                     .positionSide(PositionSide.LONG)
                     .quantity(copyOperation.getSizePar().toPlainString())
-                    .leverage(closeLeverage)
+                    .leverage(null)
                     .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(copyOperation.getIdOrderOrigin(), userDetail.getUser().getId().toString(), copyOperation.getIdWalletOrigin()))
                     .reduceOnly(true)
                     .apiKey(userDetail.getUserApiKey().getApiKey())
@@ -68,7 +63,7 @@ public interface CopyTradingMapper {
                     .type(OrderType.MARKET)
                     .positionSide(PositionSide.SHORT)
                     .quantity(copyOperation.getSizePar().toPlainString())
-                    .leverage(closeLeverage)
+                    .leverage(null)
                     .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(copyOperation.getIdOrderOrigin(), userDetail.getUser().getId().toString(), copyOperation.getIdWalletOrigin()))
                     .reduceOnly(true)
                     .apiKey(userDetail.getUserApiKey().getApiKey())

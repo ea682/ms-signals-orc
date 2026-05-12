@@ -1,9 +1,12 @@
 package com.apunto.engine.entity;
 
 import com.apunto.engine.entity.converter.UserCopyAllocationStatusConverter;
+import com.apunto.engine.shared.enums.CopyMinNotionalMode;
 import jakarta.persistence.Column;
 import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -28,6 +31,7 @@ import java.util.UUID;
 @AllArgsConstructor
 @Table(
         name = "user_copy_allocation",
+        schema = "futuros_operaciones",
         uniqueConstraints = @UniqueConstraint(
                 name = "uq_user_copy_allocation_user_wallet",
                 columnNames = {"id_user", "wallet_id"}
@@ -64,6 +68,23 @@ public class UserCopyAllocationEntity {
     @Column(name = "is_active")
     private boolean isActive;
 
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(name = "copy_min_notional_mode", nullable = false, length = 32)
+    private CopyMinNotionalMode copyMinNotionalMode = CopyMinNotionalMode.INHERIT;
+
+    @Column(name = "copy_min_notional_max_usdt", precision = 18, scale = 8)
+    private BigDecimal copyMinNotionalMaxUsdt;
+
+    @Column(name = "copy_min_notional_min_score")
+    private Integer copyMinNotionalMinScore;
+
+    @Column(name = "copy_min_notional_min_history_days")
+    private Integer copyMinNotionalMinHistoryDays;
+
+    @Column(name = "copy_min_notional_min_operations")
+    private Integer copyMinNotionalMinOperations;
+
     public enum Status {
         ACTIVE,
         PAUSED,
@@ -76,6 +97,7 @@ public class UserCopyAllocationEntity {
 
         if (status == null) status = Status.ACTIVE;
         if (updatedAt == null) updatedAt = now;
+        if (copyMinNotionalMode == null) copyMinNotionalMode = CopyMinNotionalMode.INHERIT;
 
         walletId = normalize(walletId);
 
@@ -90,6 +112,7 @@ public class UserCopyAllocationEntity {
     void preUpdate() {
         final OffsetDateTime now = OffsetDateTime.now();
         updatedAt = now;
+        if (copyMinNotionalMode == null) copyMinNotionalMode = CopyMinNotionalMode.INHERIT;
 
         walletId = normalize(walletId);
 

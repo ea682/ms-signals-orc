@@ -10,6 +10,7 @@ import com.apunto.engine.service.BinanceCopyExecutionService;
 import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.shared.exception.BinanceRateLimitException;
+import com.apunto.engine.shared.exception.CopyExecutionException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
@@ -17,6 +18,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.dao.DataAccessException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -24,6 +26,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.net.InetAddress;
@@ -109,9 +112,9 @@ public class CopyExecutionJobWorker {
                 submitOrRescheduleOnReject(job);
             }
 
-        } catch (RuntimeException e) {
-            log.error("event=copy.tick.error workerId={} errClass={} err={}",
-                    workerId, e.getClass().getSimpleName(), e.toString(), e);
+        } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException e) {
+            log.error("event=copy.tick.error workerId={} errClass={} errMsg=\"{}\"",
+                    workerId, e.getClass().getSimpleName(), safeMsgForLog(safeMsg(e)), e);
         }
     }
 
@@ -145,17 +148,29 @@ public class CopyExecutionJobWorker {
             log.info("event=copy.job.started id={} originId={} userId={} action={} attempt={} workerId={}",
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt(), workerId);
 
+            long phaseNs = System.nanoTime();
             OperacionEvent event = readPayload(job);
+            log.info("event=copy.job.phase id={} originId={} userId={} action={} phase=load_job elapsedMs={}",
+                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), elapsedMsSince(phaseNs));
 
+            phaseNs = System.nanoTime();
             UserDetailDto user = resolveUserOrSkip(job.getUserId());
+            log.info("event=copy.job.phase id={} originId={} userId={} action={} phase=load_user elapsedMs={}",
+                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), elapsedMsSince(phaseNs));
 
+            phaseNs = System.nanoTime();
             if (job.getAction() == CopyJobAction.OPEN) {
                 binanceCopyExecutionService.executeOpenForUser(event, user);
             } else {
                 binanceCopyExecutionService.executeCloseForUser(event, user);
             }
+            log.info("event=copy.job.phase id={} originId={} userId={} action={} phase=execute_copy elapsedMs={}",
+                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), elapsedMsSince(phaseNs));
 
+            phaseNs = System.nanoTime();
             jobService.markDone(job);
+            log.info("event=copy.job.phase id={} originId={} userId={} action={} phase=mark_done elapsedMs={}",
+                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), elapsedMsSince(phaseNs));
 
             tradingMetrics.jobExecution(job, "done", System.nanoTime() - t0);
             tradingMetrics.jobResult(job, "done", null);
@@ -181,7 +196,7 @@ public class CopyExecutionJobWorker {
                     safeMsgForLog(skip.getReason()),
                     safeMsgForLog(skip.getDetails()));
 
-        } catch (RuntimeException ex) {
+        } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             handleFailure(job, ex);
 
             tradingMetrics.jobExecution(job, "failed", System.nanoTime() - t0);
@@ -192,7 +207,7 @@ public class CopyExecutionJobWorker {
         }
     }
 
-    private void handleFailure(CopyExecutionJobEntity job, RuntimeException ex) {
+    private void handleFailure(CopyExecutionJobEntity job, Throwable ex) {
         int attempt = job.getAttempt() + 1;
         job.setAttempt(attempt);
 
@@ -203,25 +218,46 @@ public class CopyExecutionJobWorker {
 
         if (!retryable || attempt >= maxAttempts) {
             jobService.markDead(job, category.name(), msg);
-            log.error("event=copy.job.dead id={} originId={} userId={} action={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
-                    job.getId(),
-                    job.getOriginId(),
-                    job.getUserId(),
-                    job.getAction(),
-                    attempt,
-                    category,
-                    retryable,
-                    summary.errClass(),
-                    summary.errCode(),
-                    summary.httpStatus(),
-                    summary.symbol(),
-                    summary.side(),
-                    summary.positionSide(),
-                    summary.qty(),
-                    summary.binanceCode(),
-                    summary.traceId(),
-                    safeMsgForLog(summary.errMsg()),
-                    ex);
+            if (shouldLogStacktrace(category, ex)) {
+                log.error("event=copy.job.dead id={} originId={} userId={} action={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
+                        job.getId(),
+                        job.getOriginId(),
+                        job.getUserId(),
+                        job.getAction(),
+                        attempt,
+                        category,
+                        retryable,
+                        summary.errClass(),
+                        summary.errCode(),
+                        summary.httpStatus(),
+                        summary.symbol(),
+                        summary.side(),
+                        summary.positionSide(),
+                        summary.qty(),
+                        summary.binanceCode(),
+                        summary.traceId(),
+                        safeMsgForLog(summary.errMsg()),
+                        ex);
+            } else {
+                log.error("event=copy.job.dead id={} originId={} userId={} action={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
+                        job.getId(),
+                        job.getOriginId(),
+                        job.getUserId(),
+                        job.getAction(),
+                        attempt,
+                        category,
+                        retryable,
+                        summary.errClass(),
+                        summary.errCode(),
+                        summary.httpStatus(),
+                        summary.symbol(),
+                        summary.side(),
+                        summary.positionSide(),
+                        summary.qty(),
+                        summary.binanceCode(),
+                        summary.traceId(),
+                        safeMsgForLog(summary.errMsg()));
+            }
             return;
         }
 
@@ -246,6 +282,23 @@ public class CopyExecutionJobWorker {
                 summary.binanceCode(),
                 summary.traceId(),
                 safeMsgForLog(summary.errMsg()));
+    }
+
+    private boolean shouldLogStacktrace(CopyJobErrorCategory category, Throwable t) {
+        if (category == CopyJobErrorCategory.UNKNOWN) {
+            return true;
+        }
+        Throwable cur = t;
+        while (cur != null) {
+            if (cur instanceof EngineException || cur instanceof RestClientResponseException) {
+                return false;
+            }
+            if (cur instanceof ResourceAccessException) {
+                return false;
+            }
+            cur = cur.getCause();
+        }
+        return true;
     }
 
     private Duration computeBackoff(CopyJobErrorCategory category, int attempt) {
@@ -294,7 +347,7 @@ public class CopyExecutionJobWorker {
                 Map<String, Object> d = ee.getDetails() == null ? Map.of() : ee.getDetails();
                 return new ErrorSummary(
                         cur.getClass().getSimpleName(),
-                        ee.getErrorCode() == null ? null : ee.getErrorCode().name(),
+                        copyErrorCode(ee),
                         asString(d.get("httpStatus")),
                         asString(d.get("symbol")),
                         asString(d.get("side")),
@@ -336,6 +389,13 @@ public class CopyExecutionJobWorker {
                 null,
                 safeMsg(t)
         );
+    }
+
+    private String copyErrorCode(EngineException ex) {
+        if (ex instanceof CopyExecutionException copyEx && copyEx.getErrCode() != null) {
+            return copyEx.getErrCode();
+        }
+        return ex.getErrorCode() == null ? null : ex.getErrorCode().name();
     }
 
     private String asString(Object value) {
@@ -416,6 +476,10 @@ public class CopyExecutionJobWorker {
         if (job.getUserId() != null) MDC.put("copy.userId", job.getUserId());
         if (job.getAction() != null) MDC.put("copy.action", job.getAction().name());
         MDC.put("copy.workerId", workerId);
+    }
+
+    private long elapsedMsSince(long startedNs) {
+        return Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
     }
 
     private ExecSnapshot execSnapshot() {

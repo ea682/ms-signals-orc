@@ -31,9 +31,12 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
       properties:
+        fetch.max.wait.ms: ${KAFKA_FETCH_MAX_WAIT_MS:25}
+        fetch.min.bytes: ${KAFKA_FETCH_MIN_BYTES:1}
+        max.poll.records: ${KAFKA_MAX_POLL_RECORDS:100}
         spring.json.trusted.packages: "*"
         spring.json.use.type.headers: false
-        spring.json.value.default.type: com.apunto.signalsorc.kafka.dto.OperacionEvent
+        spring.json.value.default.type: com.apunto.engine.events.OperacionEvent
 
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -90,6 +93,8 @@ binance:
   dispatch:
     delay-ms: ${BINANCE_DISPATCH_DELAY_MS:0}
     pool-size: ${BINANCE_DISPATCH_POOL_SIZE:8}
+  symbols:
+    cache-ttl-ms: ${BINANCE_SYMBOLS_CACHE_TTL_MS:60000}
 
 copy:
   job:
@@ -110,6 +115,7 @@ engine:
     reconcile:
       on-open: ${ENGINE_COPY_RECONCILE_ON_OPEN:true}
       on-close: ${ENGINE_COPY_RECONCILE_ON_CLOSE:true}
+      trigger-scoped: ${ENGINE_COPY_RECONCILE_TRIGGER_SCOPED:true}
       max-missing-open-age: ${ENGINE_COPY_RECONCILE_MAX_MISSING_OPEN_AGE:PT60S}
       max-missing-open-price-drift-pct: ${ENGINE_COPY_RECONCILE_MAX_MISSING_OPEN_PRICE_DRIFT_PCT:0.003}
       skip-stale-increase: ${ENGINE_COPY_RECONCILE_SKIP_STALE_INCREASE:true}

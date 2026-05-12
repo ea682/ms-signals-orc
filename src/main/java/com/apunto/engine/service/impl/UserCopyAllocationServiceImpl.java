@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -299,6 +300,22 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 .map(UserCopyAllocationEntity::getIdUser)
                 .filter(Objects::nonNull)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId) {
+        final String normalizedWallet = normalize(walletId);
+        if (idUser == null || normalizedWallet == null) {
+            return Optional.empty();
+        }
+
+        return repository.findActiveAllocation(
+                idUser,
+                normalizedWallet,
+                UserCopyAllocationEntity.Status.ACTIVE
+        );
     }
 
     private static Integer safeScore(MetricaWalletDto dto) {
