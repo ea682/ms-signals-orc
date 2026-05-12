@@ -19,6 +19,8 @@ import com.apunto.engine.service.DistributedLockService;
 import com.apunto.engine.service.FuturesPositionService;
 import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.ProcesBinanceService;
+import com.apunto.engine.service.copy.CopyMinNotionalPolicy;
+import com.apunto.engine.service.copy.CopyMinNotionalPolicyResolver;
 import com.apunto.engine.service.copy.ProportionalCopySizingCalculator;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
@@ -26,12 +28,14 @@ import com.apunto.engine.shared.enums.PositionStatus;
 import com.apunto.engine.shared.enums.Side;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
+import com.apunto.engine.shared.exception.CopySymbolMetadataException;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.LogFmt;
 import com.apunto.engine.shared.util.IdempotencyKeyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.stereotype.Service;
 
@@ -53,6 +57,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -104,7 +109,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_PREP_SKIP_TOO_SMALL = "event=operation.open.skip_too_small originId={} userId={} wallet={} symbol={} notionalMax={}";
     private static final String LOG_PREP_SKIP_SYMBOL_RULES = "event=operation.open.skip_symbol_rules originId={} userId={} wallet={} symbol={} notionalMax={}";
     private static final String LOG_PREP_SKIP_NOTIONAL_ZERO = "event=operation.open.skip_notional_zero originId={} userId={} wallet={} symbol={}";
-    private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} sourceMargin={} capitalReference={} fraction={} walletBudget={} usedMargin={} availableBufferedMargin={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={}";
+    private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} sourceMargin={} capitalReference={} fraction={} walletBudget={} usedMargin={} availableBufferedMargin={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={} copyByMinNotional={}";
+    private static final String LOG_PREP_COPY_BY_MIN_NOTIONAL = "event=operation.open.copy_by_min_notional originId={} userId={} wallet={} symbol={} candidateNotional={} forcedNotional={} minNotional={} policyMode={} allocationId={} score={} minScore={} historyDays={} minHistoryDays={} operationsCount={} minOperations={} maxForcedNotional={} notionalBudgetCeiling={}";
     private static final BigDecimal MAX_MARGIN_SAFETY_PCT = new BigDecimal("0.30");
 
     private static final String LOG_QTY_ADJUSTED = "event=binance.qty_adjusted symbol={} qtyOriginal={} qtyFinal={} notionalFinal={} notionalMax={}";
@@ -135,6 +141,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private final CopyOperationService copyOperationService;
     private final DistributedLockService distributedLockService;
     private final ProportionalCopySizingCalculator copySizingCalculator;
+    private final CopyMinNotionalPolicyResolver copyMinNotionalPolicyResolver;
 
     @Value("${binance.dispatch.delay-ms:0}")
     private long delayBetweenMs;
@@ -166,6 +173,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     @Value("${engine.copy.reconcile.on-close:true}")
     private boolean reconcileOnClose;
 
+    @Value("${engine.copy.reconcile.trigger-scoped:true}")
+    private boolean triggerScopedReconcile;
+
     @Value("${engine.copy.reconcile.max-missing-open-age:PT60S}")
     private Duration maxMissingOpenAge;
 
@@ -187,6 +197,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private final ConcurrentMap<String, Long> processedOperations = new ConcurrentHashMap<>();
 
     private final Object symbolsCacheLock = new Object();
+    private final AtomicBoolean symbolsRefreshInFlight = new AtomicBoolean(false);
     private volatile SymbolsCache symbolsCache = new SymbolsCache(
             0L,
             Collections.emptyMap(),
@@ -319,8 +330,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return;
         }
 
-        if (reconcileOnOpen) {
+        if (reconcileOnOpen && !triggerScopedReconcile) {
             reconcileWalletBasketForUser(event, userDetail);
+        } else if (reconcileOnOpen) {
+            final long existingNs = System.nanoTime();
+            final CopyOperationDto existingCopy = copyOperationService.findOperationForUser(originId, userId.toString());
+            log.info("event=copy.job.phase action=OPEN phase=load_existing_copy originId={} userId={} elapsedMs={}",
+                    originId, userId, elapsedMsSince(existingNs));
+            if (existingCopy != null && existingCopy.isActive()) {
+                log.info("event=copy.open.trigger_scoped action=reconcile_existing_copy originId={} userId={} symbol={} copyId={}",
+                        originId, userId, originOperation.getParSymbol(), existingCopy.getIdOperation());
+                reconcileWalletBasketForUser(event, userDetail);
+            } else {
+                executeDirectOpenForUser(event, userDetail);
+            }
         } else {
             executeDirectOpenForUser(event, userDetail);
         }
@@ -333,86 +356,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         Objects.requireNonNull(event, ERR_EVENT_NULL);
         Objects.requireNonNull(userDetail, ERR_USER_NULL);
 
+        final long startedNs = System.nanoTime();
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
         final UUID userId = userDetail.getUser().getId();
+        final String symbol = safeLog(originOperation.getParSymbol());
 
-        final boolean originStillActiveInEvent = originOperation.isOperacionActiva();
+        log.info("event=copy.close.fast_path.start originId={} userId={} symbol={}", originId, userId, symbol);
 
-        final Optional<FuturesPositionDto> positionOriginDto =
-                futuresPositionService.getIdFuturesPosition(originId);
-
-        final PositionStatus sourceStatus = positionOriginDto
-                .map(FuturesPositionDto::getIsActive)
-                .orElse(null);
-
-        final boolean sourcePositionExists = sourceStatus != null;
-        final boolean originStillOpenInDb = PositionStatus.OPEN.equals(sourceStatus);
-        final boolean originClosedInDb =
-                PositionStatus.CLOSED.equals(sourceStatus)
-                        || PositionStatus.LIQUIDATED.equals(sourceStatus)
-                        || PositionStatus.CANCELLED.equals(sourceStatus);
-
-        if (originStillActiveInEvent) {
-            log.warn(
-                    "event=copy_close_skipped reason=origin_still_active originId={} userId={} originActive={} dbStatus={}",
-                    originId,
-                    userId,
-                    originStillActiveInEvent,
-                    sourceStatus
-            );
+        if (originOperation.isOperacionActiva()) {
+            log.warn("event=copy.close.fast_path.skip reason=origin_still_active originId={} userId={} symbol={} elapsedMs={}",
+                    originId, userId, symbol, elapsedMsSince(startedNs));
             return;
         }
 
-        if (!sourcePositionExists) {
-            log.warn(
-                    "event=copy_close_skipped reason=source_position_not_found originId={} userId={} originActive={} dbStatus=null reconcileOnClose={}",
-                    originId,
-                    userId,
-                    originStillActiveInEvent,
-                    reconcileOnClose
-            );
-            if (reconcileOnClose) {
-                reconcileWalletBasketForUser(event, userDetail);
-            }
-            return;
-        }
-
-        if (originStillOpenInDb) {
-            log.warn(
-                    "event=copy_close_skipped reason=source_still_open_in_db originId={} userId={} originActive={} dbStatus={}",
-                    originId,
-                    userId,
-                    originStillActiveInEvent,
-                    sourceStatus
-            );
-            return;
-        }
-
-        if (!originClosedInDb) {
-            log.warn(
-                    "event=copy_close_skipped reason=source_not_in_terminal_state originId={} userId={} originActive={} dbStatus={}",
-                    originId,
-                    userId,
-                    originStillActiveInEvent,
-                    sourceStatus
-            );
-            return;
-        }
-
-        log.info(
-                "event=copy_close_validation_ok originId={} userId={} originActive={} dbStatus={}",
-                originId,
-                userId,
-                originStillActiveInEvent,
-                sourceStatus
-        );
-
-        if (reconcileOnClose) {
-            reconcileWalletBasketForUser(event, userDetail);
-        } else {
-            executeDirectCloseForUser(event, userDetail);
-        }
+        executeDirectCloseForUser(event, userDetail, startedNs);
     }
 
     private void executeDirectOpenForUser(OperacionEvent event, UserDetailDto userDetail) {
@@ -464,7 +422,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 return null;
             }
 
+            final long metricNs = System.nanoTime();
             final MetricaWalletDto walletMetric = resolveWalletMetric(originId, walletId, userDetail);
+            log.info("event=copy.job.phase action=OPEN phase=load_metric originId={} userId={} wallet={} symbol={} elapsedMs={}",
+                    originId, userId, walletId, symbol, elapsedMsSince(metricNs));
+            log.info("event=copy.job.phase action=OPEN phase=load_allocation originId={} userId={} wallet={} symbol={} elapsedMs={}",
+                    originId, userId, walletId, symbol, elapsedMsSince(metricNs));
             if (walletMetric == null) {
                 log.warn(
                         "event=copy_open_skipped reason=metric_missing originId={} userId={} wallet={} symbol={} note=wallet_not_present_in_candidates",
@@ -503,11 +466,27 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 return null;
             }
 
+            final long calcNs = System.nanoTime();
             final PreparedOpen prepared = prepareOpenOperation(event, userDetail, walletMetric);
+            log.info("event=copy.job.phase action=OPEN phase=calculate_target originId={} userId={} wallet={} symbol={} elapsedMs={}",
+                    originId, userId, walletId, prepared.symbol, elapsedMsSince(calcNs));
             BinanceFuturesOrderClientResponse order = null;
             try {
-                order = procesBinanceService.operationPosition(prepared.dto);
+                final long sendNs = System.nanoTime();
+                log.info("event=copy.open.order.send originId={} userId={} wallet={} symbol={} qty={} positionSide={} reduceOnly={}",
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.symbol,
+                        prepared.dto.getQuantity(),
+                        prepared.dto.getPositionSide(),
+                        prepared.dto.isReduceOnly());
+                log.info("event=copy.open.order.ok originId={} userId={} wallet={} symbol={} orderId={} elapsedMs={}",
+                        originId, userId, walletId, prepared.symbol, order == null ? null : order.getOrderId(), elapsedMsSince(sendNs));
+                final long saveNs = System.nanoTime();
                 createNewOperation(order, walletId, originOperation.getIdOperacion(), userId, prepared.leverage);
+                log.info("event=copy.job.phase action=OPEN phase=save_copy_operation originId={} userId={} wallet={} symbol={} elapsedMs={}",
+                        originId, userId, walletId, prepared.symbol, elapsedMsSince(saveNs));
                 log.info("event=copy_open_completed originId={} userId={} wallet={} symbol={} orderId={} qty={} notional={}",
                         originId,
                         userId,
@@ -517,22 +496,34 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         safeQty(copyTradingMapper.resolveFilledQty(order)).toPlainString(),
                         prepared.notional.toPlainString());
                 return null;
-            } catch (RuntimeException ex) {
-                log.error(
-                        "event=copy_open_failed originId={} userId={} wallet={} symbol={} errClass={} err=\"{}\"",
-                        originId,
-                        userId,
-                        walletId,
-                        prepared.symbol,
-                        ex.getClass().getSimpleName(),
-                        safeLog(ex.getMessage()),
-                        ex
-                );
+            } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
+                if (shouldLogStacktrace(ex)) {
+                    log.error(
+                            "event=copy_open_failed originId={} userId={} wallet={} symbol={} errClass={} err=\"{}\"",
+                            originId,
+                            userId,
+                            walletId,
+                            prepared.symbol,
+                            ex.getClass().getSimpleName(),
+                            safeLog(ex.getMessage()),
+                            ex
+                    );
+                } else {
+                    log.error(
+                            "event=copy_open_failed originId={} userId={} wallet={} symbol={} errClass={} err=\"{}\"",
+                            originId,
+                            userId,
+                            walletId,
+                            prepared.symbol,
+                            ex.getClass().getSimpleName(),
+                            safeLog(ex.getMessage())
+                    );
+                }
 
                 if (order != null) {
                     try {
                         tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, order, userDetail);
-                    } catch (RuntimeException panicEx) {
+                    } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException | ArithmeticException panicEx) {
                         log.error("event=copy_open_panic_close_failed originId={} userId={} wallet={} symbol={} panicErrClass={} panicErr=\"{}\"",
                                 originId,
                                 userId,
@@ -549,6 +540,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private void executeDirectCloseForUser(OperacionEvent event, UserDetailDto userDetail) {
+        executeDirectCloseForUser(event, userDetail, System.nanoTime());
+    }
+
+    private void executeDirectCloseForUser(OperacionEvent event, UserDetailDto userDetail, long startedNs) {
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
@@ -559,7 +554,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         distributedLockService.withLock(distLockKey(userId, walletId), Duration.ofSeconds(120), () -> {
+            final long loadCopyNs = System.nanoTime();
             final CopyOperationDto currentCopy = copyOperationService.findOperationForUser(originId, userId);
+            log.info("event=copy.job.phase action=CLOSE phase=load_copy originId={} userId={} symbol={} elapsedMs={}",
+                    originId, userId, safeLog(originOperation.getParSymbol()), elapsedMsSince(loadCopyNs));
             if (currentCopy == null) {
                 log.info("event=copy_close_skipped reason=copy_missing originId={} userId={} wallet={}",
                         originId,
@@ -577,12 +575,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             executeCloseOperation(currentCopy, userDetail);
-            log.info("event=copy_close_completed originId={} userId={} wallet={} symbol={} qty={}",
+            log.info("event=copy.close.fast_path.done originId={} userId={} wallet={} symbol={} qty={} elapsedMs={}",
                     originId,
                     userId,
                     walletId,
                     currentCopy.getParsymbol(),
-                    safeQty(currentCopy.getSizePar()).toPlainString());
+                    safeQty(currentCopy.getSizePar()).toPlainString(),
+                    elapsedMsSince(startedNs));
             return null;
         });
     }
@@ -631,7 +630,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
 
-            final Map<String, TargetLeg> targets = buildTargetBasket(sourceBasket, walletBudget, walletMetric, leverage);
+            final Map<String, TargetLeg> targets = buildTargetBasket(userDetail, sourceBasket, walletBudget, walletMetric, leverage);
             final Map<String, CopyOperationDto> current = copyOperationService
                     .findActiveOperationsByUserAndWallet(userId, walletId)
                     .stream()
@@ -906,7 +905,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return new ArrayList<>(byOriginId.values());
     }
 
-    private Map<String, TargetLeg> buildTargetBasket(List<OriginBasketPositionDto> sourceBasket,
+    private Map<String, TargetLeg> buildTargetBasket(UserDetailDto userDetail,
+                                                     List<OriginBasketPositionDto> sourceBasket,
                                                      BigDecimal walletBudget,
                                                      MetricaWalletDto walletMetric,
                                                      int leverage) {
@@ -994,13 +994,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 final BigDecimal notionalMax = targetMargin.multiply(BigDecimal.valueOf(leverage));
                 final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
-                final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+                BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+                BigDecimal notionalBudgetCeiling = walletBudget.multiply(BigDecimal.valueOf(leverage));
+                boolean copyByMinNotional = false;
 
                 if (targetNotional.compareTo(rules.effectiveMinNotional) < 0) {
-                    final BigDecimal missing = rules.effectiveMinNotional.subtract(targetNotional);
-                    throw new SkipExecutionException(
-                            "notional_too_small",
-                            "Target descartado porque el notional quedó bajo el mínimo de Binance",
+                    final BigDecimal originalTargetNotional = targetNotional;
+                    final CopyMinNotionalPolicy minNotionalPolicy =
+                            copyMinNotionalPolicyResolver.resolve(userDetail, leg.getWalletId(), walletMetric);
+
+                    validateCopyByMinNotionalPolicy(
+                            minNotionalPolicy,
+                            rules.effectiveMinNotional,
                             LogFmt.kv(
                                     "rawSymbol", leg.getSymbol(),
                                     "symbol", symbol,
@@ -1009,7 +1014,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                     "exchangeMinNotional", rules.exchangeMinNotional,
                                     "effectiveMinNotional", rules.effectiveMinNotional,
                                     "minNotionalFloor", configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor,
-                                    "missingNotional", missing,
                                     "sourceMargin", sourceMargin,
                                     "capitalReference", capitalReference,
                                     "fraction", fraction,
@@ -1017,13 +1021,61 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                     "walletBudget", walletBudget
                             )
                     );
+
+                    targetNotional = rules.effectiveMinNotional;
+                    copyByMinNotional = true;
+
+                    log.info("event=rebalance.target.copy_by_min_notional originLegId={} wallet={} symbol={} candidateNotional={} forcedNotional={} minNotional={} policyMode={} allocationId={} score={} minScore={} historyDays={} minHistoryDays={} operationsCount={} minOperations={} maxForcedNotional={} notionalBudgetCeiling={}",
+                            leg.getOriginId(),
+                            leg.getWalletId(),
+                            symbol,
+                            originalTargetNotional.toPlainString(),
+                            targetNotional.toPlainString(),
+                            rules.effectiveMinNotional.toPlainString(),
+                            minNotionalPolicy.mode(),
+                            minNotionalPolicy.allocationId(),
+                            minNotionalPolicy.score(),
+                            minNotionalPolicy.minScore(),
+                            minNotionalPolicy.historyDays(),
+                            minNotionalPolicy.minHistoryDays(),
+                            minNotionalPolicy.operationsCount(),
+                            minNotionalPolicy.minOperations(),
+                            minNotionalPolicy.maxNotionalUsdt(),
+                            notionalBudgetCeiling.toPlainString());
                 }
 
                 BigDecimal rawQty = targetNotional.divide(priceRef, rules.qtyScale, RoundingMode.DOWN);
 
-                BigDecimal targetQty = adjustQuantityToBinanceRules(symbol, rawQty, priceRef, rules, notionalMax);
+                BigDecimal targetQty = adjustQuantityToBinanceRules(symbol, rawQty, priceRef, rules, notionalBudgetCeiling);
+                if (copyByMinNotional) {
+                    targetQty = adjustQuantityUpToMinNotional(
+                            symbol,
+                            targetQty,
+                            priceRef,
+                            rules,
+                            rules.effectiveMinNotional,
+                            notionalBudgetCeiling
+                    );
+                }
                 if (targetQty == null) {
                     targetQty = ZERO;
+                }
+
+                if (targetQty.compareTo(ZERO) <= 0) {
+                    throw new SkipExecutionException(
+                            "qty_adjusted_zero",
+                            "Target descartado porque la cantidad quedó en 0 tras aplicar reglas Binance",
+                            LogFmt.kv(
+                                    "rawSymbol", leg.getSymbol(),
+                                    "symbol", symbol,
+                                    "candidateNotional", targetNotional,
+                                    "priceRef", priceRef,
+                                    "stepSize", rules.stepSize,
+                                    "minQty", rules.minQty,
+                                    "qtyScale", rules.qtyScale,
+                                    "copyByMinNotional", copyByMinNotional
+                            )
+                    );
                 }
 
                 BigDecimal targetNotionalFinal = targetQty.multiply(priceRef);
@@ -1093,7 +1145,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         ex.getReasonCode(),
                         safeLog(ex.getReason()),
                         safeLog(ex.getDetails()));
-            } catch (RuntimeException ex) {
+            } catch (EngineException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
                 log.error("event=rebalance.target.error originLegId={} wallet={} rawSymbol={} side={} errClass={} err=\"{}\"",
                         leg.getOriginId(),
                         leg.getWalletId(),
@@ -1525,6 +1577,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private BigDecimal computeBufferedMargin(BigDecimal qty, BigDecimal price, int leverage) {
         if (qty == null || price == null || leverage <= 0) return ZERO;
         final BigDecimal notional = qty.multiply(price);
+        return computeBufferedMarginForNotional(notional, leverage);
+    }
+
+    private BigDecimal computeBufferedMarginForNotional(BigDecimal notional, int leverage) {
+        if (notional == null || leverage <= 0 || notional.compareTo(ZERO) <= 0) return ZERO;
         final BigDecimal margin = notional.divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
         return margin.multiply(BigDecimal.ONE.add(safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT)));
     }
@@ -1597,7 +1654,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .type(OrderType.MARKET)
                 .positionSide(prepared.dto.getPositionSide())
                 .quantity(qty.toPlainString())
-                .leverage(prepared.leverage)
+                .leverage(null)
                 .reduceOnly(true)
                 .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(originId, userId, walletId))
                 .apiKey(userDetail.getUserApiKey().getApiKey())
@@ -1616,9 +1673,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail) {
         final String originId = copyOperation.getIdOrderOrigin();
         final String userId = userDetail.getUser().getId().toString();
+        final OperationDto closeRequest = copyTradingMapper.buildClosePosition(copyOperation, userDetail);
 
+        final long sendNs = System.nanoTime();
+        log.info("event=copy.close.order.send originId={} userId={} symbol={} qty={} positionSide={} reduceOnly={}",
+                originId, userId, closeRequest.getSymbol(), closeRequest.getQuantity(),
+                closeRequest.getPositionSide(), closeRequest.isReduceOnly());
         final BinanceFuturesOrderClientResponse order =
-                procesBinanceService.operationPosition(copyTradingMapper.buildClosePosition(copyOperation, userDetail));
+                procesBinanceService.operationPosition(closeRequest);
+
+        log.info("event=copy.close.order.ok originId={} userId={} symbol={} orderId={} elapsedMs={}",
+                originId, userId, closeRequest.getSymbol(), order == null ? null : order.getOrderId(), elapsedMsSince(sendNs));
 
         if (!isValidOrderResponse(order)) {
             log.warn(LOG_CLOSE_INVALID_RESPONSE, originId, userId, copyOperation.getParsymbol());
@@ -1626,7 +1691,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final CopyOperationDto buildCopyOperation = copyTradingMapper.buildCopyCloseOperationDto(copyOperation, order);
+        final long saveNs = System.nanoTime();
         copyOperationService.closeOperation(buildCopyOperation);
+        log.info("event=copy.job.phase action=CLOSE phase=save_copy_operation originId={} userId={} symbol={} elapsedMs={}",
+                originId, userId, copyOperation.getParsymbol(), elapsedMsSince(saveNs));
 
         log.info(LOG_CLOSE_OK,
                 originId,
@@ -1743,8 +1811,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final String rawSymbol = originOperation.getParSymbol();
+        final long symbolMetadataNs = System.nanoTime();
         final String symbol = resolveCanonicalSymbol(rawSymbol);
         final Map<String, BinanceFuturesSymbolInfoClientDto> symbolsBySymbol = getSymbolsBySymbol();
+        log.info("event=copy.job.phase action=OPEN phase=load_symbol_metadata originId={} userId={} wallet={} rawSymbol={} symbol={} elapsedMs={}",
+                originId, userId, walletId, safeLog(rawSymbol), safeLog(symbol), elapsedMsSince(symbolMetadataNs));
         if (rawSymbol == null || rawSymbol.isBlank()) {
             log.warn(LOG_PREP_INVALID_SYMBOL, originId, userId, walletId);
             throw new SkipExecutionException(
@@ -1841,7 +1912,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     hardCap.toPlainString());
         }
 
-        final BigDecimal notionalMax = marginThisTrade.multiply(BigDecimal.valueOf(leverage));
+        BigDecimal notionalMax = marginThisTrade.multiply(BigDecimal.valueOf(leverage));
         if (notionalMax.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_SKIP_NOTIONAL_ZERO, originId, userId, walletId, symbol);
             throw new SkipExecutionException(
@@ -1858,7 +1929,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
-        final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+        BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+        boolean copyByMinNotional = false;
 
         final BinanceFuturesSymbolInfoClientDto symbolInfo = symbolsBySymbol.get(symbol);
         if (symbolInfo == null) {
@@ -1894,13 +1966,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         if (targetNotional.compareTo(rules.effectiveMinNotional) < 0) {
-            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
-            final BigDecimal missing = rules.effectiveMinNotional.subtract(targetNotional);
-            throw new SkipExecutionException(
-                    "notional_too_small",
-                    "Operación demasiado pequeña: faltan " + missing.max(ZERO).toPlainString()
-                            + " de notional para minNotional=" + rules.effectiveMinNotional.toPlainString(),
-                    com.apunto.engine.shared.util.LogFmt.kv(
+            final BigDecimal originalTargetNotional = targetNotional;
+            final CopyMinNotionalPolicy minNotionalPolicy =
+                    copyMinNotionalPolicyResolver.resolve(userDetail, walletId, walletMetric);
+
+            validateCopyByMinNotionalPolicy(
+                    minNotionalPolicy,
+                    rules.effectiveMinNotional,
+                    LogFmt.kv(
                             "wallet", walletId,
                             "symbol", symbol,
                             "candidateNotional", targetNotional,
@@ -1908,7 +1981,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                             "exchangeMinNotional", rules.exchangeMinNotional,
                             "effectiveMinNotional", rules.effectiveMinNotional,
                             "minNotionalFloor", configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor,
-                            "missingNotional", missing,
                             "entryPrice", entryPrice,
                             "leverage", leverage,
                             "notionalMax", notionalMax,
@@ -1922,6 +1994,51 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                             "availableBufferedMargin", availableBufferedMargin
                     )
             );
+
+            final BigDecimal minMarginRequired = computeBufferedMarginForNotional(rules.effectiveMinNotional, leverage);
+            if (minMarginRequired.compareTo(availableBufferedMargin) > 0) {
+                throw new SkipExecutionException(
+                        "copy_by_min_budget_exceeded",
+                        "El margen disponible no alcanza para copiar por el mínimo Binance",
+                        LogFmt.kv(
+                                "wallet", walletId,
+                                "symbol", symbol,
+                                "candidateNotional", originalTargetNotional,
+                                "minNotional", rules.effectiveMinNotional,
+                                "minMarginRequired", minMarginRequired,
+                                "availableBufferedMargin", availableBufferedMargin,
+                                "walletBudget", walletMarginBudget,
+                                "usedMargin", usedMargin,
+                                "allocationId", minNotionalPolicy.allocationId()
+                        )
+                );
+            }
+
+            targetNotional = rules.effectiveMinNotional;
+            marginThisTrade = targetNotional.divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+            notionalMax = availableBufferedMargin
+                    .divide(BigDecimal.ONE.add(safety), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
+                    .multiply(BigDecimal.valueOf(leverage));
+            copyByMinNotional = true;
+
+            log.info(LOG_PREP_COPY_BY_MIN_NOTIONAL,
+                    originId,
+                    userId,
+                    walletId,
+                    symbol,
+                    originalTargetNotional.toPlainString(),
+                    targetNotional.toPlainString(),
+                    rules.effectiveMinNotional.toPlainString(),
+                    minNotionalPolicy.mode(),
+                    minNotionalPolicy.allocationId(),
+                    minNotionalPolicy.score(),
+                    minNotionalPolicy.minScore(),
+                    minNotionalPolicy.historyDays(),
+                    minNotionalPolicy.minHistoryDays(),
+                    minNotionalPolicy.operationsCount(),
+                    minNotionalPolicy.minOperations(),
+                    minNotionalPolicy.maxNotionalUsdt(),
+                    notionalMax.toPlainString());
         }
 
         BigDecimal quantity = targetNotional.divide(entryPrice, rules.qtyScale, RoundingMode.DOWN);
@@ -1941,6 +2058,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         quantity = adjustQuantityToBinanceRules(symbol, quantity, entryPrice, rules, notionalMax);
+        if (copyByMinNotional) {
+            quantity = adjustQuantityUpToMinNotional(
+                    symbol,
+                    quantity,
+                    entryPrice,
+                    rules,
+                    rules.effectiveMinNotional,
+                    notionalMax
+            );
+        }
         if (quantity.compareTo(ZERO) <= 0) {
             log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
             throw new SkipExecutionException(
@@ -2031,7 +2158,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 marginThisTrade.toPlainString(),
                 leverage,
                 notionalFinal.toPlainString(),
-                marginRequired.toPlainString());
+                marginRequired.toPlainString(),
+                copyByMinNotional);
 
         final OperationDto dto = buildBuyAndSellPosition(symbol, event, quantity, userDetail, leverage);
         dto.setClientOrderId(IdempotencyKeyUtil.openClientOrderId(originId, userId, walletId));
@@ -2099,48 +2227,106 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final long now = System.currentTimeMillis();
         final SymbolsCache snapshot = symbolsCache;
 
-        if (snapshot.expiresAtMs > now && snapshot.bySymbol != null && !snapshot.bySymbol.isEmpty()) {
+        if (hasSymbols(snapshot) && snapshot.expiresAtMs > now) {
+            log.debug("event=binance.symbols.cache.hit source=local cacheHit=true stale=false size={} ttlMs={}",
+                    snapshot.bySymbol.size(), symbolsCacheTtlMs);
             return snapshot;
         }
 
+        if (hasSymbols(snapshot)) {
+            log.info("event=binance.symbols.cache.hit source=local cacheHit=true stale=true size={} ttlMs={} action=refresh_async",
+                    snapshot.bySymbol.size(), symbolsCacheTtlMs);
+            refreshSymbolsCacheAsync("stale_hit");
+            return snapshot;
+        }
+
+        log.info("event=binance.symbols.cache.miss source=local cacheHit=false action=refresh_sync");
         synchronized (symbolsCacheLock) {
             final SymbolsCache snapshot2 = symbolsCache;
-            if (snapshot2.expiresAtMs > now && snapshot2.bySymbol != null && !snapshot2.bySymbol.isEmpty()) {
+            if (hasSymbols(snapshot2)) {
+                log.info("event=binance.symbols.cache.hit source=local cacheHit=true stale={} size={}",
+                        snapshot2.expiresAtMs <= System.currentTimeMillis(), snapshot2.bySymbol.size());
+                refreshSymbolsCacheAsync("post_lock_stale_check");
                 return snapshot2;
             }
-
-            final List<BinanceFuturesSymbolInfoClientDto> symbols = procesBinanceService.getSymbols(SYMBOLS_API_KEY);
-
-            final Map<String, BinanceFuturesSymbolInfoClientDto> bySymbol = symbols == null
-                    ? Collections.emptyMap()
-                    : symbols.stream()
-                    .filter(s -> s.getSymbol() != null && !s.getSymbol().isBlank())
-                    .collect(Collectors.toMap(
-                            s -> normalizeSymbolKey(s.getSymbol()),
-                            s -> s,
-                            (a, b) -> a
-                    ));
-
-            final Map<String, String> aliasToCanonical = new HashMap<>();
-            final Set<String> ambiguousAliases = new HashSet<>();
-
-            for (String canonical : bySymbol.keySet()) {
-                registerAlias(aliasToCanonical, ambiguousAliases, canonical, canonical);
-                for (String alias : deriveAliases(canonical)) {
-                    registerAlias(aliasToCanonical, ambiguousAliases, alias, canonical);
-                }
-            }
-
-            symbolsCache = new SymbolsCache(
-                    now + symbolsCacheTtlMs,
-                    bySymbol,
-                    aliasToCanonical,
-                    ambiguousAliases
-            );
-            log.debug(LOG_SYMBOLS_CACHE_REFRESH, bySymbol.size(), symbolsCacheTtlMs);
-
-            return symbolsCache;
+            return refreshSymbolsCacheSync("empty_cache");
         }
+    }
+
+    private boolean hasSymbols(SymbolsCache cache) {
+        return cache != null && cache.bySymbol != null && !cache.bySymbol.isEmpty();
+    }
+
+    private void refreshSymbolsCacheAsync(String phase) {
+        if (!symbolsRefreshInFlight.compareAndSet(false, true)) {
+            return;
+        }
+        Thread.ofVirtual().name("copy-symbols-refresh-", 0).start(() -> {
+            try {
+                refreshSymbolsCacheSync(phase);
+            } catch (EngineException | IllegalStateException ex) {
+                log.warn("event=binance.symbols.refresh.failed phase={} errClass={} errMsg=\"{}\" cacheSize={}",
+                        phase, ex.getClass().getSimpleName(), safeLog(ex.getMessage()), symbolsCache.bySymbol.size());
+            } finally {
+                symbolsRefreshInFlight.set(false);
+            }
+        });
+    }
+
+    private SymbolsCache refreshSymbolsCacheSync(String phase) {
+        final long startedNs = System.nanoTime();
+        try {
+            final List<BinanceFuturesSymbolInfoClientDto> symbols = procesBinanceService.getSymbols(SYMBOLS_API_KEY);
+            final SymbolsCache loaded = buildSymbolsCache(symbols, System.currentTimeMillis() + symbolsCacheTtlMs);
+            symbolsCache = loaded;
+            log.info("event=binance.symbols.refresh.ok phase={} totalSymbols={} ttlMs={} elapsedMs={}",
+                    phase, loaded.bySymbol.size(), symbolsCacheTtlMs, elapsedMsSince(startedNs));
+            return loaded;
+        } catch (EngineException | IllegalStateException ex) {
+            final SymbolsCache stale = symbolsCache;
+            if (hasSymbols(stale)) {
+                log.warn("event=binance.symbols.refresh.failed phase={} action=use_stale cacheSize={} errClass={} errMsg=\"{}\" elapsedMs={}",
+                        phase, stale.bySymbol.size(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMsSince(startedNs));
+                return stale;
+            }
+            throw new CopySymbolMetadataException(
+                    "No se pudo cargar metadata de símbolos desde ms-binance",
+                    ex,
+                    Map.of("phase", phase, "elapsedMs", elapsedMsSince(startedNs))
+            );
+        }
+    }
+
+    private SymbolsCache buildSymbolsCache(List<BinanceFuturesSymbolInfoClientDto> symbols, long expiresAtMs) {
+        final Map<String, BinanceFuturesSymbolInfoClientDto> bySymbol = symbols == null
+                ? Collections.emptyMap()
+                : symbols.stream()
+                .filter(Objects::nonNull)
+                .filter(s -> s.getSymbol() != null && !s.getSymbol().isBlank())
+                .collect(Collectors.toMap(
+                        s -> normalizeSymbolKey(s.getSymbol()),
+                        s -> s,
+                        (a, b) -> a
+                ));
+
+        if (bySymbol.isEmpty()) {
+            throw new CopySymbolMetadataException(
+                    "ms-binance devolvió 0 símbolos",
+                    Map.of("symbolsNull", symbols == null)
+            );
+        }
+
+        final Map<String, String> aliasToCanonical = new HashMap<>();
+        final Set<String> ambiguousAliases = new HashSet<>();
+
+        for (String canonical : bySymbol.keySet()) {
+            registerAlias(aliasToCanonical, ambiguousAliases, canonical, canonical);
+            for (String alias : deriveAliases(canonical)) {
+                registerAlias(aliasToCanonical, ambiguousAliases, alias, canonical);
+            }
+        }
+
+        return new SymbolsCache(expiresAtMs, bySymbol, aliasToCanonical, ambiguousAliases);
     }
 
     private Map<String, BinanceFuturesSymbolInfoClientDto> getSymbolsBySymbol() {
@@ -2422,6 +2608,132 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 notionalMax.toPlainString());
 
         return adjusted;
+    }
+
+    private BigDecimal adjustQuantityUpToMinNotional(String symbol,
+                                                     BigDecimal quantity,
+                                                     BigDecimal entryPrice,
+                                                     SymbolRules rules,
+                                                     BigDecimal minNotional,
+                                                     BigDecimal notionalMax) {
+        if (quantity == null || entryPrice == null || rules == null || minNotional == null || notionalMax == null) {
+            return ZERO;
+        }
+        if (entryPrice.compareTo(ZERO) <= 0 || minNotional.compareTo(ZERO) <= 0 || notionalMax.compareTo(ZERO) <= 0) {
+            return ZERO;
+        }
+
+        BigDecimal adjusted = quantity.max(ZERO);
+        if (adjusted.multiply(entryPrice).compareTo(minNotional) >= 0) {
+            return adjusted;
+        }
+
+        BigDecimal required = minNotional.divide(entryPrice, DEFAULT_CALC_SCALE, RoundingMode.CEILING);
+
+        if (rules.stepSize != null && rules.stepSize.compareTo(ZERO) > 0) {
+            required = required.divide(rules.stepSize, 0, RoundingMode.CEILING).multiply(rules.stepSize);
+        }
+
+        if (rules.minQty != null && required.compareTo(rules.minQty) < 0) {
+            required = rules.minQty;
+        }
+
+        if (rules.qtyScale >= 0) {
+            required = required.setScale(rules.qtyScale, RoundingMode.CEILING);
+        }
+
+        final BigDecimal finalNotional = required.multiply(entryPrice);
+        if (finalNotional.compareTo(notionalMax) > 0) {
+            log.info("event=binance.qty_raise_to_min_notional.skip reason=budget_exceeded symbol={} qtyCandidate={} finalNotional={} minNotional={} notionalMax={} stepSize={} minQty={} qtyScale={}",
+                    symbol,
+                    required.toPlainString(),
+                    finalNotional.toPlainString(),
+                    minNotional.toPlainString(),
+                    notionalMax.toPlainString(),
+                    rules.stepSize,
+                    rules.minQty,
+                    rules.qtyScale);
+            return ZERO;
+        }
+
+        log.info("event=binance.qty_raise_to_min_notional.ok symbol={} qtyOriginal={} qtyFinal={} finalNotional={} minNotional={} notionalMax={}",
+                symbol,
+                quantity.toPlainString(),
+                required.toPlainString(),
+                finalNotional.toPlainString(),
+                minNotional.toPlainString(),
+                notionalMax.toPlainString());
+
+        return required;
+    }
+
+    private void validateCopyByMinNotionalPolicy(CopyMinNotionalPolicy policy,
+                                                 BigDecimal minNotional,
+                                                 String details) {
+        final CopyMinNotionalPolicy effectivePolicy = policy == null ? CopyMinNotionalPolicy.skip() : policy;
+
+        if (!effectivePolicy.isCopyByBinanceMinEnabled()) {
+            throw new SkipExecutionException(
+                    "notional_too_small",
+                    "Operación bajo el mínimo de Binance y la política efectiva es SKIP",
+                    copyMinPolicyDetails(effectivePolicy, minNotional, details)
+            );
+        }
+
+        if (effectivePolicy.minScore() != null
+                && (effectivePolicy.score() == null || effectivePolicy.score() < effectivePolicy.minScore())) {
+            throw new SkipExecutionException(
+                    "copy_by_min_score_blocked",
+                    "Score de wallet bajo el mínimo configurado para copiar por mínimo Binance",
+                    copyMinPolicyDetails(effectivePolicy, minNotional, details)
+            );
+        }
+
+        if (effectivePolicy.minHistoryDays() != null
+                && (effectivePolicy.historyDays() == null
+                || effectivePolicy.historyDays().compareTo(BigDecimal.valueOf(effectivePolicy.minHistoryDays())) < 0)) {
+            throw new SkipExecutionException(
+                    "copy_by_min_history_blocked",
+                    "Historial de wallet bajo el mínimo configurado para copiar por mínimo Binance",
+                    copyMinPolicyDetails(effectivePolicy, minNotional, details)
+            );
+        }
+
+        if (effectivePolicy.minOperations() != null
+                && (effectivePolicy.operationsCount() == null || effectivePolicy.operationsCount() < effectivePolicy.minOperations())) {
+            throw new SkipExecutionException(
+                    "copy_by_min_operations_blocked",
+                    "Cantidad de operaciones de wallet bajo el mínimo configurado para copiar por mínimo Binance",
+                    copyMinPolicyDetails(effectivePolicy, minNotional, details)
+            );
+        }
+
+        if (effectivePolicy.maxNotionalUsdt() != null
+                && minNotional != null
+                && minNotional.compareTo(effectivePolicy.maxNotionalUsdt()) > 0) {
+            throw new SkipExecutionException(
+                    "copy_by_min_cap_exceeded",
+                    "Mínimo Binance supera el máximo USDT permitido para copiar por mínimo",
+                    copyMinPolicyDetails(effectivePolicy, minNotional, details)
+            );
+        }
+    }
+
+    private String copyMinPolicyDetails(CopyMinNotionalPolicy policy, BigDecimal minNotional, String details) {
+        final CopyMinNotionalPolicy effectivePolicy = policy == null ? CopyMinNotionalPolicy.skip() : policy;
+        return LogFmt.kv(
+                "policyMode", effectivePolicy.mode(),
+                "allocationId", effectivePolicy.allocationId(),
+                "score", effectivePolicy.score(),
+                "minScore", effectivePolicy.minScore(),
+                "historyDays", effectivePolicy.historyDays(),
+                "minHistoryDays", effectivePolicy.minHistoryDays(),
+                "operationsCount", effectivePolicy.operationsCount(),
+                "minOperations", effectivePolicy.minOperations(),
+                "maxForcedNotional", effectivePolicy.maxNotionalUsdt(),
+                "minNotional", minNotional,
+                "details", details
+        );
     }
 
     private void createNewOperation(BinanceFuturesOrderClientResponse order,
@@ -2793,6 +3105,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return ZERO;
         }
         return BigDecimal.valueOf(value);
+    }
+
+    private long elapsedMsSince(long startedNs) {
+        return (System.nanoTime() - startedNs) / 1_000_000L;
+    }
+
+    private boolean shouldLogStacktrace(Throwable ex) {
+        return !(ex instanceof EngineException);
     }
 
     private String safeLog(String s) {

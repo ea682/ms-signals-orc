@@ -14,8 +14,10 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientException;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -238,8 +240,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         if ("cache".equals(history.source())) {
             try {
                 userCopyAllocationService.syncDistribution(candidates);
-            } catch (RuntimeException ex) {
-                log.warn("event=user_copy_allocation.sync_failed err={}", safeErr(ex));
+            } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException ex) {
+                log.warn("event=user_copy_allocation.sync_failed errClass={} errMsg=\"{}\"", ex.getClass().getSimpleName(), safeErr(ex));
             }
         } else {
             log.warn("event=user_copy_allocation.sync_skipped reason=non_fresh_history source={}", history.source());
@@ -253,8 +255,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         try {
             List<MetricaWalletDto> v = allPositionHistoryCache.get(historyLimit);
             log.info("event=metric_wallets.cache_primed limit={} size={}", historyLimit, v.size());
-        } catch (RuntimeException ex) {
-            log.warn("event=metric_wallets.cache_prime_failed limit={} err={}", historyLimit, safeErr(ex));
+        } catch (EngineException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
+            log.warn("event=metric_wallets.cache_prime_failed limit={} errClass={} errMsg=\"{}\"", historyLimit, ex.getClass().getSimpleName(), safeErr(ex));
         }
     }
 
@@ -263,8 +265,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         try {
             allPositionHistoryCache.refresh(historyLimit);
             log.debug("event=metric_wallets.cache_refresh_triggered limit={}", historyLimit);
-        } catch (RuntimeException ex) {
-            log.warn("event=metric_wallets.cache_refresh_failed limit={} err={}", historyLimit, safeErr(ex));
+        } catch (EngineException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
+            log.warn("event=metric_wallets.cache_refresh_failed limit={} errClass={} errMsg=\"{}\"", historyLimit, ex.getClass().getSimpleName(), safeErr(ex));
         }
     }
 
@@ -287,9 +289,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         List<MetricaWalletDto> resp;
         try {
             resp = metricWalletsInfoClient.allPositionHistory(limit, dayz);
-        } catch (RuntimeException ex) {
+        } catch (RestClientException | IllegalStateException | IllegalArgumentException ex) {
             long durationMs = elapsedMs(startNs);
-            log.warn("event=metric_wallets.history_client_failed limit={} durationMs={} err={}", limit, durationMs, safeErr(ex));
+            log.warn("event=metric_wallets.history_client_failed limit={} durationMs={} errClass={} errMsg=\"{}\"", limit, durationMs, ex.getClass().getSimpleName(), safeErr(ex));
             return List.of();
         }
 
@@ -315,10 +317,10 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         try {
             List<MetricaWalletDto> v = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(List.of());
             if (!v.isEmpty()) return new HistoryResult(v, "cache");
-        } catch (RuntimeException ex) {
+        } catch (EngineException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             log.warn(
-                    "event=metric_wallets.history_load_failed limit={} err={} cacheStats={}",
-                    limit, safeErr(ex), allPositionHistoryCache.stats()
+                    "event=metric_wallets.history_load_failed limit={} errClass={} errMsg=\"{}\" cacheStats={}",
+                    limit, ex.getClass().getSimpleName(), safeErr(ex), allPositionHistoryCache.stats()
             );
         }
 

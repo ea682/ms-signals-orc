@@ -7,6 +7,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 @Repository
@@ -19,12 +20,27 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
 
     @Query(value = """
             select *
-            from user_copy_allocation
+            from futuros_operaciones.user_copy_allocation
             where lower(wallet_id) = lower(:walletId)
               and ends_at is null
               and is_active = true
               and lower(status) = 'active'
             """, nativeQuery = true)
     List<UserCopyAllocationEntity> findActiveByWalletId(@Param("walletId") String walletId);
+
+    @Query("""
+            select uca
+            from UserCopyAllocationEntity uca
+            where uca.idUser = :idUser
+              and lower(uca.walletId) = lower(:walletId)
+              and uca.endsAt is null
+              and uca.isActive = true
+              and uca.status = :status
+            """)
+    Optional<UserCopyAllocationEntity> findActiveAllocation(
+            @Param("idUser") UUID idUser,
+            @Param("walletId") String walletId,
+            @Param("status") UserCopyAllocationEntity.Status status
+    );
 
 }

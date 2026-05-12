@@ -194,8 +194,13 @@ public class GlobalExceptionHandler {
         String traceId = resolveTraceId();
         String path = request.getRequestURI();
 
-        log.warn("Handling exception [{}] - code={} path={} message={}",
-                traceId, errorCode.name(), path, ex.getMessage(), ex);
+        if (ErrorCode.INTERNAL_ERROR.equals(errorCode)) {
+            log.error("event=http.error traceId={} code={} path={} errClass={} errMsg=\"{}\"",
+                    traceId, errorCode.name(), path, ex.getClass().getSimpleName(), safeLog(ex.getMessage()), ex);
+        } else {
+            log.warn("event=http.error traceId={} code={} path={} errClass={} errMsg=\"{}\"",
+                    traceId, errorCode.name(), path, ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+        }
 
         ApiResponse<Object> body = ApiResponse.<Object>builder()
                 .status("ERROR")
@@ -210,6 +215,18 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(status).body(body);
     }
 
+
+    private String safeLog(String value) {
+        if (value == null) {
+            return "";
+        }
+        String clean = value
+                .replace('\n', ' ')
+                .replace('\r', ' ')
+                .replace('\t', ' ')
+                .replace('"', '\'');
+        return clean.length() > 1000 ? clean.substring(0, 1000) : clean;
+    }
 
     private String resolveTraceId() {
         String existing = MDC.get("traceId");

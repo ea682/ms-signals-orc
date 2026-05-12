@@ -3,15 +3,18 @@ package com.apunto.engine.listener;
 import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.metric.TradingMetrics;
 import com.apunto.engine.service.OperacionEventIngestService;
+import com.apunto.engine.shared.exception.EngineException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.dao.DataAccessException;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClientException;
 
 @Slf4j
 @Component
@@ -54,12 +57,18 @@ public class OperacionEventListener {
             acknowledgment.acknowledge();
             log.info("event=kafka.ack key={}", key);
 
-        } catch (RuntimeException e) {
-            log.error("event=kafka.handler.error key={} errorClass={} msg={}",
-                    key, e.getClass().getSimpleName(), e.getMessage(), e);
+        } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException e) {
+            log.error("event=kafka.handler.error key={} errClass={} errMsg=\"{}\"",
+                    key, e.getClass().getSimpleName(), safeLog(e.getMessage()), e);
             throw e;
         } finally {
             MDC.clear();
         }
+    }
+
+    private String safeLog(String value) {
+        if (value == null) return "";
+        String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
+        return clean.length() > 500 ? clean.substring(0, 500) : clean;
     }
 }
