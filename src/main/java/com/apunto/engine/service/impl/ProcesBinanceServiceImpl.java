@@ -7,6 +7,9 @@ import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
 import com.apunto.engine.dto.client.NewOperationClientRequest;
 import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.shared.dto.ApiResponse;
+import com.apunto.engine.shared.exception.CopyBinanceClientException;
+import com.apunto.engine.shared.exception.CopyOrderRejectedException;
+import com.apunto.engine.shared.exception.CopySymbolMetadataException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
@@ -16,6 +19,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.util.Collections;
@@ -97,12 +102,47 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
             details.put("traceId", safeNull(err.traceId()));
             details.put("path", safeNull(err.path()));
 
-            throw new EngineException(
-                    ErrorCode.BINANCE_CLIENT_ERROR,
+            if (err.httpStatus() >= 500) {
+                throw new CopyBinanceClientException(
+                        "ms-binance/Binance no pudo ejecutar la orden: " + safeLog(err.binanceMsg()),
+                        ex,
+                        details
+                );
+            }
+
+            throw new CopyOrderRejectedException(
                     "Binance rechazó la orden: " + safeLog(err.binanceMsg()),
                     ex,
                     details
             );
+        } catch (ResourceAccessException ex) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("symbol", safeNull(dto.getSymbol()));
+            details.put("side", dto.getSide() == null ? "" : dto.getSide().name());
+            details.put("type", dto.getType() == null ? "" : dto.getType().name());
+            details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
+            details.put("quantity", safeNull(dto.getQuantity()));
+            details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
+
+            log.warn("event=binance.futures.order.fail reason=network_timeout symbol={} side={} type={} positionSide={} reduceOnly={} qty={} errClass={} errMsg=\"{}\"",
+                    dto.getSymbol(), dto.getSide(), dto.getType(), dto.getPositionSide(), dto.isReduceOnly(), dto.getQuantity(),
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+
+            throw new CopyBinanceClientException("Timeout/red enviando orden a ms-binance", ex, details);
+        } catch (RestClientException | IllegalStateException ex) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("symbol", safeNull(dto.getSymbol()));
+            details.put("side", dto.getSide() == null ? "" : dto.getSide().name());
+            details.put("type", dto.getType() == null ? "" : dto.getType().name());
+            details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
+            details.put("quantity", safeNull(dto.getQuantity()));
+            details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
+
+            log.warn("event=binance.futures.order.fail reason=client_error symbol={} side={} type={} positionSide={} reduceOnly={} qty={} errClass={} errMsg=\"{}\"",
+                    dto.getSymbol(), dto.getSide(), dto.getType(), dto.getPositionSide(), dto.isReduceOnly(), dto.getQuantity(),
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+
+            throw new CopyBinanceClientException("Error cliente enviando orden a ms-binance", ex, details);
         }
     }
 
@@ -112,9 +152,34 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
             throw new SkipExecutionException(ERR_APIKEY_EMPTY);
         }
 
-        ApiResponse<List<BinanceFuturesSymbolInfoClientDto>> resp = binanceClient.symbols(apiKey);
-        List<BinanceFuturesSymbolInfoClientDto> data = unwrap(resp, "symbols");
-        return data == null ? Collections.emptyList() : data;
+        try {
+            ApiResponse<List<BinanceFuturesSymbolInfoClientDto>> resp = binanceClient.symbols(apiKey);
+            List<BinanceFuturesSymbolInfoClientDto> data = unwrap(resp, "symbols");
+            return data == null ? Collections.emptyList() : data;
+        } catch (RestClientResponseException ex) {
+            BinanceHttpError err = parseBinanceHttpError(ex);
+            log.warn("event=binance.symbols.client.fail httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" traceId={} path={}",
+                    err.httpStatus(), err.errorCode(), err.binanceCode(), safeLog(err.binanceMsg()), err.traceId(), err.path());
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("httpStatus", Integer.toString(err.httpStatus()));
+            details.put("errorCode", safeNull(err.errorCode()));
+            details.put("binanceCode", safeNull(err.binanceCode()));
+            details.put("binanceMsg", safeNull(safeLog(err.binanceMsg())));
+            details.put("traceId", safeNull(err.traceId()));
+            details.put("path", safeNull(err.path()));
+            throw new CopySymbolMetadataException("No se pudo obtener metadata de símbolos desde ms-binance", ex, details);
+        } catch (ResourceAccessException ex) {
+            log.warn("event=binance.symbols.client.fail reason=network_timeout errClass={} errMsg=\"{}\"",
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            throw new CopySymbolMetadataException("Timeout/red leyendo símbolos desde ms-binance", ex, Collections.emptyMap());
+        } catch (EngineException ex) {
+            throw new CopyBinanceClientException("ms-binance devolvió error leyendo símbolos: " + safeLog(ex.getMessage()), ex,
+                    ex.getDetails() == null ? Collections.emptyMap() : ex.getDetails());
+        } catch (RestClientException | IllegalStateException ex) {
+            log.warn("event=binance.symbols.client.fail reason=client_error errClass={} errMsg=\"{}\"",
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            throw new CopySymbolMetadataException("Error cliente leyendo símbolos desde ms-binance", ex, Collections.emptyMap());
+        }
     }
 
 

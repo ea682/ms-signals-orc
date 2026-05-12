@@ -9,10 +9,13 @@ import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.OperacionEventIngestService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
+import com.apunto.engine.shared.exception.EngineException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestClientException;
 
 import java.util.Collections;
 import java.util.List;
@@ -51,10 +54,10 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         String result = "ok";
 
         try {
-            Objects.requireNonNull(event, ERR_EVENT_NULL);
-            Objects.requireNonNull(event.getTipo(), ERR_TIPO_NULL);
-            Objects.requireNonNull(event.getOperacion(), ERR_OPERACION_NULL);
-            Objects.requireNonNull(event.getOperacion().getIdOperacion(), ERR_ID_NULL);
+            requireNonNull(event, ERR_EVENT_NULL);
+            requireNonNull(event.getTipo(), ERR_TIPO_NULL);
+            requireNonNull(event.getOperacion(), ERR_OPERACION_NULL);
+            requireNonNull(event.getOperacion().getIdOperacion(), ERR_ID_NULL);
 
             final OperacionDto operacion = event.getOperacion();
             tipo = event.getTipo().name();
@@ -72,11 +75,17 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             log.info(LOG_ENQUEUED, originId, walletId, event.getTipo(), usersCached.size(), eligibleUsers.size(), enqueued, filterByWalletAllocation);
             return enqueued;
 
-        } catch (RuntimeException ex) {
+        } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             result = "error";
             throw ex;
         } finally {
             tradingMetrics.ingestDuration(tipo, result, System.nanoTime() - t0);
+        }
+    }
+
+    private void requireNonNull(Object value, String message) {
+        if (value == null) {
+            throw new IllegalArgumentException(message);
         }
     }
 

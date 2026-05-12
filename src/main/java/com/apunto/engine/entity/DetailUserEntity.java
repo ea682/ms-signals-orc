@@ -1,9 +1,20 @@
 package com.apunto.engine.entity;
 
-
-import jakarta.persistence.*;
+import com.apunto.engine.shared.enums.CopyMinNotionalMode;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
 import lombok.Data;
 
+import java.math.BigDecimal;
 import java.util.UUID;
 
 @Entity
@@ -34,4 +45,20 @@ public class DetailUserEntity {
 
     @Column(name = "max_wallet", nullable = false)
     private Integer maxWallet = 1;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "copy_min_notional_mode", nullable = false, length = 32)
+    private CopyMinNotionalMode copyMinNotionalMode = CopyMinNotionalMode.SKIP;
+
+    @Column(name = "copy_min_notional_max_usdt", precision = 18, scale = 8)
+    private BigDecimal copyMinNotionalMaxUsdt;
+
+    @Column(name = "copy_min_notional_min_score", nullable = false)
+    private Integer copyMinNotionalMinScore = 0;
+
+    @Column(name = "copy_min_notional_min_history_days", nullable = false)
+    private Integer copyMinNotionalMinHistoryDays = 0;
+
+    @Column(name = "copy_min_notional_min_operations", nullable = false)
+    private Integer copyMinNotionalMinOperations = 0;
 }
