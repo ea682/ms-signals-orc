@@ -24,7 +24,7 @@ public class RestClientConfig {
             @Value("${rest-client.timeout.connect-ms:2000}") int connectMs,
             @Value("${rest-client.timeout.read-ms:5000}") int readMs
     ) {
-        log.info("RestClient timeouts connectMs={} readMs={}", connectMs, readMs);
+        log.info("event=rest_client.config connectMs={} readMs={}", connectMs, readMs);
 
         HttpClient httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(connectMs))
