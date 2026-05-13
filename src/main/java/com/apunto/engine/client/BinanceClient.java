@@ -22,6 +22,9 @@ public interface BinanceClient {
     ApiResponse<BinanceFuturesOrderClientResponse> openPosition(
             @RequestHeader("X-BINANCE-APIKEY") String apiKey,
             @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestHeader(value = "X-COPY-ORIGIN-ID", required = false) String originId,
+            @RequestHeader(value = "X-COPY-USER-ID", required = false) String userId,
+            @RequestHeader(value = "X-COPY-WALLET-ID", required = false) String walletId,
             @RequestBody NewOperationClientRequest request
     );
 
