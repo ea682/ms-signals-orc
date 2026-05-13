@@ -7,6 +7,7 @@ import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
 import com.apunto.engine.dto.client.NewOperationClientRequest;
 import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.shared.dto.ApiResponse;
+import com.apunto.engine.shared.exception.BinanceRateLimitException;
 import com.apunto.engine.shared.exception.CopyBinanceClientException;
 import com.apunto.engine.shared.exception.CopyOrderRejectedException;
 import com.apunto.engine.shared.exception.CopySymbolMetadataException;
@@ -123,6 +124,14 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
             details.put("binanceMsg", safeNull(safeLog(err.binanceMsg())));
             details.put("traceId", safeNull(err.traceId()));
             details.put("path", safeNull(err.path()));
+
+            if (err.httpStatus() == 429 || "BINANCE_RATE_LIMIT".equals(err.errorCode())) {
+                throw new BinanceRateLimitException(
+                        "Binance rate limit ejecutando orden: " + safeLog(err.binanceMsg()),
+                        ex,
+                        details
+                );
+            }
 
             if (err.httpStatus() >= 500) {
                 throw new CopyBinanceClientException(

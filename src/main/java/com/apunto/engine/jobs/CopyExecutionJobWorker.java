@@ -474,6 +474,7 @@ public class CopyExecutionJobWorker {
             if (cur instanceof EngineException ee) {
                 if (ee.getErrorCode() == ErrorCode.BINANCE_RATE_LIMIT) return CopyJobErrorCategory.RATE_LIMIT;
                 if (ee.getErrorCode() == ErrorCode.BINANCE_CLIENT_ERROR) return CopyJobErrorCategory.VALIDATION;
+                if (ee.getErrorCode() == ErrorCode.EXTERNAL_SERVICE_ERROR) return CopyJobErrorCategory.TRANSIENT;
             }
 
             if (cur instanceof RestClientResponseException rre) {

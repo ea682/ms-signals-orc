@@ -1747,9 +1747,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BinanceFuturesOrderClientResponse order =
                 procesBinanceService.operationPosition(closeRequest);
 
-        log.info("event=copy.close.order.ok originId={} userId={} wallet={} symbol={} orderId={} elapsedMs={}",
-                originId, userId, copyOperation.getIdWalletOrigin(), closeRequest.getSymbol(), order == null ? null : order.getOrderId(), elapsedMsSince(sendNs));
-
         if (!isValidOrderResponse(order)) {
             log.warn("event=binance.close.invalid_response originId={} userId={} wallet={} symbol={} orderId={} avgPrice={} executedQty={} cumQty={} origQty={} updateTime={}",
                     originId,
@@ -1767,6 +1764,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     orderResponseDetails(originId, userId, copyOperation.getIdWalletOrigin(), copyOperation.getParsymbol(), order)
             );
         }
+
+        log.info("event=copy.close.order.ok originId={} userId={} wallet={} symbol={} orderId={} elapsedMs={}",
+                originId, userId, copyOperation.getIdWalletOrigin(), closeRequest.getSymbol(), order.getOrderId(), elapsedMsSince(sendNs));
 
         final CopyOperationDto buildCopyOperation = copyTradingMapper.buildCopyCloseOperationDto(copyOperation, order);
         final long saveNs = System.nanoTime();
@@ -2680,7 +2680,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
             final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
 
-            BigDecimal q = targetNotional.divide(entryPrice, rules.qtyScale, RoundingMode.DOWN);
+            BigDecimal q = targetNotional.divide(entryPrice, DEFAULT_CALC_SCALE, RoundingMode.DOWN);
 
             if (rules.stepSize != null && rules.stepSize.compareTo(ZERO) > 0) {
                 q = q.divide(rules.stepSize, 0, RoundingMode.DOWN).multiply(rules.stepSize);
