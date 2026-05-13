@@ -14,6 +14,7 @@ import com.apunto.engine.shared.exception.CopySymbolMetadataException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
+import com.apunto.engine.shared.enums.PositionSide;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -48,6 +49,8 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     public BinanceFuturesOrderClientResponse operationPosition(OperationDto dto) {
         validateOperation(dto);
 
+        Boolean reduceOnlyForClient = reduceOnlyForClient(dto);
+
         NewOperationClientRequest request = NewOperationClientRequest.builder()
                 .symbol(dto.getSymbol())
                 .side(dto.getSide())
@@ -57,11 +60,11 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 .timeInForce(dto.getTimeInForce())
                 .leverage(dto.getLeverage())
                 .positionSide(dto.getPositionSide())
-                .reduceOnly(dto.isReduceOnly())
+                .reduceOnly(reduceOnlyForClient)
                 .clientOrderId(dto.getClientOrderId())
                 .build();
 
-        log.info("event=binance.futures.order.send originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={}",
+        log.info("event=binance.futures.order.send originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={}",
                 safeNull(dto.getOriginId()),
                 safeNull(dto.getUserId()),
                 safeNull(dto.getWalletId()),
@@ -70,6 +73,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 dto.getType(),
                 dto.getPositionSide(),
                 dto.isReduceOnly(),
+                reduceOnlyLogValue(reduceOnlyForClient),
                 dto.getQuantity(),
                 safeNull(dto.getClientOrderId()));
 
@@ -99,7 +103,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         } catch (RestClientResponseException ex) {
             BinanceHttpError err = parseBinanceHttpError(ex);
 
-            log.warn("event=binance.futures.order.fail originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" traceId={} path={}",
+            log.warn("event=binance.futures.order.fail originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" traceId={} path={}",
                     safeNull(dto.getOriginId()),
                     safeNull(dto.getUserId()),
                     safeNull(dto.getWalletId()),
@@ -108,6 +112,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     dto.getType(),
                     dto.getPositionSide(),
                     dto.isReduceOnly(),
+                    reduceOnlyLogValue(reduceOnlyForClient),
                     dto.getQuantity(),
                     safeNull(dto.getClientOrderId()),
                     err.httpStatus(),
@@ -133,6 +138,16 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 );
             }
 
+            // ms-binance puede envolver rechazos 4xx de Binance como 5xx hacia ORC.
+            // Si el payload mantiene BINANCE_CLIENT_ERROR, no se debe reintentar: es error de parámetros/validación.
+            if ("BINANCE_CLIENT_ERROR".equals(err.errorCode())) {
+                throw new CopyOrderRejectedException(
+                        "Binance rechazó la orden: " + safeLog(err.binanceMsg()),
+                        ex,
+                        details
+                );
+            }
+
             if (err.httpStatus() >= 500) {
                 throw new CopyBinanceClientException(
                         "ms-binance/Binance no pudo ejecutar la orden: " + safeLog(err.binanceMsg()),
@@ -149,7 +164,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         } catch (ResourceAccessException ex) {
             Map<String, Object> details = orderDetails(dto);
 
-            log.warn("event=binance.futures.order.fail reason=network_timeout originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} errClass={} errMsg=\"{}\"",
+            log.warn("event=binance.futures.order.fail reason=network_timeout originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={} errClass={} errMsg=\"{}\"",
                     safeNull(dto.getOriginId()),
                     safeNull(dto.getUserId()),
                     safeNull(dto.getWalletId()),
@@ -158,6 +173,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     dto.getType(),
                     dto.getPositionSide(),
                     dto.isReduceOnly(),
+                    reduceOnlyLogValue(reduceOnlyForClient),
                     dto.getQuantity(),
                     safeNull(dto.getClientOrderId()),
                     ex.getClass().getSimpleName(),
@@ -170,7 +186,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
             details.put("errCode", ex.getErrorCode() == null ? "" : ex.getErrorCode().name());
             details.put("errMsg", safeNull(safeLog(ex.getMessage())));
 
-            log.warn("event=binance.futures.order.fail reason=invalid_ms_binance_response originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} errClass={} errCode={} errMsg=\"{}\"",
+            log.warn("event=binance.futures.order.fail reason=invalid_ms_binance_response originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={} errClass={} errCode={} errMsg=\"{}\"",
                     safeNull(dto.getOriginId()),
                     safeNull(dto.getUserId()),
                     safeNull(dto.getWalletId()),
@@ -179,6 +195,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     dto.getType(),
                     dto.getPositionSide(),
                     dto.isReduceOnly(),
+                    reduceOnlyLogValue(reduceOnlyForClient),
                     dto.getQuantity(),
                     safeNull(dto.getClientOrderId()),
                     ex.getClass().getSimpleName(),
@@ -189,7 +206,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         } catch (RestClientException | IllegalStateException ex) {
             Map<String, Object> details = orderDetails(dto);
 
-            log.warn("event=binance.futures.order.fail reason=client_error originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} errClass={} errMsg=\"{}\"",
+            log.warn("event=binance.futures.order.fail reason=client_error originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={} errClass={} errMsg=\"{}\"",
                     safeNull(dto.getOriginId()),
                     safeNull(dto.getUserId()),
                     safeNull(dto.getWalletId()),
@@ -198,6 +215,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     dto.getType(),
                     dto.getPositionSide(),
                     dto.isReduceOnly(),
+                    reduceOnlyLogValue(reduceOnlyForClient),
                     dto.getQuantity(),
                     safeNull(dto.getClientOrderId()),
                     ex.getClass().getSimpleName(),
@@ -244,6 +262,30 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     }
 
 
+    private Boolean reduceOnlyForClient(OperationDto dto) {
+        if (dto == null || !dto.isReduceOnly()) {
+            return Boolean.FALSE;
+        }
+
+        // En Hedge Mode Binance usa positionSide=LONG/SHORT para saber qué pierna reducir.
+        // Si además se envía reduceOnly, Binance Futures rechaza la orden con -1106:
+        // "Parameter 'reduceonly' sent when not required."
+        // Por eso omitimos reduceOnly para cierres LONG/SHORT y solo lo enviamos en One-way/BOTH.
+        if (isHedgePositionSide(dto.getPositionSide())) {
+            return null;
+        }
+
+        return Boolean.TRUE;
+    }
+
+    private boolean isHedgePositionSide(PositionSide side) {
+        return side == PositionSide.LONG || side == PositionSide.SHORT;
+    }
+
+    private String reduceOnlyLogValue(Boolean reduceOnly) {
+        return reduceOnly == null ? "omitted" : reduceOnly.toString();
+    }
+
     private Map<String, Object> orderDetails(OperationDto dto) {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("originId", safeNull(dto.getOriginId()));
@@ -255,6 +297,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
         details.put("quantity", safeNull(dto.getQuantity()));
         details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
+        details.put("reduceOnlySent", reduceOnlyLogValue(reduceOnlyForClient(dto)));
         details.put("clientOrderId", safeNull(dto.getClientOrderId()));
         return details;
     }

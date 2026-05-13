@@ -9,9 +9,11 @@ import java.util.List;
 public interface ProcesBinanceService {
 
     /**
-     * Ejecuta una orden en Binance (OPEN o CLOSE según reduceOnly).
-     * - Si reduceOnly = false -> openPosition
-     * - Si reduceOnly = true  -> closePosition
+     * Ejecuta una orden en Binance.
+     * - reduceOnly=false se envía como false para aperturas.
+     * - reduceOnly=true representa intención de cierre/reducción.
+     * - En Hedge Mode (positionSide LONG/SHORT), ORC omite reduceOnly al llamar a ms-binance,
+     *   porque Binance Futures rechaza ese parámetro con binanceCode=-1106.
      */
     BinanceFuturesOrderClientResponse operationPosition(OperationDto dto);
 
