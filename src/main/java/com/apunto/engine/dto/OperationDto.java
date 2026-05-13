@@ -25,6 +25,11 @@ public class OperationDto {
      */
     private String clientOrderId;
 
+    /** Copy-trading trace metadata. Not sent to Binance itself; propagated as HTTP headers to ms-binance-engine logs. */
+    private String originId;
+    private String userId;
+    private String walletId;
+
     private String apiKey;
     private String secret;
 }

@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -34,7 +35,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private static final String ERR_ID_NULL = "El idOperacion no puede ser null";
 
     private static final String LOG_ENQUEUED =
-            "event=copy.execution.enqueued originId={} wallet={} tipo={} usersCached={} eligibleUsers={} enqueued={} allocationFilter={}";
+            "event=copy.execution.enqueued originId={} wallet={} tipo={} usersCached={} eligibleUsers={} eligibleUserIds={} enqueued={} allocationFilter={}";
 
     private final UserDetailCachedService userDetailCachedService;
     private final UserCopyAllocationService userCopyAllocationService;
@@ -72,7 +73,15 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
 
             tradingMetrics.jobsEnqueued(action.name(), eligibleUsers.size(), enqueued);
 
-            log.info(LOG_ENQUEUED, originId, walletId, event.getTipo(), usersCached.size(), eligibleUsers.size(), enqueued, filterByWalletAllocation);
+            log.info(LOG_ENQUEUED,
+                    originId,
+                    walletId,
+                    event.getTipo(),
+                    usersCached.size(),
+                    eligibleUsers.size(),
+                    userIdsCsv(eligibleUsers),
+                    enqueued,
+                    filterByWalletAllocation);
             return enqueued;
 
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
@@ -100,7 +109,8 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
 
         final Set<UUID> activeUserIds = userCopyAllocationService.getActiveUserIdsByWallet(walletId);
         if (activeUserIds.isEmpty()) {
-            log.info("event=copy.execution.user_filter wallet={} matchedUsers=0 fallbackAllUsers={}", walletId, fallbackAllUsersOnEmptyAllocation);
+            log.info("event=copy.execution.user_filter wallet={} activeAllocationUsers=0 usersCached={} eligibleUsers=0 eligibleUserIds=\"\" fallbackAllUsers={}",
+                    walletId, usersCached.size(), fallbackAllUsersOnEmptyAllocation);
             return fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
         }
 
@@ -110,9 +120,39 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                 .filter(u -> activeUserIds.contains(u.getUser().getId()))
                 .toList();
 
-        log.debug("event=copy.execution.user_filter wallet={} activeAllocations={} usersCached={} eligible={}",
-                walletId, activeUserIds.size(), usersCached.size(), eligible.size());
+        log.info("event=copy.execution.user_filter wallet={} activeAllocationUsers={} usersCached={} eligibleUsers={} activeUserIds={} eligibleUserIds={}",
+                walletId,
+                activeUserIds.size(),
+                usersCached.size(),
+                eligible.size(),
+                uuidSetCsv(activeUserIds),
+                userIdsCsv(eligible));
         return eligible;
+    }
+
+    private String userIdsCsv(List<UserDetailDto> users) {
+        if (users == null || users.isEmpty()) {
+            return "";
+        }
+        return users.stream()
+                .filter(Objects::nonNull)
+                .filter(u -> u.getUser() != null && u.getUser().getId() != null)
+                .map(u -> u.getUser().getId().toString())
+                .sorted()
+                .limit(20)
+                .collect(Collectors.joining(","));
+    }
+
+    private String uuidSetCsv(Set<UUID> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return "";
+        }
+        return ids.stream()
+                .filter(Objects::nonNull)
+                .map(UUID::toString)
+                .sorted()
+                .limit(20)
+                .collect(Collectors.joining(","));
     }
 
     private CopyJobAction mapAction(OperacionEvent.Tipo tipo) {

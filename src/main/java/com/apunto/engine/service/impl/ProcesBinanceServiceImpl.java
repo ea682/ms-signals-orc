@@ -60,27 +60,55 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 .clientOrderId(dto.getClientOrderId())
                 .build();
 
-        log.info("event=binance.futures.order.send symbol={} side={} type={} positionSide={} reduceOnly={} qty={}",
-                dto.getSymbol(), dto.getSide(), dto.getType(), dto.getPositionSide(), dto.isReduceOnly(), dto.getQuantity());
+        log.info("event=binance.futures.order.send originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={}",
+                safeNull(dto.getOriginId()),
+                safeNull(dto.getUserId()),
+                safeNull(dto.getWalletId()),
+                dto.getSymbol(),
+                dto.getSide(),
+                dto.getType(),
+                dto.getPositionSide(),
+                dto.isReduceOnly(),
+                dto.getQuantity(),
+                safeNull(dto.getClientOrderId()));
 
         try {
-            ApiResponse<BinanceFuturesOrderClientResponse> resp = binanceClient.openPosition(dto.getApiKey(), dto.getSecret(), request);
+            ApiResponse<BinanceFuturesOrderClientResponse> resp = binanceClient.openPosition(
+                    dto.getApiKey(),
+                    dto.getSecret(),
+                    dto.getOriginId(),
+                    dto.getUserId(),
+                    dto.getWalletId(),
+                    request
+            );
             BinanceFuturesOrderClientResponse data = unwrap(resp, "futures.order");
 
-            log.info("event=binance.futures.order.ok symbol={} orderId={} avgPrice={} origQty={}",
-                    data.getSymbol(), data.getOrderId(), data.getAvgPrice(), data.getOrigQty());
+            log.info("event=binance.futures.order.ok originId={} userId={} wallet={} symbol={} orderId={} avgPrice={} origQty={} executedQty={} clientOrderId={}",
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    data.getSymbol(),
+                    data.getOrderId(),
+                    data.getAvgPrice(),
+                    data.getOrigQty(),
+                    data.getExecutedQty(),
+                    data.getClientOrderId());
 
             return data;
         } catch (RestClientResponseException ex) {
             BinanceHttpError err = parseBinanceHttpError(ex);
 
-            log.warn("event=binance.futures.order.fail symbol={} side={} type={} positionSide={} reduceOnly={} qty={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" traceId={} path={}",
+            log.warn("event=binance.futures.order.fail originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" traceId={} path={}",
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
                     dto.getSymbol(),
                     dto.getSide(),
                     dto.getType(),
                     dto.getPositionSide(),
                     dto.isReduceOnly(),
                     dto.getQuantity(),
+                    safeNull(dto.getClientOrderId()),
                     err.httpStatus(),
                     err.errorCode(),
                     err.binanceCode(),
@@ -88,15 +116,9 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     err.traceId(),
                     err.path());
 
-            Map<String, Object> details = new LinkedHashMap<>();
+            Map<String, Object> details = orderDetails(dto);
             details.put("httpStatus", Integer.toString(err.httpStatus()));
             details.put("errorCode", safeNull(err.errorCode()));
-            details.put("symbol", safeNull(dto.getSymbol()));
-            details.put("side", dto.getSide() == null ? "" : dto.getSide().name());
-            details.put("type", dto.getType() == null ? "" : dto.getType().name());
-            details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
-            details.put("quantity", safeNull(dto.getQuantity()));
-            details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
             details.put("binanceCode", safeNull(err.binanceCode()));
             details.put("binanceMsg", safeNull(safeLog(err.binanceMsg())));
             details.put("traceId", safeNull(err.traceId()));
@@ -116,31 +138,61 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     details
             );
         } catch (ResourceAccessException ex) {
-            Map<String, Object> details = new LinkedHashMap<>();
-            details.put("symbol", safeNull(dto.getSymbol()));
-            details.put("side", dto.getSide() == null ? "" : dto.getSide().name());
-            details.put("type", dto.getType() == null ? "" : dto.getType().name());
-            details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
-            details.put("quantity", safeNull(dto.getQuantity()));
-            details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
+            Map<String, Object> details = orderDetails(dto);
 
-            log.warn("event=binance.futures.order.fail reason=network_timeout symbol={} side={} type={} positionSide={} reduceOnly={} qty={} errClass={} errMsg=\"{}\"",
-                    dto.getSymbol(), dto.getSide(), dto.getType(), dto.getPositionSide(), dto.isReduceOnly(), dto.getQuantity(),
-                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            log.warn("event=binance.futures.order.fail reason=network_timeout originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} errClass={} errMsg=\"{}\"",
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    dto.getSymbol(),
+                    dto.getSide(),
+                    dto.getType(),
+                    dto.getPositionSide(),
+                    dto.isReduceOnly(),
+                    dto.getQuantity(),
+                    safeNull(dto.getClientOrderId()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()));
 
             throw new CopyBinanceClientException("Timeout/red enviando orden a ms-binance", ex, details);
-        } catch (RestClientException | IllegalStateException ex) {
-            Map<String, Object> details = new LinkedHashMap<>();
-            details.put("symbol", safeNull(dto.getSymbol()));
-            details.put("side", dto.getSide() == null ? "" : dto.getSide().name());
-            details.put("type", dto.getType() == null ? "" : dto.getType().name());
-            details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
-            details.put("quantity", safeNull(dto.getQuantity()));
-            details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
+        } catch (EngineException ex) {
+            Map<String, Object> details = orderDetails(dto);
+            details.put("errClass", ex.getClass().getSimpleName());
+            details.put("errCode", ex.getErrorCode() == null ? "" : ex.getErrorCode().name());
+            details.put("errMsg", safeNull(safeLog(ex.getMessage())));
 
-            log.warn("event=binance.futures.order.fail reason=client_error symbol={} side={} type={} positionSide={} reduceOnly={} qty={} errClass={} errMsg=\"{}\"",
-                    dto.getSymbol(), dto.getSide(), dto.getType(), dto.getPositionSide(), dto.isReduceOnly(), dto.getQuantity(),
-                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            log.warn("event=binance.futures.order.fail reason=invalid_ms_binance_response originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} errClass={} errCode={} errMsg=\"{}\"",
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    dto.getSymbol(),
+                    dto.getSide(),
+                    dto.getType(),
+                    dto.getPositionSide(),
+                    dto.isReduceOnly(),
+                    dto.getQuantity(),
+                    safeNull(dto.getClientOrderId()),
+                    ex.getClass().getSimpleName(),
+                    ex.getErrorCode() == null ? "" : ex.getErrorCode().name(),
+                    safeLog(ex.getMessage()));
+
+            throw new CopyBinanceClientException("Respuesta inválida de ms-binance enviando orden", ex, details);
+        } catch (RestClientException | IllegalStateException ex) {
+            Map<String, Object> details = orderDetails(dto);
+
+            log.warn("event=binance.futures.order.fail reason=client_error originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnly={} qty={} clientOrderId={} errClass={} errMsg=\"{}\"",
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    dto.getSymbol(),
+                    dto.getSide(),
+                    dto.getType(),
+                    dto.getPositionSide(),
+                    dto.isReduceOnly(),
+                    dto.getQuantity(),
+                    safeNull(dto.getClientOrderId()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()));
 
             throw new CopyBinanceClientException("Error cliente enviando orden a ms-binance", ex, details);
         }
@@ -149,7 +201,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     @Override
     public List<BinanceFuturesSymbolInfoClientDto> getSymbols(String apiKey) {
         if (apiKey == null || apiKey.isBlank()) {
-            throw new SkipExecutionException(ERR_APIKEY_EMPTY);
+            throw new SkipExecutionException("api_key_missing", ERR_APIKEY_EMPTY, null);
         }
 
         try {
@@ -182,6 +234,21 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         }
     }
 
+
+    private Map<String, Object> orderDetails(OperationDto dto) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("originId", safeNull(dto.getOriginId()));
+        details.put("userId", safeNull(dto.getUserId()));
+        details.put("wallet", safeNull(dto.getWalletId()));
+        details.put("symbol", safeNull(dto.getSymbol()));
+        details.put("side", dto.getSide() == null ? "" : dto.getSide().name());
+        details.put("type", dto.getType() == null ? "" : dto.getType().name());
+        details.put("positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name());
+        details.put("quantity", safeNull(dto.getQuantity()));
+        details.put("reduceOnly", Boolean.toString(dto.isReduceOnly()));
+        details.put("clientOrderId", safeNull(dto.getClientOrderId()));
+        return details;
+    }
 
     private BinanceHttpError parseBinanceHttpError(RestClientResponseException ex) {
         String body = ex.getResponseBodyAsString();
@@ -241,26 +308,46 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     ) {}
 
     private void validateOperation(OperationDto dto) {
-        if (dto == null) throw new SkipExecutionException(ERR_DTO_NULL);
-        if (dto.getApiKey() == null || dto.getApiKey().isBlank()) throw new SkipExecutionException(ERR_APIKEY_EMPTY);
-        if (dto.getSecret() == null || dto.getSecret().isBlank()) throw new SkipExecutionException(ERR_SECRET_EMPTY);
-        if (dto.getSymbol() == null || dto.getSymbol().isBlank()) throw new SkipExecutionException(ERR_SYMBOL_EMPTY);
+        if (dto == null) {
+            throw new SkipExecutionException("operation_dto_null", ERR_DTO_NULL, null);
+        }
+        if (dto.getApiKey() == null || dto.getApiKey().isBlank()) {
+            throw new SkipExecutionException("api_key_missing", ERR_APIKEY_EMPTY, validationDetails(dto));
+        }
+        if (dto.getSecret() == null || dto.getSecret().isBlank()) {
+            throw new SkipExecutionException("api_secret_missing", ERR_SECRET_EMPTY, validationDetails(dto));
+        }
+        if (dto.getSymbol() == null || dto.getSymbol().isBlank()) {
+            throw new SkipExecutionException("symbol_missing", ERR_SYMBOL_EMPTY, validationDetails(dto));
+        }
         if (dto.getSide() == null) {
-            throw new SkipExecutionException(
-                    "order_side_missing",
-                    "side requerido",
-                    com.apunto.engine.shared.util.LogFmt.kv("symbol", dto.getSymbol())
-            );
+            throw new SkipExecutionException("order_side_missing", "side requerido", validationDetails(dto));
         }
         if (dto.getType() == null) {
-            throw new SkipExecutionException(
-                    "order_type_missing",
-                    "type requerido",
-                    com.apunto.engine.shared.util.LogFmt.kv("symbol", dto.getSymbol())
-            );
+            throw new SkipExecutionException("order_type_missing", "type requerido", validationDetails(dto));
         }
-        if (dto.getQuantity() == null || dto.getQuantity().isBlank()) throw new SkipExecutionException(ERR_QTY_EMPTY);
-        if (dto.getPositionSide() == null) throw new SkipExecutionException(ERR_POSITIONSIDE_EMPTY);
+        if (dto.getQuantity() == null || dto.getQuantity().isBlank()) {
+            throw new SkipExecutionException("quantity_missing", ERR_QTY_EMPTY, validationDetails(dto));
+        }
+        if (dto.getPositionSide() == null) {
+            throw new SkipExecutionException("position_side_missing", ERR_POSITIONSIDE_EMPTY, validationDetails(dto));
+        }
+    }
+
+    private String validationDetails(OperationDto dto) {
+        if (dto == null) return null;
+        return com.apunto.engine.shared.util.LogFmt.kv(
+                "originId", dto.getOriginId(),
+                "userId", dto.getUserId(),
+                "wallet", dto.getWalletId(),
+                "symbol", dto.getSymbol(),
+                "side", dto.getSide(),
+                "type", dto.getType(),
+                "positionSide", dto.getPositionSide(),
+                "qty", dto.getQuantity(),
+                "reduceOnly", dto.isReduceOnly(),
+                "clientOrderId", dto.getClientOrderId()
+        );
     }
 
     private <T> T unwrap(ApiResponse<T> resp, String op) {

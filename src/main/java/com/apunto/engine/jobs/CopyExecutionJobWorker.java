@@ -1,6 +1,7 @@
 package com.apunto.engine.jobs;
 
 import com.apunto.engine.dto.UserDetailDto;
+import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.entity.CopyExecutionJobEntity;
 import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.jobs.model.CopyJobAction;
@@ -140,6 +141,7 @@ public class CopyExecutionJobWorker {
 
     private void process(CopyExecutionJobEntity job) {
         long t0 = System.nanoTime();
+        OperacionEvent event = null;
 
         try {
             putJobMdc(job);
@@ -149,7 +151,7 @@ public class CopyExecutionJobWorker {
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt(), workerId);
 
             long phaseNs = System.nanoTime();
-            OperacionEvent event = readPayload(job);
+            event = readPayload(job);
             log.info("event=copy.job.phase id={} originId={} userId={} action={} phase=load_job elapsedMs={}",
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), elapsedMsSince(phaseNs));
 
@@ -176,8 +178,9 @@ public class CopyExecutionJobWorker {
             tradingMetrics.jobResult(job, "done", null);
 
             long ms = Duration.ofNanos(System.nanoTime() - t0).toMillis();
-            log.info("event=copy.job.completed id={} originId={} userId={} action={} attempt={} workerId={} durationMs={}",
-                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt(), workerId, ms);
+            EventContext ctx = eventContext(event);
+            log.info("event=copy.job.completed id={} originId={} userId={} action={} wallet={} symbol={} attempt={} workerId={} durationMs={}",
+                    job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), ctx.wallet(), ctx.symbol(), job.getAttempt(), workerId, ms);
 
         } catch (SkipExecutionException skip) {
             jobService.markDead(job, CopyJobErrorCategory.SKIP.name(), safeMsg(skip));
@@ -185,11 +188,14 @@ public class CopyExecutionJobWorker {
             tradingMetrics.jobExecution(job, "skipped", System.nanoTime() - t0);
             tradingMetrics.jobResult(job, "skipped", skip.getReasonCode());
 
-            log.info("event=copy.job.skipped id={} originId={} userId={} action={} attempt={} workerId={} reasonCode={} reason=\"{}\" details=\"{}\"",
+            EventContext ctx = eventContext(event, skip);
+            log.info("event=copy.job.skipped id={} originId={} userId={} action={} wallet={} symbol={} attempt={} workerId={} reasonCode={} reason=\"{}\" details=\"{}\"",
                     job.getId(),
                     job.getOriginId(),
                     job.getUserId(),
                     job.getAction(),
+                    ctx.wallet(),
+                    ctx.symbol(),
                     job.getAttempt(),
                     workerId,
                     skip.getReasonCode(),
@@ -197,7 +203,7 @@ public class CopyExecutionJobWorker {
                     safeMsgForLog(skip.getDetails()));
 
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
-            handleFailure(job, ex);
+            handleFailure(job, event, ex);
 
             tradingMetrics.jobExecution(job, "failed", System.nanoTime() - t0);
             tradingMetrics.jobResult(job, "failed", ex.getClass().getSimpleName());
@@ -207,23 +213,24 @@ public class CopyExecutionJobWorker {
         }
     }
 
-    private void handleFailure(CopyExecutionJobEntity job, Throwable ex) {
+    private void handleFailure(CopyExecutionJobEntity job, OperacionEvent event, Throwable ex) {
         int attempt = job.getAttempt() + 1;
         job.setAttempt(attempt);
 
         CopyJobErrorCategory category = classify(ex);
         String msg = safeMsg(ex);
-        ErrorSummary summary = summarizeError(ex);
+        ErrorSummary summary = summarizeError(ex, event);
         boolean retryable = shouldRetry(category, ex);
 
         if (!retryable || attempt >= maxAttempts) {
             jobService.markDead(job, category.name(), msg);
             if (shouldLogStacktrace(category, ex)) {
-                log.error("event=copy.job.dead id={} originId={} userId={} action={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
+                log.error("event=copy.job.dead id={} originId={} userId={} action={} wallet={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
                         job.getId(),
                         job.getOriginId(),
                         job.getUserId(),
                         job.getAction(),
+                        summary.wallet(),
                         attempt,
                         category,
                         retryable,
@@ -239,11 +246,12 @@ public class CopyExecutionJobWorker {
                         safeMsgForLog(summary.errMsg()),
                         ex);
             } else {
-                log.error("event=copy.job.dead id={} originId={} userId={} action={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
+                log.error("event=copy.job.dead id={} originId={} userId={} action={} wallet={} attempts={} category={} retryable={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
                         job.getId(),
                         job.getOriginId(),
                         job.getUserId(),
                         job.getAction(),
+                        summary.wallet(),
                         attempt,
                         category,
                         retryable,
@@ -264,11 +272,12 @@ public class CopyExecutionJobWorker {
         OffsetDateTime nextRunAt = OffsetDateTime.now().plus(computeBackoff(category, attempt));
         jobService.reschedule(job, nextRunAt, category.name(), msg);
 
-        log.warn("event=copy.job.retry_scheduled id={} originId={} userId={} action={} attempts={} category={} nextRunAt={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
+        log.warn("event=copy.job.retry_scheduled id={} originId={} userId={} action={} wallet={} attempts={} category={} nextRunAt={} errClass={} errCode={} httpStatus={} symbol={} side={} positionSide={} qty={} binanceCode={} traceId={} errMsg=\"{}\"",
                 job.getId(),
                 job.getOriginId(),
                 job.getUserId(),
                 job.getAction(),
+                summary.wallet(),
                 attempt,
                 category,
                 nextRunAt,
@@ -339,7 +348,8 @@ public class CopyExecutionJobWorker {
         return true;
     }
 
-    private ErrorSummary summarizeError(Throwable t) {
+    private ErrorSummary summarizeError(Throwable t, OperacionEvent event) {
+        EventContext ctx = eventContext(event);
         Throwable cur = t;
 
         while (cur != null) {
@@ -349,7 +359,8 @@ public class CopyExecutionJobWorker {
                         cur.getClass().getSimpleName(),
                         copyErrorCode(ee),
                         asString(d.get("httpStatus")),
-                        asString(d.get("symbol")),
+                        firstNonBlank(asString(d.get("wallet")), ctx.wallet()),
+                        firstNonBlank(asString(d.get("symbol")), ctx.symbol()),
                         asString(d.get("side")),
                         asString(d.get("positionSide")),
                         asString(d.get("quantity")),
@@ -364,7 +375,8 @@ public class CopyExecutionJobWorker {
                         cur.getClass().getSimpleName(),
                         null,
                         Integer.toString(rre.getRawStatusCode()),
-                        null,
+                        ctx.wallet(),
+                        ctx.symbol(),
                         null,
                         null,
                         null,
@@ -381,7 +393,8 @@ public class CopyExecutionJobWorker {
                 t == null ? null : t.getClass().getSimpleName(),
                 null,
                 null,
-                null,
+                ctx.wallet(),
+                ctx.symbol(),
                 null,
                 null,
                 null,
@@ -390,6 +403,42 @@ public class CopyExecutionJobWorker {
                 safeMsg(t)
         );
     }
+
+    private EventContext eventContext(OperacionEvent event) {
+        if (event == null || event.getOperacion() == null) {
+            return new EventContext(null, null);
+        }
+        OperacionDto op = event.getOperacion();
+        return new EventContext(op.getIdCuenta(), op.getParSymbol());
+    }
+
+    private EventContext eventContext(OperacionEvent event, SkipExecutionException skip) {
+        EventContext fromEvent = eventContext(event);
+        String details = skip == null ? null : skip.getDetails();
+        return new EventContext(
+                firstNonBlank(fromEvent.wallet(), extractLogFmtValue(details, "wallet")),
+                firstNonBlank(fromEvent.symbol(), extractLogFmtValue(details, "symbol"))
+        );
+    }
+
+    private String extractLogFmtValue(String details, String key) {
+        if (details == null || details.isBlank() || key == null || key.isBlank()) return null;
+        String token = key + "=";
+        int start = details.indexOf(token);
+        if (start < 0) return null;
+        start += token.length();
+        int end = details.indexOf(' ', start);
+        String value = end < 0 ? details.substring(start) : details.substring(start, end);
+        if (value == null || value.isBlank() || "null".equalsIgnoreCase(value)) return null;
+        return value;
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) return first;
+        return second == null || second.isBlank() ? null : second;
+    }
+
+    private record EventContext(String wallet, String symbol) {}
 
     private String copyErrorCode(EngineException ex) {
         if (ex instanceof CopyExecutionException copyEx && copyEx.getErrCode() != null) {
@@ -406,6 +455,7 @@ public class CopyExecutionJobWorker {
             String errClass,
             String errCode,
             String httpStatus,
+            String wallet,
             String symbol,
             String side,
             String positionSide,
