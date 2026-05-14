@@ -11,6 +11,7 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.math.BigDecimal;
 import java.net.http.HttpClient;
@@ -33,6 +34,7 @@ public class BinanceFuturesPriceNormalizerService {
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final Cache<String, BinancePriceReference> cache;
+    private final Cache<String, Boolean> missCache;
 
     public BinanceFuturesPriceNormalizerService(
             ObjectMapper objectMapper,
@@ -40,7 +42,9 @@ public class BinanceFuturesPriceNormalizerService {
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-base-url:https://fapi.binance.com}") String baseUrl,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-timeout-ms:350}") int timeoutMs,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-cache-ttl-ms:750}") long cacheTtlMs,
-            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-cache-size:2048}") long cacheSize
+            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-cache-size:2048}") long cacheSize,
+            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-miss-cache-ttl-ms:60000}") long missCacheTtlMs,
+            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-miss-cache-size:4096}") long missCacheSize
     ) {
         this.objectMapper = objectMapper;
         this.enabled = enabled;
@@ -58,8 +62,12 @@ public class BinanceFuturesPriceNormalizerService {
                 .expireAfterWrite(Duration.ofMillis(Math.max(1L, cacheTtlMs)))
                 .maximumSize(Math.max(128L, cacheSize))
                 .build();
-        log.info("event=hyperliquid.origin_store.price_normalizer.config enabled={} baseUrl={} timeoutMs={} cacheTtlMs={} cacheSize={}",
-                enabled, safeLog(baseUrl), Math.max(50, timeoutMs), this.cacheTtlMs, Math.max(128L, cacheSize));
+        this.missCache = Caffeine.newBuilder()
+                .expireAfterWrite(Duration.ofMillis(Math.max(1000L, missCacheTtlMs)))
+                .maximumSize(Math.max(128L, missCacheSize))
+                .build();
+        log.info("event=hyperliquid.origin_store.price_normalizer.config enabled={} baseUrl={} timeoutMs={} cacheTtlMs={} cacheSize={} missCacheTtlMs={} missCacheSize={}",
+                enabled, safeLog(baseUrl), Math.max(50, timeoutMs), this.cacheTtlMs, Math.max(128L, cacheSize), Math.max(1000L, missCacheTtlMs), Math.max(128L, missCacheSize));
     }
 
     public Optional<BinancePriceReference> resolve(String symbol) {
@@ -75,8 +83,14 @@ public class BinanceFuturesPriceNormalizerService {
         if (cached != null) {
             return Optional.of(cached.withSource("binance_cache"));
         }
+        if (Boolean.TRUE.equals(missCache.getIfPresent(normalized))) {
+            return Optional.empty();
+        }
 
         for (String candidate : candidates(normalized)) {
+            if (Boolean.TRUE.equals(missCache.getIfPresent(candidate))) {
+                continue;
+            }
             Optional<BinancePriceReference> fetched = fetch(candidate);
             if (fetched.isPresent()) {
                 BinancePriceReference price = fetched.get();
@@ -85,6 +99,7 @@ public class BinanceFuturesPriceNormalizerService {
                 return Optional.of(price);
             }
         }
+        missCache.put(normalized, Boolean.TRUE);
         return Optional.empty();
     }
 
@@ -110,11 +125,33 @@ public class BinanceFuturesPriceNormalizerService {
             long elapsedMs = elapsedMs(startedNs);
             log.debug("event=hyperliquid.origin_store.binance_price.ok symbol={} price={} elapsedMs={}", symbol, price, elapsedMs);
             return Optional.of(new BinancePriceReference(symbol, price, "binance_futures_ticker", ts, elapsedMs, 0L));
+        } catch (RestClientResponseException ex) {
+            if (isInvalidSymbol(ex)) {
+                missCache.put(symbol, Boolean.TRUE);
+                log.debug("event=hyperliquid.origin_store.binance_price.invalid_symbol symbol={} httpStatus={} elapsedMs={}",
+                        safeLog(symbol), ex.getStatusCode().value(), elapsedMs(startedNs));
+                return Optional.empty();
+            }
+            log.warn("event=hyperliquid.origin_store.binance_price.failed symbol={} errClass={} httpStatus={} errMsg=\"{}\" elapsedMs={}",
+                    safeLog(symbol), ex.getClass().getSimpleName(), ex.getStatusCode().value(), safeLog(ex.getMessage()), elapsedMs(startedNs));
+            return Optional.empty();
         } catch (RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException | JsonProcessingException ex) {
             log.warn("event=hyperliquid.origin_store.binance_price.failed symbol={} errClass={} errMsg=\"{}\" elapsedMs={}",
                     safeLog(symbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
             return Optional.empty();
         }
+    }
+
+    private boolean isInvalidSymbol(RestClientResponseException ex) {
+        int status = ex.getStatusCode().value();
+        if (status == 404) {
+            return true;
+        }
+        if (status != 400) {
+            return false;
+        }
+        String body = ex.getResponseBodyAsString();
+        return body != null && body.contains("-1121");
     }
 
     private List<String> candidates(String symbol) {
