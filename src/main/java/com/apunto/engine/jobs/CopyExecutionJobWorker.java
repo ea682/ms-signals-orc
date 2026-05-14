@@ -219,9 +219,9 @@ public class CopyExecutionJobWorker {
                     workerId,
                     skip.getReasonCode(),
                     skip.getReasonCode(),
-                    "NA",
-                    "NA",
-                    "NA",
+                    orNA(extractLogFmtValue(skip.getDetails(), "httpStatus")),
+                    orNA(extractLogFmtValue(skip.getDetails(), "binanceCode")),
+                    orNA(extractLogFmtValue(skip.getDetails(), "traceId")),
                     safeMsgForLog(skip.getReason()),
                     safeMsgForLog(skip.getMessage()),
                     safeMsgForLog(skip.getDetails()));

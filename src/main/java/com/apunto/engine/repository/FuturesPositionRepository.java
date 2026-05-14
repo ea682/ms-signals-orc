@@ -40,4 +40,25 @@ public interface FuturesPositionRepository extends JpaRepository<FuturesPosition
             @Param("status") String status
     );
 
+
+    @Query(value = """
+            select *
+            from futuros_operaciones.futures_position fp
+            where fp.platform = :platform
+              and fp.account_id = :accountId
+              and fp.symbol = :symbol
+              and fp.side = cast(:side as futuros_operaciones.position_side)
+              and fp.status = cast(:status as futuros_operaciones.position_status)
+              and fp.is_active = true
+            order by fp.created_at desc
+            limit 1
+            """, nativeQuery = true)
+    Optional<FuturesPositionEntity> findLatestActiveByPlatformAccountSymbolSide(
+            @Param("platform") String platform,
+            @Param("accountId") String accountId,
+            @Param("symbol") String symbol,
+            @Param("side") String side,
+            @Param("status") String status
+    );
+
 }
