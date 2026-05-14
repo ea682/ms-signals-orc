@@ -38,6 +38,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
 
     private final HyperliquidDirectIngestProperties properties;
     private final HyperliquidDirectCopyDispatchService directCopyDispatchService;
+    private final HyperliquidOriginPositionStoreService originPositionStoreService;
     private final MeterRegistry meterRegistry;
     private final BlockingQueue<QueuedDelta> queue;
     private final ExecutorService workers;
@@ -52,10 +53,12 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     public HyperliquidDirectDeltaIngestServiceImpl(
             HyperliquidDirectIngestProperties properties,
             HyperliquidDirectCopyDispatchService directCopyDispatchService,
+            HyperliquidOriginPositionStoreService originPositionStoreService,
             MeterRegistry meterRegistry
     ) {
         this.properties = properties;
         this.directCopyDispatchService = directCopyDispatchService;
+        this.originPositionStoreService = originPositionStoreService;
         this.meterRegistry = meterRegistry;
         this.queue = new ArrayBlockingQueue<>(Math.max(1, properties.getQueueCapacity()));
         this.workers = Executors.newFixedThreadPool(
@@ -155,7 +158,8 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mapped = task.mappedDelta();
         try {
-            HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(mapped.event());
+            HyperliquidMappedDelta persisted = originPositionStoreService.persistAndBind(mapped);
+            HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(persisted.event());
             processed.incrementAndGet();
             long elapsedMs = elapsedMs(startedNs);
             long queueDelayMs = elapsedMs(task.acceptedNs());

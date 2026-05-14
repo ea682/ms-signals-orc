@@ -9,6 +9,7 @@ public record HyperliquidMappedDelta(
         String symbol,
         String side,
         String deltaType,
-        OperacionEvent event
+        OperacionEvent event,
+        HyperliquidDeltaRequest request
 ) {
 }
