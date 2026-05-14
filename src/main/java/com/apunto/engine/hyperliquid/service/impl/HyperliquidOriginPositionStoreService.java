@@ -14,6 +14,8 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
@@ -72,6 +74,10 @@ public class HyperliquidOriginPositionStoreService {
     private final AtomicLong failed = new AtomicLong(0);
     private final AtomicLong rejected = new AtomicLong(0);
     private final ConcurrentMap<String, UUID> activeOriginIds = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Object> positionLocks = new ConcurrentHashMap<>();
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     public HyperliquidOriginPositionStoreService(
             FuturesPositionRepository repository,
@@ -186,7 +192,12 @@ public class HyperliquidOriginPositionStoreService {
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mapped = task.mappedDelta();
         try {
-            PersistOutcome outcome = transactionTemplate.execute(status -> persistLifecycle(mapped, task.dispatchResult(), startedNs));
+            BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference = resolvePriceReference(mapped);
+            Object lock = positionLocks.computeIfAbsent(lockKey(mapped), ignored -> new Object());
+            PersistOutcome outcome;
+            synchronized (lock) {
+                outcome = transactionTemplate.execute(status -> persistLifecycle(mapped, task.dispatchResult(), startedNs, priceReference));
+            }
             persisted.incrementAndGet();
             meterRegistry.timer("signals.hyperliquid.origin_store.persist.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
@@ -222,12 +233,29 @@ public class HyperliquidOriginPositionStoreService {
                     safeLog(ex.getMessage()),
                     elapsedMs(task.acceptedNs()),
                     elapsedMs(startedNs),
-                    queue.size(),
-                    ex);
+                    queue.size());
         }
     }
 
-    private PersistOutcome persistLifecycle(HyperliquidMappedDelta mapped, HyperliquidDirectCopyDispatchResult dispatchResult, long startedNs) {
+    private BinanceFuturesPriceNormalizerService.BinancePriceReference resolvePriceReference(HyperliquidMappedDelta mapped) {
+        if (mapped == null || mapped.event() == null || mapped.event().getOperacion() == null) {
+            return null;
+        }
+        return priceNormalizerService.resolve(mapped.event().getOperacion().getParSymbol()).orElse(null);
+    }
+
+    private String lockKey(HyperliquidMappedDelta mapped) {
+        if (mapped != null && mapped.positionKey() != null && !mapped.positionKey().isBlank()) {
+            return mapped.positionKey();
+        }
+        UUID id = originId(mapped);
+        if (id != null) {
+            return "origin-id:" + id;
+        }
+        return "unknown:" + System.identityHashCode(mapped);
+    }
+
+    private PersistOutcome persistLifecycle(HyperliquidMappedDelta mapped, HyperliquidDirectCopyDispatchResult dispatchResult, long startedNs, BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference) {
         OperacionEvent event = mapped.event();
         OperacionDto operation = event.getOperacion();
         UUID originId = operation.getIdOperacion();
@@ -249,12 +277,17 @@ public class HyperliquidOriginPositionStoreService {
             entity.setHasAccountIssue(false);
         }
 
-        BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference = priceNormalizerService.resolve(operation.getParSymbol())
-                .orElse(null);
         applyCommonFields(entity, mapped, operation, priceReference, dispatchResult);
         applyStatusFields(entity, event, operation, priceReference);
 
-        FuturesPositionEntity saved = repository.saveAndFlush(entity);
+        FuturesPositionEntity saved;
+        if (created) {
+            entityManager.persist(entity);
+            entityManager.flush();
+            saved = entity;
+        } else {
+            saved = repository.saveAndFlush(entity);
+        }
         if (saved.getStatus() != PositionStatus.OPEN) {
             activeOriginIds.remove(mapped.positionKey(), saved.getIdFuturesPosition());
         } else {
