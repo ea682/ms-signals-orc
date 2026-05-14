@@ -37,17 +37,19 @@ public class HyperliquidDeltaOperacionMapper {
         final boolean active = eventType == OperacionEvent.Tipo.ABIERTA;
         final UUID positionId = stablePositionId(wallet, symbol, side.name());
         final BigDecimal sizeQty = abs(defaultZero(firstNonNull(request.sizeQty(), request.signedSizeQty())));
-        final Instant eventTime = firstNonNull(request.detectedAt(), Instant.now());
+        final BigDecimal notionalUsd = resolveNotionalUsd(request, sizeQty);
+        final BigDecimal marginUsedUsd = abs(request.marginUsedUsd());
+        final Instant eventTime = resolveEventTime(request);
 
         OperacionDto operacion = OperacionDto.builder()
                 .idOperacion(positionId)
                 .idCuenta(wallet)
                 .parSymbol(symbol)
                 .tipoOperacion(side)
-                .size(sizeQty)
+                .size(notionalUsd)
                 .sizeQty(sizeQty)
-                .notionalUsd(abs(request.notionalUsd()))
-                .marginUsedUsd(abs(request.marginUsedUsd()))
+                .notionalUsd(notionalUsd)
+                .marginUsedUsd(marginUsedUsd)
                 .precioEntrada(request.entryPrice())
                 .precioCierre(active ? null : firstNonNull(request.markPrice(), request.entryPrice()))
                 .precioMercado(request.markPrice())
@@ -63,7 +65,8 @@ public class HyperliquidDeltaOperacionMapper {
                 symbol,
                 side.name(),
                 deltaType,
-                new OperacionEvent(eventType, operacion)
+                new OperacionEvent(eventType, operacion),
+                request
         );
     }
 
@@ -118,6 +121,25 @@ public class HyperliquidDeltaOperacionMapper {
             return normalized;
         }
         return normalized + "USD";
+    }
+
+    private Instant resolveEventTime(HyperliquidDeltaRequest request) {
+        if (request.sourceTs() != null && request.sourceTs() > 0) {
+            return Instant.ofEpochMilli(request.sourceTs());
+        }
+        return firstNonNull(request.detectedAt(), Instant.now());
+    }
+
+    private BigDecimal resolveNotionalUsd(HyperliquidDeltaRequest request, BigDecimal sizeQty) {
+        BigDecimal notional = abs(request.notionalUsd());
+        if (notional.compareTo(ZERO) > 0) {
+            return notional;
+        }
+        BigDecimal price = firstNonNull(request.markPrice(), request.entryPrice());
+        if (price == null || price.compareTo(ZERO) <= 0 || sizeQty == null) {
+            return ZERO;
+        }
+        return abs(sizeQty).multiply(price.abs());
     }
 
     private String requireText(String value, String message) {
