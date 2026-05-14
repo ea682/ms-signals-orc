@@ -1,0 +1,155 @@
+package com.apunto.engine.hyperliquid.mapper;
+
+import com.apunto.engine.dto.OperacionDto;
+import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
+import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
+import com.apunto.engine.shared.enums.PositionSide;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.Locale;
+import java.util.UUID;
+
+@Component
+public class HyperliquidDeltaOperacionMapper {
+
+    private static final BigDecimal ZERO = BigDecimal.ZERO;
+
+    public HyperliquidMappedDelta map(HyperliquidDeltaRequest request, String headerIdempotencyKey) {
+        if (request == null) {
+            throw new IllegalArgumentException("Hyperliquid delta request is required");
+        }
+
+        final String idempotencyKey = firstNonBlank(headerIdempotencyKey, request.idempotencyKey());
+        if (idempotencyKey == null) {
+            throw new IllegalArgumentException("X-Idempotency-Key or idempotencyKey is required");
+        }
+
+        final String wallet = requireText(request.wallet(), "wallet is required").toLowerCase(Locale.ROOT);
+        final String rawSymbol = requireText(request.symbol(), "symbol is required");
+        final String symbol = toEngineSymbol(rawSymbol);
+        final PositionSide side = mapSide(request.side());
+        final String deltaType = requireText(request.deltaType(), "deltaType is required").toUpperCase(Locale.ROOT);
+        final OperacionEvent.Tipo eventType = mapEventType(deltaType, request.status(), request.sizeQty());
+        final boolean active = eventType == OperacionEvent.Tipo.ABIERTA;
+        final UUID positionId = stablePositionId(wallet, symbol, side.name());
+        final BigDecimal sizeQty = abs(defaultZero(firstNonNull(request.sizeQty(), request.signedSizeQty())));
+        final Instant eventTime = firstNonNull(request.detectedAt(), Instant.now());
+
+        OperacionDto operacion = OperacionDto.builder()
+                .idOperacion(positionId)
+                .idCuenta(wallet)
+                .parSymbol(symbol)
+                .tipoOperacion(side)
+                .size(sizeQty)
+                .sizeQty(sizeQty)
+                .notionalUsd(abs(request.notionalUsd()))
+                .marginUsedUsd(abs(request.marginUsedUsd()))
+                .precioEntrada(request.entryPrice())
+                .precioCierre(active ? null : firstNonNull(request.markPrice(), request.entryPrice()))
+                .precioMercado(request.markPrice())
+                .fechaCreacion(eventTime)
+                .fechaCierre(active ? null : eventTime)
+                .operacionActiva(active)
+                .build();
+
+        return new HyperliquidMappedDelta(
+                idempotencyKey,
+                positionKey(wallet, symbol, side.name()),
+                wallet,
+                symbol,
+                side.name(),
+                deltaType,
+                new OperacionEvent(eventType, operacion)
+        );
+    }
+
+    private OperacionEvent.Tipo mapEventType(String deltaType, String status, BigDecimal sizeQty) {
+        if ("NO_CHANGE".equals(deltaType)) {
+            throw new IllegalArgumentException("NO_CHANGE delta is not copyable");
+        }
+        if ("CLOSE".equals(deltaType) || "CLOSED".equalsIgnoreCase(nullToEmpty(status))) {
+            return OperacionEvent.Tipo.CERRADA;
+        }
+        if (abs(sizeQty).compareTo(ZERO) == 0 && ("UPDATE".equals(deltaType) || "RESIZE".equals(deltaType))) {
+            return OperacionEvent.Tipo.CERRADA;
+        }
+        if ("OPEN".equals(deltaType) || "RESIZE".equals(deltaType) || "FLIP".equals(deltaType) || "UPDATE".equals(deltaType)) {
+            return OperacionEvent.Tipo.ABIERTA;
+        }
+        throw new IllegalArgumentException("Unsupported deltaType: " + deltaType);
+    }
+
+    private PositionSide mapSide(String rawSide) {
+        final String value = requireText(rawSide, "side is required").toUpperCase(Locale.ROOT);
+        try {
+            return PositionSide.valueOf(value);
+        } catch (IllegalArgumentException invalidSide) {
+            throw new IllegalArgumentException("Unsupported side: " + rawSide, invalidSide);
+        }
+    }
+
+    private UUID stablePositionId(String wallet, String symbol, String side) {
+        return UUID.nameUUIDFromBytes(positionKey(wallet, symbol, side).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String positionKey(String wallet, String symbol, String side) {
+        return "hyperliquid-position:" + wallet + ':' + symbol + ':' + side;
+    }
+
+    private String toEngineSymbol(String rawSymbol) {
+        String normalized = requireText(rawSymbol, "symbol is required")
+                .trim()
+                .toUpperCase(Locale.ROOT)
+                .replace("-", "")
+                .replace("_", "")
+                .replace("/", "")
+                .replace(".", "")
+                .replace(" ", "");
+
+        if (normalized.endsWith("USDT")
+                || normalized.endsWith("USDC")
+                || normalized.endsWith("FDUSD")
+                || normalized.endsWith("BUSD")
+                || normalized.endsWith("USD")) {
+            return normalized;
+        }
+        return normalized + "USD";
+    }
+
+    private String requireText(String value, String message) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(message);
+        }
+        return value.trim();
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first.trim();
+        }
+        if (second != null && !second.isBlank()) {
+            return second.trim();
+        }
+        return null;
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private BigDecimal defaultZero(BigDecimal value) {
+        return value == null ? ZERO : value;
+    }
+
+    private BigDecimal abs(BigDecimal value) {
+        return value == null ? ZERO : value.abs();
+    }
+
+    private <T> T firstNonNull(T first, T second) {
+        return first != null ? first : second;
+    }
+}

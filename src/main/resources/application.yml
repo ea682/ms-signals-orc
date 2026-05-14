@@ -131,3 +131,14 @@ metric-wallet:
   distribution:
     refresh-job: 2m
 
+
+hyperliquid:
+  direct-ingest:
+    enabled: ${HYPERLIQUID_DIRECT_INGEST_ENABLED:true}
+    queue-capacity: ${HYPERLIQUID_DIRECT_INGEST_QUEUE_CAPACITY:20000}
+    worker-threads: ${HYPERLIQUID_DIRECT_INGEST_WORKER_THREADS:4}
+    reject-when-disabled: ${HYPERLIQUID_DIRECT_INGEST_REJECT_WHEN_DISABLED:true}
+    dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_ENABLED:false}
+    dedupe-ttl-seconds: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_TTL_SECONDS:30}
+    log-interval-ms: ${HYPERLIQUID_DIRECT_INGEST_LOG_INTERVAL_MS:10000}
+    fallback-db-on-direct-failure: ${HYPERLIQUID_DIRECT_INGEST_FALLBACK_DB_ON_DIRECT_FAILURE:true}
