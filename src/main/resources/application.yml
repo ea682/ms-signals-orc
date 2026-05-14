@@ -121,7 +121,7 @@ engine:
       skip-stale-increase: ${ENGINE_COPY_RECONCILE_SKIP_STALE_INCREASE:true}
       max-increase-source-age: ${ENGINE_COPY_RECONCILE_MAX_INCREASE_SOURCE_AGE:PT60S}
     sizing:
-      max-fraction-per-trade: ${ENGINE_COPY_MAX_FRACTION_PER_TRADE:0.10}
+      max-fraction-per-trade: ${ENGINE_COPY_MAX_FRACTION_PER_TRADE:1}
       notional-buffer-pct: ${ENGINE_COPY_NOTIONAL_BUFFER_PCT:0.03}
   metric-wallet:
     distribution-worker:
