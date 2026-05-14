@@ -162,9 +162,16 @@ public class HyperliquidOriginPositionStoreService {
         String key = requireText(mapped.positionKey(), "positionKey is required");
         boolean closing = isClosing(mapped);
         if (closing) {
-            UUID existing = activeOriginIds.remove(key);
+            UUID existing = activeOriginIds.get(key);
             if (existing != null) {
                 return existing;
+            }
+            UUID databaseOriginId = findOpenOriginIdForClose(mapped);
+            if (databaseOriginId != null) {
+                activeOriginIds.put(key, databaseOriginId);
+                log.info("event=hyperliquid.origin_store.lifecycle_recovered originId={} positionKey={} wallet={} symbol={} side={} deltaType={} source=db_open_position",
+                        databaseOriginId, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()));
+                return databaseOriginId;
             }
             UUID fallback = fallbackLifecycleId(mapped);
             log.warn("event=hyperliquid.origin_store.lifecycle_missing action=close_fallback originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
@@ -172,6 +179,31 @@ public class HyperliquidOriginPositionStoreService {
             return fallback;
         }
         return activeOriginIds.computeIfAbsent(key, ignored -> UUID.randomUUID());
+    }
+
+    private UUID findOpenOriginIdForClose(HyperliquidMappedDelta mapped) {
+        String accountId = lower(firstNonBlank(mapped.wallet(), null));
+        String symbol = firstNonBlank(mapped.symbol(), null);
+        String side = safeUpper(mapped.side());
+        if (accountId == null || symbol == null || side == null || "UNKNOWN".equals(side)) {
+            return null;
+        }
+        try {
+            return repository.findLatestActiveByPlatformAccountSymbolSide(
+                            PLATFORM,
+                            accountId,
+                            symbol,
+                            side,
+                            PositionStatus.OPEN.name()
+                    )
+                    .map(FuturesPositionEntity::getIdFuturesPosition)
+                    .orElse(null);
+        } catch (DataAccessException | IllegalArgumentException | IllegalStateException ex) {
+            log.warn("event=hyperliquid.origin_store.lifecycle_lookup_failed positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\"",
+                    safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()),
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            return null;
+        }
     }
 
     private void workerLoop() {
@@ -277,7 +309,8 @@ public class HyperliquidOriginPositionStoreService {
             entity.setHasAccountIssue(false);
         }
 
-        applyCommonFields(entity, mapped, operation, priceReference, dispatchResult);
+        boolean closing = isClosing(mapped);
+        applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing);
         applyStatusFields(entity, event, operation, priceReference);
 
         FuturesPositionEntity saved;
@@ -311,7 +344,8 @@ public class HyperliquidOriginPositionStoreService {
             HyperliquidMappedDelta mapped,
             OperacionDto operation,
             BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference,
-            HyperliquidDirectCopyDispatchResult dispatchResult
+            HyperliquidDirectCopyDispatchResult dispatchResult,
+            boolean closing
     ) {
         HyperliquidDeltaRequest request = mapped.request();
         BigDecimal sizeQty = nonNegative(operation.getSizeQty());
@@ -330,10 +364,20 @@ public class HyperliquidOriginPositionStoreService {
         entity.setSide(operation.getTipoOperacion());
         entity.setOperationType(operation.getTipoOperacion() == null ? safeUpper(mapped.side()) : operation.getTipoOperacion().name());
         entity.setLeverage(positiveOrDefault(request == null ? null : request.leverage(), ONE));
-        entity.setSizeQty(sizeQty);
-        entity.setNotionalUsd(nonNegative(notional));
-        entity.setMarginUsedUsd(nonNegative(operation.getMarginUsedUsd()));
-        entity.setSizeLegacy(nonNegative(firstNonNull(notional, operation.getSize(), operation.getNotionalUsd(), sizeQty)));
+        BigDecimal marginUsed = nonNegative(operation.getMarginUsedUsd());
+        BigDecimal sizeLegacy = nonNegative(firstNonNull(notional, operation.getSize(), operation.getNotionalUsd(), sizeQty));
+        if (!closing || !isPositive(entity.getSizeQty())) {
+            entity.setSizeQty(sizeQty);
+        }
+        if (!closing || !isPositive(entity.getNotionalUsd())) {
+            entity.setNotionalUsd(nonNegative(notional));
+        }
+        if (!closing || !isPositive(entity.getMarginUsedUsd())) {
+            entity.setMarginUsedUsd(marginUsed);
+        }
+        if (!closing || !isPositive(entity.getSizeLegacy())) {
+            entity.setSizeLegacy(sizeLegacy);
+        }
         if (entity.getEntryPrice() == null || entity.getEntryPrice().compareTo(ZERO) <= 0) {
             entity.setEntryPrice(nonNegative(firstNonNull(normalizedPrice, operation.getPrecioEntrada(), operation.getPrecioMercado(), ZERO)));
         }
@@ -373,7 +417,7 @@ public class HyperliquidOriginPositionStoreService {
         entity.setClosedAt(closedAt);
         entity.setExitPrice(exitPrice);
         entity.setMarkPrice(exitPrice);
-        entity.setRealizedPnlUsd(realizedPnl(entity.getSide(), entity.getSizeQty(), entity.getEntryPrice(), exitPrice));
+        entity.setRealizedPnlUsd(realizedPnl(entity.getSide(), effectiveSizeQtyForPnl(entity), entity.getEntryPrice(), exitPrice));
         entity.setUnrealizedPnlUsd(ZERO);
     }
 
@@ -460,6 +504,29 @@ public class HyperliquidOriginPositionStoreService {
         raw.put("request", mapped.request());
         raw.put("__meta", meta);
         return objectMapper.valueToTree(raw);
+    }
+
+    private boolean isPositive(BigDecimal value) {
+        return value != null && value.compareTo(ZERO) > 0;
+    }
+
+    private BigDecimal effectiveSizeQtyForPnl(FuturesPositionEntity entity) {
+        if (entity == null) {
+            return ZERO;
+        }
+        if (isPositive(entity.getSizeQty())) {
+            return entity.getSizeQty();
+        }
+        BigDecimal sizeLegacy = entity.getSizeLegacy();
+        BigDecimal entryPrice = entity.getEntryPrice();
+        if (isPositive(sizeLegacy) && isPositive(entryPrice)) {
+            return sizeLegacy.divide(entryPrice, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+        }
+        BigDecimal notional = entity.getNotionalUsd();
+        if (isPositive(notional) && isPositive(entryPrice)) {
+            return notional.divide(entryPrice, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+        }
+        return ZERO;
     }
 
     private BigDecimal realizedPnl(com.apunto.engine.shared.enums.PositionSide side, BigDecimal sizeQty, BigDecimal entryPrice, BigDecimal exitPrice) {
