@@ -123,6 +123,25 @@ public class GlobalExceptionHandler {
         );
     }
 
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ApiResponse<Object>> handleIllegalArgumentException(
+            IllegalArgumentException ex,
+            HttpServletRequest request
+    ) {
+        Map<String, Object> data = Map.of(
+                "errorCode", ErrorCode.VALIDATION_ERROR.name()
+        );
+
+        return buildErrorResponse(
+                ErrorCode.VALIDATION_ERROR.getHttpStatus(),
+                ErrorCode.VALIDATION_ERROR,
+                ex.getMessage(),
+                data,
+                request,
+                ex
+        );
+    }
+
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiResponse<Object>> handleHttpMessageNotReadable(
             HttpMessageNotReadableException ex,
