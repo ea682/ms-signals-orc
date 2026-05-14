@@ -1,0 +1,590 @@
+package com.apunto.engine.hyperliquid.service.impl;
+
+import com.apunto.engine.dto.OperacionDto;
+import com.apunto.engine.entity.FuturesPositionEntity;
+import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
+import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
+import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
+import com.apunto.engine.repository.FuturesPositionRepository;
+import com.apunto.engine.shared.enums.PositionStatus;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.client.RestClientException;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+@Slf4j
+@Service
+public class HyperliquidOriginPositionStoreService {
+
+    private static final String PLATFORM = "hyperliquid";
+    private static final String VENUE = "HYPERLIQUID";
+    private static final BigDecimal ZERO = BigDecimal.ZERO;
+    private static final BigDecimal ONE = BigDecimal.ONE;
+    private static final int CALC_SCALE = 18;
+
+    private final FuturesPositionRepository repository;
+    private final ObjectMapper objectMapper;
+    private final BinanceFuturesPriceNormalizerService priceNormalizerService;
+    private final TransactionTemplate transactionTemplate;
+    private final MeterRegistry meterRegistry;
+    private final boolean enabled;
+    private final boolean hydrateOpenPositions;
+    private final boolean failCopyOnBindError;
+    private final BlockingQueue<PersistTask> queue;
+    private final ExecutorService workers;
+    private final AtomicBoolean running = new AtomicBoolean(false);
+    private final AtomicInteger activeWorkers = new AtomicInteger(0);
+    private final AtomicLong submitted = new AtomicLong(0);
+    private final AtomicLong persisted = new AtomicLong(0);
+    private final AtomicLong failed = new AtomicLong(0);
+    private final AtomicLong rejected = new AtomicLong(0);
+    private final ConcurrentMap<String, UUID> activeOriginIds = new ConcurrentHashMap<>();
+
+    public HyperliquidOriginPositionStoreService(
+            FuturesPositionRepository repository,
+            ObjectMapper objectMapper,
+            BinanceFuturesPriceNormalizerService priceNormalizerService,
+            PlatformTransactionManager transactionManager,
+            MeterRegistry meterRegistry,
+            @Value("${hyperliquid.direct-ingest.origin-store.enabled:true}") boolean enabled,
+            @Value("${hyperliquid.direct-ingest.origin-store.worker-threads:2}") int workerThreads,
+            @Value("${hyperliquid.direct-ingest.origin-store.queue-capacity:20000}") int queueCapacity,
+            @Value("${hyperliquid.direct-ingest.origin-store.hydrate-open-positions:true}") boolean hydrateOpenPositions,
+            @Value("${hyperliquid.direct-ingest.origin-store.fail-copy-on-bind-error:false}") boolean failCopyOnBindError
+    ) {
+        this.repository = repository;
+        this.objectMapper = objectMapper;
+        this.priceNormalizerService = priceNormalizerService;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.meterRegistry = meterRegistry;
+        this.enabled = enabled;
+        this.hydrateOpenPositions = hydrateOpenPositions;
+        this.failCopyOnBindError = failCopyOnBindError;
+        this.queue = new ArrayBlockingQueue<>(Math.max(1, queueCapacity));
+        this.workers = Executors.newFixedThreadPool(Math.max(1, workerThreads), new NamedThreadFactory("hl-origin-store-"));
+        log.info("event=hyperliquid.origin_store.config enabled={} workerThreads={} queueCapacity={} hydrateOpenPositions={} failCopyOnBindError={}",
+                enabled, Math.max(1, workerThreads), Math.max(1, queueCapacity), hydrateOpenPositions, failCopyOnBindError);
+    }
+
+    @PostConstruct
+    public void start() {
+        if (!enabled) {
+            log.warn("event=hyperliquid.origin_store.disabled");
+            return;
+        }
+        hydrateActivePositionCache();
+        running.set(true);
+        int workerCount = Math.max(1, ((java.util.concurrent.ThreadPoolExecutor) workers).getCorePoolSize());
+        for (int i = 0; i < workerCount; i++) {
+            workers.execute(this::workerLoop);
+        }
+        log.info("event=hyperliquid.origin_store.started queueCapacity={} activeCacheSize={}", queue.remainingCapacity() + queue.size(), activeOriginIds.size());
+    }
+
+    @PreDestroy
+    public void stop() {
+        running.set(false);
+        workers.shutdownNow();
+        log.info("event=hyperliquid.origin_store.stopped queueDepth={} submitted={} persisted={} failed={} rejected={} activeCacheSize={}",
+                queue.size(), submitted.get(), persisted.get(), failed.get(), rejected.get(), activeOriginIds.size());
+    }
+
+    public HyperliquidMappedDelta bindOriginIdForCopy(HyperliquidMappedDelta mapped) {
+        if (mapped == null || mapped.event() == null || mapped.event().getOperacion() == null) {
+            if (failCopyOnBindError) {
+                throw new IllegalArgumentException("mapped hyperliquid delta is required");
+            }
+            return mapped;
+        }
+        if (!enabled) {
+            return mapped;
+        }
+        UUID originId = resolveOriginId(mapped);
+        return mapped.withOriginId(originId);
+    }
+
+    public void submitAfterCopy(HyperliquidMappedDelta mapped, HyperliquidDirectCopyDispatchResult dispatchResult) {
+        if (!enabled || mapped == null) {
+            return;
+        }
+        PersistTask task = new PersistTask(mapped, dispatchResult, System.nanoTime());
+        if (!queue.offer(task)) {
+            rejected.incrementAndGet();
+            meterRegistry.counter("signals.hyperliquid.origin_store.rejected.total", "reason", "queue_full").increment();
+            log.error("event=hyperliquid.origin_store.rejected reason=queue_full originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
+                    originId(mapped), safeLog(mapped.idempotencyKey()), safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()), queue.size());
+            return;
+        }
+        submitted.incrementAndGet();
+        meterRegistry.counter("signals.hyperliquid.origin_store.submitted.total", "deltaType", safeTag(mapped.deltaType())).increment();
+    }
+
+    private UUID resolveOriginId(HyperliquidMappedDelta mapped) {
+        String key = requireText(mapped.positionKey(), "positionKey is required");
+        boolean closing = isClosing(mapped);
+        if (closing) {
+            UUID existing = activeOriginIds.remove(key);
+            if (existing != null) {
+                return existing;
+            }
+            UUID fallback = fallbackLifecycleId(mapped);
+            log.warn("event=hyperliquid.origin_store.lifecycle_missing action=close_fallback originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
+                    fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()));
+            return fallback;
+        }
+        return activeOriginIds.computeIfAbsent(key, ignored -> UUID.randomUUID());
+    }
+
+    private void workerLoop() {
+        activeWorkers.incrementAndGet();
+        try {
+            while (running.get() || !queue.isEmpty()) {
+                PersistTask task = queue.take();
+                process(task);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } finally {
+            activeWorkers.decrementAndGet();
+        }
+    }
+
+    private void process(PersistTask task) {
+        long startedNs = System.nanoTime();
+        HyperliquidMappedDelta mapped = task.mappedDelta();
+        try {
+            PersistOutcome outcome = transactionTemplate.execute(status -> persistLifecycle(mapped, task.dispatchResult(), startedNs));
+            persisted.incrementAndGet();
+            meterRegistry.timer("signals.hyperliquid.origin_store.persist.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
+                    .record(Duration.ofNanos(System.nanoTime() - startedNs));
+            log.info("event=futures_position.origin_upsert_ok action={} originId={} created={} platform={} wallet={} symbol={} side={} status={} deltaType={} priceSource={} binanceSymbol={} binancePrice={} queueDelayMs={} elapsedMs={} queueDepth={}",
+                    outcome == null ? "unknown" : outcome.action(),
+                    originId(mapped),
+                    outcome != null && outcome.created(),
+                    PLATFORM,
+                    safeLog(mapped.wallet()),
+                    safeLog(mapped.symbol()),
+                    safeLog(mapped.side()),
+                    outcome == null ? "NA" : outcome.status(),
+                    safeLog(mapped.deltaType()),
+                    outcome == null ? "NA" : safeLog(outcome.priceSource()),
+                    outcome == null ? "NA" : safeLog(outcome.binanceSymbol()),
+                    outcome == null ? "NA" : outcome.binancePrice(),
+                    elapsedMs(task.acceptedNs()),
+                    elapsedMs(startedNs),
+                    queue.size());
+        } catch (DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
+            failed.incrementAndGet();
+            meterRegistry.timer("signals.hyperliquid.origin_store.persist.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
+                    .record(Duration.ofNanos(System.nanoTime() - startedNs));
+            log.error("event=futures_position.origin_upsert_failed originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
+                    originId(mapped),
+                    safeLog(mapped.idempotencyKey()),
+                    safeLog(mapped.positionKey()),
+                    safeLog(mapped.wallet()),
+                    safeLog(mapped.symbol()),
+                    safeLog(mapped.side()),
+                    safeLog(mapped.deltaType()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()),
+                    elapsedMs(task.acceptedNs()),
+                    elapsedMs(startedNs),
+                    queue.size(),
+                    ex);
+        }
+    }
+
+    private PersistOutcome persistLifecycle(HyperliquidMappedDelta mapped, HyperliquidDirectCopyDispatchResult dispatchResult, long startedNs) {
+        OperacionEvent event = mapped.event();
+        OperacionDto operation = event.getOperacion();
+        UUID originId = operation.getIdOperacion();
+        if (originId == null) {
+            throw new IllegalArgumentException("mapped operation id is required");
+        }
+
+        FuturesPositionEntity entity = repository.findByIdFuturesPosition(originId).orElse(null);
+        boolean created = entity == null;
+        if (created) {
+            entity = new FuturesPositionEntity();
+            entity.setIdFuturesPosition(originId);
+            entity.setPlatform(PLATFORM);
+            entity.setVenue(VENUE);
+            entity.setExternalId("hyperliquid|direct|" + originId);
+            entity.setCreatedAt(resolveCreatedAt(operation, mapped.request()));
+            entity.setIngestedAt(OffsetDateTime.now(ZoneOffset.UTC));
+            entity.setFailedAttempts(0);
+            entity.setHasAccountIssue(false);
+        }
+
+        BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference = priceNormalizerService.resolve(operation.getParSymbol())
+                .orElse(null);
+        applyCommonFields(entity, mapped, operation, priceReference, dispatchResult);
+        applyStatusFields(entity, event, operation, priceReference);
+
+        FuturesPositionEntity saved = repository.saveAndFlush(entity);
+        if (saved.getStatus() != PositionStatus.OPEN) {
+            activeOriginIds.remove(mapped.positionKey(), saved.getIdFuturesPosition());
+        } else {
+            activeOriginIds.put(mapped.positionKey(), saved.getIdFuturesPosition());
+        }
+
+        String action = created ? "insert" : (saved.getStatus() == PositionStatus.OPEN ? "update" : "close");
+        return new PersistOutcome(
+                action,
+                created,
+                saved.getStatus(),
+                priceReference == null ? "feed_only" : priceReference.source(),
+                priceReference == null ? null : priceReference.symbol(),
+                priceReference == null ? null : priceReference.price(),
+                elapsedMs(startedNs)
+        );
+    }
+
+    private void applyCommonFields(
+            FuturesPositionEntity entity,
+            HyperliquidMappedDelta mapped,
+            OperacionDto operation,
+            BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference,
+            HyperliquidDirectCopyDispatchResult dispatchResult
+    ) {
+        HyperliquidDeltaRequest request = mapped.request();
+        BigDecimal sizeQty = nonNegative(operation.getSizeQty());
+        BigDecimal feedPrice = nonNegative(firstNonNull(operation.getPrecioMercado(), operation.getPrecioEntrada(), ZERO));
+        BigDecimal normalizedPrice = priceReference == null ? null : priceReference.price();
+        BigDecimal priceForNotional = positiveOrNull(firstNonNull(normalizedPrice, feedPrice));
+        BigDecimal notional = nonNegative(firstNonNull(operation.getNotionalUsd(), operation.getSize(), sizeQty.multiply(nonZero(priceForNotional))));
+        if (sizeQty.compareTo(ZERO) > 0 && priceForNotional != null) {
+            notional = sizeQty.multiply(priceForNotional).setScale(CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+        }
+
+        entity.setPlatform(PLATFORM);
+        entity.setVenue(VENUE);
+        entity.setAccountId(lower(firstNonBlank(operation.getIdCuenta(), mapped.wallet())));
+        entity.setSymbol(firstNonBlank(operation.getParSymbol(), mapped.symbol()));
+        entity.setSide(operation.getTipoOperacion());
+        entity.setOperationType(operation.getTipoOperacion() == null ? safeUpper(mapped.side()) : operation.getTipoOperacion().name());
+        entity.setLeverage(positiveOrDefault(request == null ? null : request.leverage(), ONE));
+        entity.setSizeQty(sizeQty);
+        entity.setNotionalUsd(nonNegative(notional));
+        entity.setMarginUsedUsd(nonNegative(operation.getMarginUsedUsd()));
+        entity.setSizeLegacy(nonNegative(firstNonNull(notional, operation.getSize(), operation.getNotionalUsd(), sizeQty)));
+        if (entity.getEntryPrice() == null || entity.getEntryPrice().compareTo(ZERO) <= 0) {
+            entity.setEntryPrice(nonNegative(firstNonNull(normalizedPrice, operation.getPrecioEntrada(), operation.getPrecioMercado(), ZERO)));
+        }
+        entity.setMarkPrice(nonNegative(firstNonNull(normalizedPrice, operation.getPrecioMercado(), operation.getPrecioEntrada(), entity.getMarkPrice(), ZERO)));
+        entity.setUnrealizedPnlUsd(ZERO);
+        entity.setSourceTs(resolveSourceTs(operation, request));
+        entity.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        entity.setRaw(raw(mapped, operation, priceReference, dispatchResult));
+    }
+
+    private void applyStatusFields(
+            FuturesPositionEntity entity,
+            OperacionEvent event,
+            OperacionDto operation,
+            BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference
+    ) {
+        boolean open = event.getTipo() == OperacionEvent.Tipo.ABIERTA && operation.isOperacionActiva();
+        if (open) {
+            entity.setStatus(PositionStatus.OPEN);
+            entity.setIsActive(true);
+            entity.setClosedAt(null);
+            entity.setExitPrice(null);
+            return;
+        }
+
+        OffsetDateTime closedAt = toOffsetDateTime(firstNonNull(operation.getFechaCierre(), operation.getFechaCreacion(), Instant.now()));
+        BigDecimal exitPrice = nonNegative(firstNonNull(
+                priceReference == null ? null : priceReference.price(),
+                operation.getPrecioCierre(),
+                operation.getPrecioMercado(),
+                operation.getPrecioEntrada(),
+                entity.getMarkPrice(),
+                ZERO
+        ));
+        entity.setStatus(PositionStatus.CLOSED);
+        entity.setIsActive(false);
+        entity.setClosedAt(closedAt);
+        entity.setExitPrice(exitPrice);
+        entity.setMarkPrice(exitPrice);
+        entity.setRealizedPnlUsd(realizedPnl(entity.getSide(), entity.getSizeQty(), entity.getEntryPrice(), exitPrice));
+        entity.setUnrealizedPnlUsd(ZERO);
+    }
+
+    private void hydrateActivePositionCache() {
+        if (!hydrateOpenPositions || !enabled) {
+            return;
+        }
+        long startedNs = System.nanoTime();
+        try {
+            List<FuturesPositionEntity> active = repository.findAllActiveByPlatformAndStatus(PLATFORM, PositionStatus.OPEN.name());
+            int added = 0;
+            for (FuturesPositionEntity entity : active) {
+                if (entity == null || entity.getIdFuturesPosition() == null) {
+                    continue;
+                }
+                String key = positionKey(entity.getAccountId(), entity.getSymbol(), entity.getSide() == null ? null : entity.getSide().name());
+                if (key == null) {
+                    continue;
+                }
+                activeOriginIds.put(key, entity.getIdFuturesPosition());
+                added++;
+            }
+            log.info("event=hyperliquid.origin_store.hydrate.ok activePositions={} cached={} elapsedMs={}", active.size(), added, elapsedMs(startedNs));
+        } catch (DataAccessException | IllegalStateException | IllegalArgumentException ex) {
+            log.warn("event=hyperliquid.origin_store.hydrate.failed errClass={} errMsg=\"{}\" elapsedMs={}",
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
+        }
+    }
+
+    private boolean isClosing(HyperliquidMappedDelta mapped) {
+        return mapped.event() != null && mapped.event().getTipo() == OperacionEvent.Tipo.CERRADA;
+    }
+
+    private UUID fallbackLifecycleId(HyperliquidMappedDelta mapped) {
+        String seed = "hyperliquid|direct|orphan-close|" + firstNonBlank(mapped.idempotencyKey(), mapped.positionKey(), UUID.randomUUID().toString());
+        return UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String positionKey(String wallet, String symbol, String side) {
+        String cleanWallet = lower(firstNonBlank(wallet, null));
+        String cleanSymbol = firstNonBlank(symbol, null);
+        String cleanSide = firstNonBlank(side, null);
+        if (cleanWallet == null || cleanSymbol == null || cleanSide == null) {
+            return null;
+        }
+        return "hyperliquid-position:" + cleanWallet + ':' + cleanSymbol + ':' + cleanSide;
+    }
+
+    private JsonNode raw(
+            HyperliquidMappedDelta mapped,
+            OperacionDto operation,
+            BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference,
+            HyperliquidDirectCopyDispatchResult dispatchResult
+    ) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("__entry_price_feed", operation.getPrecioEntrada());
+        meta.put("__mark_price_feed", operation.getPrecioMercado());
+        meta.put("__price_source", priceReference == null ? "feed_only" : priceReference.source());
+        meta.put("__price_correction_pending", priceReference == null);
+        if (priceReference != null) {
+            meta.put("__price_corrected", priceReference.price());
+            meta.put("__price_corrected_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+            meta.put("__price_binance_symbol", priceReference.symbol());
+            meta.put("__price_binance_reference_ts", priceReference.referenceTs().toString());
+            meta.put("__price_binance_reference_diff_ms", priceReference.referenceDiffMs());
+            meta.put("__price_binance_fetch_elapsed_ms", priceReference.fetchElapsedMs());
+        }
+        if (dispatchResult != null) {
+            meta.put("__direct_copy_eligible_users", dispatchResult.eligibleUsers());
+            meta.put("__direct_copy_submitted_tasks", dispatchResult.submittedTasks());
+            meta.put("__direct_copy_fallback_jobs", dispatchResult.fallbackJobs());
+            meta.put("__direct_copy_fallback_used", dispatchResult.fallbackUsed());
+        }
+
+        Map<String, Object> raw = new LinkedHashMap<>();
+        raw.put("source", "ms-signals-orc.hyperliquid.direct_ingest");
+        raw.put("idempotencyKey", mapped.idempotencyKey());
+        raw.put("positionKey", mapped.positionKey());
+        raw.put("deltaType", mapped.deltaType());
+        raw.put("wallet", mapped.wallet());
+        raw.put("symbol", mapped.symbol());
+        raw.put("side", mapped.side());
+        raw.put("operationActive", operation.isOperacionActiva());
+        raw.put("request", mapped.request());
+        raw.put("__meta", meta);
+        return objectMapper.valueToTree(raw);
+    }
+
+    private BigDecimal realizedPnl(com.apunto.engine.shared.enums.PositionSide side, BigDecimal sizeQty, BigDecimal entryPrice, BigDecimal exitPrice) {
+        BigDecimal qty = nonNegative(sizeQty);
+        BigDecimal entry = nonNegative(entryPrice);
+        BigDecimal exit = nonNegative(exitPrice);
+        if (qty.compareTo(ZERO) <= 0 || entry.compareTo(ZERO) <= 0 || exit.compareTo(ZERO) <= 0 || side == null) {
+            return ZERO;
+        }
+        BigDecimal diff = side.name().equals("SHORT") ? entry.subtract(exit) : exit.subtract(entry);
+        return diff.multiply(qty).setScale(CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+    }
+
+    private OffsetDateTime resolveCreatedAt(OperacionDto operation, HyperliquidDeltaRequest request) {
+        if (operation.getFechaCreacion() != null) {
+            return toOffsetDateTime(operation.getFechaCreacion());
+        }
+        if (request != null && request.sourceTs() != null && request.sourceTs() > 0) {
+            return OffsetDateTime.ofInstant(Instant.ofEpochMilli(request.sourceTs()), ZoneOffset.UTC);
+        }
+        return OffsetDateTime.now(ZoneOffset.UTC);
+    }
+
+    private OffsetDateTime resolveSourceTs(OperacionDto operation, HyperliquidDeltaRequest request) {
+        if (request != null && request.sourceTs() != null && request.sourceTs() > 0) {
+            return OffsetDateTime.ofInstant(Instant.ofEpochMilli(request.sourceTs()), ZoneOffset.UTC);
+        }
+        if (operation.getFechaCreacion() != null) {
+            return toOffsetDateTime(operation.getFechaCreacion());
+        }
+        return OffsetDateTime.now(ZoneOffset.UTC);
+    }
+
+    private OffsetDateTime toOffsetDateTime(Instant instant) {
+        return OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
+    }
+
+    private BigDecimal nonNegative(BigDecimal value) {
+        if (value == null) {
+            return ZERO;
+        }
+        return value.signum() < 0 ? value.abs() : value;
+    }
+
+    private BigDecimal nonZero(BigDecimal value) {
+        return value == null ? ZERO : value;
+    }
+
+    private BigDecimal positiveOrNull(BigDecimal value) {
+        return value != null && value.compareTo(ZERO) > 0 ? value : null;
+    }
+
+    private BigDecimal positiveOrDefault(BigDecimal value, BigDecimal fallback) {
+        if (value == null || value.compareTo(ZERO) <= 0) {
+            return fallback;
+        }
+        return value;
+    }
+
+    private String lower(String value) {
+        return value == null ? null : value.toLowerCase(Locale.ROOT);
+    }
+
+    private String safeUpper(String value) {
+        return value == null ? "UNKNOWN" : value.toUpperCase(Locale.ROOT);
+    }
+
+    private String requireText(String value, String message) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(message);
+        }
+        return value.trim();
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first.trim();
+        }
+        if (second != null && !second.isBlank()) {
+            return second.trim();
+        }
+        return null;
+    }
+
+    private String firstNonBlank(String first, String second, String third) {
+        String value = firstNonBlank(first, second);
+        return value != null ? value : firstNonBlank(third, null);
+    }
+
+    @SafeVarargs
+    private <T> T firstNonNull(T... values) {
+        if (values == null) {
+            return null;
+        }
+        for (T value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private long elapsedMs(long startedNs) {
+        return Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
+    }
+
+    private UUID originId(HyperliquidMappedDelta mapped) {
+        return mapped == null || mapped.event() == null || mapped.event().getOperacion() == null
+                ? null
+                : mapped.event().getOperacion().getIdOperacion();
+    }
+
+    private String safeTag(String value) {
+        if (value == null || value.isBlank()) {
+            return "unknown";
+        }
+        return value.length() > 64 ? value.substring(0, 64) : value;
+    }
+
+    private String safeLog(String value) {
+        if (value == null || value.isBlank()) {
+            return "NA";
+        }
+        String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
+        return clean.length() > 500 ? clean.substring(0, 500) : clean;
+    }
+
+    private record PersistTask(
+            HyperliquidMappedDelta mappedDelta,
+            HyperliquidDirectCopyDispatchResult dispatchResult,
+            long acceptedNs
+    ) {
+    }
+
+    private record PersistOutcome(
+            String action,
+            boolean created,
+            PositionStatus status,
+            String priceSource,
+            String binanceSymbol,
+            BigDecimal binancePrice,
+            long elapsedMs
+    ) {
+    }
+
+    private static final class NamedThreadFactory implements ThreadFactory {
+        private final String prefix;
+        private final AtomicInteger sequence = new AtomicInteger(1);
+
+        private NamedThreadFactory(String prefix) {
+            this.prefix = prefix;
+        }
+
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, prefix + sequence.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        }
+    }
+}

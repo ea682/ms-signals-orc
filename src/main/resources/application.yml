@@ -142,3 +142,14 @@ hyperliquid:
     dedupe-ttl-seconds: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_TTL_SECONDS:30}
     log-interval-ms: ${HYPERLIQUID_DIRECT_INGEST_LOG_INTERVAL_MS:10000}
     fallback-db-on-direct-failure: ${HYPERLIQUID_DIRECT_INGEST_FALLBACK_DB_ON_DIRECT_FAILURE:true}
+    origin-store:
+      enabled: ${HYPERLIQUID_ORIGIN_STORE_ENABLED:true}
+      worker-threads: ${HYPERLIQUID_ORIGIN_STORE_WORKER_THREADS:2}
+      queue-capacity: ${HYPERLIQUID_ORIGIN_STORE_QUEUE_CAPACITY:20000}
+      hydrate-open-positions: ${HYPERLIQUID_ORIGIN_STORE_HYDRATE_OPEN_POSITIONS:true}
+      fail-copy-on-bind-error: ${HYPERLIQUID_ORIGIN_STORE_FAIL_COPY_ON_BIND_ERROR:false}
+      binance-price-enabled: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_ENABLED:true}
+      binance-price-base-url: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_BASE_URL:https://fapi.binance.com}
+      binance-price-timeout-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_TIMEOUT_MS:350}
+      binance-price-cache-ttl-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_TTL_MS:750}
+      binance-price-cache-size: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_SIZE:2048}
