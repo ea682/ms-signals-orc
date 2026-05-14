@@ -15,6 +15,7 @@ import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.enums.PositionSide;
+import com.apunto.engine.shared.util.LogFmt;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -135,6 +136,32 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                         "Binance rate limit ejecutando orden: " + safeLog(err.binanceMsg()),
                         ex,
                         details
+                );
+            }
+
+            if (isBinanceMinNotionalReject(err)) {
+                throw new SkipExecutionException(
+                        "binance_min_notional_rejected",
+                        "Binance rechazó la orden porque el notional quedó bajo el mínimo permitido",
+                        LogFmt.kv(
+                                "originId", safeNull(dto.getOriginId()),
+                                "userId", safeNull(dto.getUserId()),
+                                "wallet", safeNull(dto.getWalletId()),
+                                "symbol", safeNull(dto.getSymbol()),
+                                "side", dto.getSide() == null ? "" : dto.getSide().name(),
+                                "type", dto.getType() == null ? "" : dto.getType().name(),
+                                "positionSide", dto.getPositionSide() == null ? "" : dto.getPositionSide().name(),
+                                "qty", safeNull(dto.getQuantity()),
+                                "quantity", safeNull(dto.getQuantity()),
+                                "reduceOnly", dto.isReduceOnly(),
+                                "reduceOnlySent", reduceOnlyLogValue(reduceOnlyForClient),
+                                "httpStatus", Integer.toString(err.httpStatus()),
+                                "errorCode", safeNull(err.errorCode()),
+                                "binanceCode", safeNull(err.binanceCode()),
+                                "binanceMsg", safeNull(safeLog(err.binanceMsg())),
+                                "traceId", safeNull(err.traceId()),
+                                "path", safeNull(err.path())
+                        )
                 );
             }
 
@@ -280,6 +307,21 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
 
     private boolean isHedgePositionSide(PositionSide side) {
         return side == PositionSide.LONG || side == PositionSide.SHORT;
+    }
+
+    private boolean isBinanceMinNotionalReject(BinanceHttpError err) {
+        if (err == null) {
+            return false;
+        }
+        if ("-4164".equals(err.binanceCode())) {
+            return true;
+        }
+        String msg = err.binanceMsg();
+        if (msg == null || msg.isBlank()) {
+            return false;
+        }
+        String lower = msg.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("notional") && lower.contains("no smaller than");
     }
 
     private String reduceOnlyLogValue(Boolean reduceOnly) {

@@ -192,6 +192,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     @Value("${copy.rules.min-notional-floor-usdt:0}")
     private BigDecimal configuredMinNotionalFloor;
 
+    @Value("${copy.rules.min-notional-safety-pct:0.05}")
+    private BigDecimal minNotionalSafetyPct;
+
     private final CopyTradingMapper copyTradingMapper;
     private final FuturesPositionService futuresPositionService;
 
@@ -2684,7 +2687,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal minNotionalFloor =
                 configuredMinNotionalFloor == null ? ZERO : configuredMinNotionalFloor.max(ZERO);
 
-        final BigDecimal effectiveMinNotional = exchangeMinNotional.max(minNotionalFloor);
+        final BigDecimal baseMinNotional = exchangeMinNotional.max(minNotionalFloor);
+        final BigDecimal safetyPct = safePct(minNotionalSafetyPct, new BigDecimal("0.20"));
+        final BigDecimal effectiveMinNotional = baseMinNotional
+                .multiply(BigDecimal.ONE.add(safetyPct))
+                .setScale(DEFAULT_CALC_SCALE, RoundingMode.CEILING)
+                .stripTrailingZeros();
 
         return new SymbolRules(stepSize, minQty, exchangeMinNotional, effectiveMinNotional, finalScale);
     }
