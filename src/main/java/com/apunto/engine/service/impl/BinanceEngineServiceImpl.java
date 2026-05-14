@@ -107,7 +107,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_PREP_SKIP_NO_ROOM = "event=operation.open.skip_no_room originId={} userId={} wallet={} symbol={} walletBudget={} usedMargin={} reserve={} hardCap={}";
     private static final String LOG_PREP_INVALID_ENTRY = "event=operation.open.invalid_entry_price originId={} userId={} wallet={} reason=entryPrice<=0";
     private static final String LOG_PREP_INVALID_SYMBOL = "event=operation.open.invalid_symbol originId={} userId={} wallet={} reason=symbol_blank";
-    private static final String LOG_PREP_SKIP_TOO_SMALL = "event=operation.open.skip_too_small originId={} userId={} wallet={} symbol={} notionalMax={}";
+    private static final String LOG_PREP_SKIP_TOO_SMALL = "event=operation.open.skip_too_small originId={} userId={} wallet={} symbol={} notional={}";
     private static final String LOG_PREP_SKIP_SYMBOL_RULES = "event=operation.open.skip_symbol_rules originId={} userId={} wallet={} symbol={} notionalMax={}";
     private static final String LOG_PREP_SKIP_NOTIONAL_ZERO = "event=operation.open.skip_notional_zero originId={} userId={} wallet={} symbol={}";
     private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} sourceMargin={} capitalReference={} fraction={} walletBudget={} usedMargin={} availableBufferedMargin={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={} copyByMinNotional={}";
@@ -1096,6 +1096,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                             notionalBudgetCeiling.toPlainString());
                 }
 
+                final String legPositionSide = leg.getSide() == null ? "NA" : leg.getSide().name();
+                final String legOrderSide = switch (legPositionSide) {
+                    case "LONG" -> Side.BUY.name();
+                    case "SHORT" -> Side.SELL.name();
+                    default -> "NA";
+                };
+
                 BigDecimal rawQty = targetNotional.divide(priceRef, DEFAULT_CALC_SCALE, RoundingMode.DOWN);
 
                 BigDecimal targetQty = adjustQuantityToBinanceRules(symbol, rawQty, priceRef, rules, notionalBudgetCeiling);
@@ -1121,10 +1128,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                             "qty_adjusted_zero",
                             "Target descartado porque la cantidad quedó en 0 tras aplicar reglas Binance",
                             LogFmt.kv(
+                                    "wallet", leg.getWalletId(),
                                     "rawSymbol", leg.getSymbol(),
                                     "symbol", symbol,
+                                    "side", legOrderSide,
+                                    "positionSide", legPositionSide,
+                                    "qty", targetQty,
+                                    "qtyRaw", rawQty,
+                                    "qtyFinal", targetQty,
                                     "candidateNotional", targetNotional,
                                     "priceRef", priceRef,
+                                    "notionalFinal", targetQty.multiply(priceRef),
+                                    "notionalBudgetCeiling", notionalBudgetCeiling,
+                                    "effectiveMinNotional", rules.effectiveMinNotional,
+                                    "exchangeMinNotional", rules.exchangeMinNotional,
                                     "stepSize", rules.stepSize,
                                     "minQty", rules.minQty,
                                     "qtyScale", rules.qtyScale,
@@ -2009,6 +2026,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
         BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+        final BigDecimal initialTargetNotional = targetNotional;
         boolean copyByMinNotional = false;
 
         final BinanceFuturesSymbolInfoClientDto symbolInfo = symbolsBySymbol.get(symbol);
@@ -2122,8 +2140,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     notionalMax.toPlainString());
         }
 
-        BigDecimal quantity = targetNotional.divide(entryPrice, DEFAULT_CALC_SCALE, RoundingMode.DOWN);
-        quantity = adjustQuantityToBinanceRules(symbol, quantity, entryPrice, rules, notionalMax);
+        final String sourcePositionSide = originOperation.getTipoOperacion() == null
+                ? "NA"
+                : originOperation.getTipoOperacion().name();
+        final String orderSide = switch (sourcePositionSide) {
+            case "LONG" -> Side.BUY.name();
+            case "SHORT" -> Side.SELL.name();
+            default -> "NA";
+        };
+
+        final BigDecimal quantityRaw = targetNotional.divide(entryPrice, DEFAULT_CALC_SCALE, RoundingMode.DOWN);
+        final BigDecimal quantityAfterRules = adjustQuantityToBinanceRules(symbol, quantityRaw, entryPrice, rules, notionalMax);
+        BigDecimal quantity = quantityAfterRules;
         if (copyByMinNotional || quantity.multiply(entryPrice).compareTo(rules.effectiveMinNotional) < 0) {
             quantity = adjustQuantityUpToMinNotional(
                     symbol,
@@ -2139,12 +2167,30 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             throw new SkipExecutionException(
                     "qty_adjusted_zero",
                     "Cantidad quedó en 0 tras aplicar reglas Binance (step/minQty/precision/budget)",
-                    com.apunto.engine.shared.util.LogFmt.kv(
+                    LogFmt.kv(
                             "wallet", walletId,
                             "symbol", symbol,
-                            "qtyRaw", quantity,
+                            "side", orderSide,
+                            "positionSide", sourcePositionSide,
+                            "qty", quantity,
+                            "qtyRaw", quantityRaw,
+                            "qtyAfterRules", quantityAfterRules,
+                            "qtyFinal", quantity,
+                            "targetNotional", targetNotional,
+                            "originalTargetNotional", initialTargetNotional,
                             "entryPrice", entryPrice,
+                            "notionalFinal", quantity.multiply(entryPrice),
                             "notionalMax", notionalMax,
+                            "effectiveMinNotional", rules.effectiveMinNotional,
+                            "exchangeMinNotional", rules.exchangeMinNotional,
+                            "walletBudget", walletMarginBudget,
+                            "availableBufferedMargin", availableBufferedMargin,
+                            "usedMargin", usedMargin,
+                            "sourceMargin", sourceMargin,
+                            "capitalReference", capitalReference,
+                            "fraction", fractionOfBaseUsed,
+                            "leverage", leverage,
+                            "copyByMinNotional", copyByMinNotional,
                             "stepSize", rules.stepSize,
                             "minQty", rules.minQty,
                             "qtyScale", rules.qtyScale
