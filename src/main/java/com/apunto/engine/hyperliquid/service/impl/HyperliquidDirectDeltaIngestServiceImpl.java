@@ -159,7 +159,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         HyperliquidMappedDelta mapped = task.mappedDelta();
         try {
             HyperliquidMappedDelta copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
-            HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady.event());
+            HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady);
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
             processed.incrementAndGet();
             long elapsedMs = elapsedMs(startedNs);

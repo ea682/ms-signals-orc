@@ -6,6 +6,7 @@ import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
+import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.repository.FuturesPositionRepository;
 import com.apunto.engine.shared.enums.PositionStatus;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -310,6 +311,19 @@ public class HyperliquidOriginPositionStoreService {
         }
 
         boolean closing = isClosing(mapped);
+        if (!created && shouldIgnoreNonClosingAfterClose(entity, mapped)) {
+            activeOriginIds.remove(mapped.positionKey(), entity.getIdFuturesPosition());
+            return new PersistOutcome(
+                    "stale_ignore",
+                    false,
+                    entity.getStatus(),
+                    priceReference == null ? "feed_only" : priceReference.source(),
+                    priceReference == null ? null : priceReference.symbol(),
+                    priceReference == null ? null : priceReference.price(),
+                    elapsedMs(startedNs)
+            );
+        }
+
         applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing);
         applyStatusFields(entity, event, operation, priceReference);
 
@@ -337,6 +351,27 @@ public class HyperliquidOriginPositionStoreService {
                 priceReference == null ? null : priceReference.price(),
                 elapsedMs(startedNs)
         );
+    }
+
+
+    private boolean shouldIgnoreNonClosingAfterClose(FuturesPositionEntity entity, HyperliquidMappedDelta mapped) {
+        if (entity == null || entity.getStatus() != PositionStatus.CLOSED || isClosing(mapped)) {
+            return false;
+        }
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(mapped == null ? null : mapped.deltaType());
+        if (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE || deltaType == HyperliquidDeltaType.FLIP) {
+            log.info("event=hyperliquid.origin_store.lifecycle_stale_ignored originId={} positionKey={} wallet={} symbol={} side={} deltaType={} currentStatus={} closedAt={}",
+                    entity.getIdFuturesPosition(),
+                    mapped == null ? "NA" : safeLog(mapped.positionKey()),
+                    mapped == null ? "NA" : safeLog(mapped.wallet()),
+                    mapped == null ? "NA" : safeLog(mapped.symbol()),
+                    mapped == null ? "NA" : safeLog(mapped.side()),
+                    deltaType,
+                    entity.getStatus(),
+                    entity.getClosedAt());
+            return true;
+        }
+        return false;
     }
 
     private void applyCommonFields(
