@@ -1,5 +1,9 @@
 server:
   port: ${PORT:4108}
+  error:
+    include-message: never
+    include-binding-errors: never
+    include-stacktrace: never
 
 rest-client:
   timeout:
@@ -12,12 +16,15 @@ rest-client:
 
 logging:
   pattern:
-    console: '%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%-5level) %clr([%t]){faint} %clr(%logger{36}){cyan} : %msg%n%wex'
+    console: "ts=%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%level app=${spring.application.name} env=${APP_ENV:local} thread=\"%thread\" logger=\"%logger{36}\" traceId=%X{traceId:-NA} %msg%n%wEx"
 
 spring:
+  application:
+    name: ${SPRING_APPLICATION_NAME:ms-signals-orc}
+
   output:
     ansi:
-      enabled: ALWAYS
+      enabled: ${SPRING_OUTPUT_ANSI_ENABLED:NEVER}
 
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:192.168.1.123:9094}
@@ -141,7 +148,7 @@ hyperliquid:
     queue-capacity: ${HYPERLIQUID_DIRECT_INGEST_QUEUE_CAPACITY:20000}
     worker-threads: ${HYPERLIQUID_DIRECT_INGEST_WORKER_THREADS:4}
     reject-when-disabled: ${HYPERLIQUID_DIRECT_INGEST_REJECT_WHEN_DISABLED:true}
-    dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_ENABLED:false}
+    dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_ENABLED:true}
     dedupe-ttl-seconds: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_TTL_SECONDS:30}
     log-interval-ms: ${HYPERLIQUID_DIRECT_INGEST_LOG_INTERVAL_MS:10000}
     fallback-db-on-direct-failure: ${HYPERLIQUID_DIRECT_INGEST_FALLBACK_DB_ON_DIRECT_FAILURE:true}
@@ -151,6 +158,7 @@ hyperliquid:
       queue-capacity: ${HYPERLIQUID_ORIGIN_STORE_QUEUE_CAPACITY:20000}
       hydrate-open-positions: ${HYPERLIQUID_ORIGIN_STORE_HYDRATE_OPEN_POSITIONS:true}
       fail-copy-on-bind-error: ${HYPERLIQUID_ORIGIN_STORE_FAIL_COPY_ON_BIND_ERROR:false}
+      skip-late-adjustments: ${HYPERLIQUID_ORIGIN_STORE_SKIP_LATE_ADJUSTMENTS:true}
       binance-price-enabled: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_ENABLED:true}
       binance-price-base-url: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_BASE_URL:https://fapi.binance.com}
       binance-price-timeout-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_TIMEOUT_MS:350}

@@ -14,6 +14,7 @@ import com.apunto.engine.service.OperacionEventIngestService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.shared.exception.EngineException;
+import com.apunto.engine.shared.exception.ValidationException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -39,7 +40,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private static final String ERR_ID_NULL = "El idOperacion no puede ser null";
 
     private static final String LOG_ENQUEUED =
-            "event=copy.execution.enqueued originId={} wallet={} tipo={} usersCached={} eligibleUsers={} eligibleUserIds={} enqueued={} allocationFilter={}";
+            "event=copy.execution.enqueued originId={} wallet={} symbol={} tipo={} action={} copyIntent={} deltaType={} usersCached={} eligibleUsers={} eligibleUserIds={} enqueued={} allocationFilter={}";
 
     private final UserDetailCachedService userDetailCachedService;
     private final UserCopyAllocationService userCopyAllocationService;
@@ -72,6 +73,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             final String originId = operacion.getIdOperacion().toString();
             final String walletId = operacion.getIdCuenta();
             final CopyJobAction action = mapAction(event.getTipo());
+            final HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
 
             final List<UserDetailDto> usersCached = safeUsers(userDetailCachedService.getUsers());
             final List<UserDetailDto> eligibleUsers = applyBusinessRules(event, action, resolveCandidateUsers(event, action, usersCached));
@@ -82,7 +84,11 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             log.info(LOG_ENQUEUED,
                     originId,
                     walletId,
+                    operacion.getParSymbol(),
                     event.getTipo(),
+                    action,
+                    copyIntent(action, deltaType),
+                    deltaType,
                     usersCached.size(),
                     eligibleUsers.size(),
                     userIdsCsv(eligibleUsers),
@@ -171,7 +177,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
 
     private void requireNonNull(Object value, String message) {
         if (value == null) {
-            throw new IllegalArgumentException(message);
+            throw new ValidationException(message, java.util.Map.of("reason", "required_value_missing"));
         }
     }
 
@@ -230,6 +236,19 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                 .sorted()
                 .limit(20)
                 .collect(Collectors.joining(","));
+    }
+
+    private String copyIntent(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        if (action == CopyJobAction.CLOSE) {
+            return "CLOSE";
+        }
+        if (action == CopyJobAction.OPEN && deltaType != null && deltaType.canAdjustExistingCopy()) {
+            return "ADJUST";
+        }
+        if (action == CopyJobAction.OPEN) {
+            return "OPEN";
+        }
+        return "UNKNOWN";
     }
 
     private CopyJobAction mapAction(OperacionEvent.Tipo tipo) {
