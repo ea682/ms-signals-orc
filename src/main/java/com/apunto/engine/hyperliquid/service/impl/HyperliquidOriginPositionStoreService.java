@@ -6,7 +6,9 @@ import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
+import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.repository.FuturesPositionRepository;
+import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
 import com.apunto.engine.shared.enums.PositionStatus;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -60,6 +62,7 @@ public class HyperliquidOriginPositionStoreService {
     private final FuturesPositionRepository repository;
     private final ObjectMapper objectMapper;
     private final BinanceFuturesPriceNormalizerService priceNormalizerService;
+    private final BinanceFuturesSymbolCatalog symbolCatalog;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
     private final boolean enabled;
@@ -83,6 +86,7 @@ public class HyperliquidOriginPositionStoreService {
             FuturesPositionRepository repository,
             ObjectMapper objectMapper,
             BinanceFuturesPriceNormalizerService priceNormalizerService,
+            BinanceFuturesSymbolCatalog symbolCatalog,
             PlatformTransactionManager transactionManager,
             MeterRegistry meterRegistry,
             @Value("${hyperliquid.direct-ingest.origin-store.enabled:true}") boolean enabled,
@@ -94,6 +98,7 @@ public class HyperliquidOriginPositionStoreService {
         this.repository = repository;
         this.objectMapper = objectMapper;
         this.priceNormalizerService = priceNormalizerService;
+        this.symbolCatalog = symbolCatalog;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
         this.enabled = enabled;
@@ -224,6 +229,23 @@ public class HyperliquidOriginPositionStoreService {
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mapped = task.mappedDelta();
         try {
+            if (isUnsupportedBinanceSymbol(mapped)) {
+                rejected.incrementAndGet();
+                meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "binance_symbol_unsupported").increment();
+                log.info("event=hyperliquid.origin_store.skipped reasonCode=binance_symbol_unsupported originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} cacheSize={} queueDelayMs={} elapsedMs={} queueDepth={}",
+                        originId(mapped),
+                        safeLog(mapped.idempotencyKey()),
+                        safeLog(mapped.positionKey()),
+                        safeLog(mapped.wallet()),
+                        safeLog(mapped.symbol()),
+                        safeLog(mapped.side()),
+                        safeLog(mapped.deltaType()),
+                        symbolCatalog.cachedSymbols(),
+                        elapsedMs(task.acceptedNs()),
+                        elapsedMs(startedNs),
+                        queue.size());
+                return;
+            }
             BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference = resolvePriceReference(mapped);
             Object lock = positionLocks.computeIfAbsent(lockKey(mapped), ignored -> new Object());
             PersistOutcome outcome;
@@ -269,6 +291,17 @@ public class HyperliquidOriginPositionStoreService {
         }
     }
 
+    private boolean isUnsupportedBinanceSymbol(HyperliquidMappedDelta mapped) {
+        if (mapped == null || mapped.event() == null || mapped.event().getOperacion() == null) {
+            return true;
+        }
+        String symbol = mapped.event().getOperacion().getParSymbol();
+        if (symbol == null || symbol.isBlank()) {
+            symbol = mapped.symbol();
+        }
+        return symbolCatalog.resolve(symbol).isEmpty();
+    }
+
     private BinanceFuturesPriceNormalizerService.BinancePriceReference resolvePriceReference(HyperliquidMappedDelta mapped) {
         if (mapped == null || mapped.event() == null || mapped.event().getOperacion() == null) {
             return null;
@@ -310,6 +343,19 @@ public class HyperliquidOriginPositionStoreService {
         }
 
         boolean closing = isClosing(mapped);
+        if (!created && shouldIgnoreNonClosingAfterClose(entity, mapped)) {
+            activeOriginIds.remove(mapped.positionKey(), entity.getIdFuturesPosition());
+            return new PersistOutcome(
+                    "stale_ignore",
+                    false,
+                    entity.getStatus(),
+                    priceReference == null ? "binance_missing" : priceReference.source(),
+                    priceReference == null ? null : priceReference.symbol(),
+                    priceReference == null ? null : priceReference.price(),
+                    elapsedMs(startedNs)
+            );
+        }
+
         applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing);
         applyStatusFields(entity, event, operation, priceReference);
 
@@ -332,11 +378,32 @@ public class HyperliquidOriginPositionStoreService {
                 action,
                 created,
                 saved.getStatus(),
-                priceReference == null ? "feed_only" : priceReference.source(),
+                priceReference == null ? "binance_missing" : priceReference.source(),
                 priceReference == null ? null : priceReference.symbol(),
                 priceReference == null ? null : priceReference.price(),
                 elapsedMs(startedNs)
         );
+    }
+
+
+    private boolean shouldIgnoreNonClosingAfterClose(FuturesPositionEntity entity, HyperliquidMappedDelta mapped) {
+        if (entity == null || entity.getStatus() != PositionStatus.CLOSED || isClosing(mapped)) {
+            return false;
+        }
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(mapped == null ? null : mapped.deltaType());
+        if (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE || deltaType == HyperliquidDeltaType.FLIP) {
+            log.info("event=hyperliquid.origin_store.lifecycle_stale_ignored originId={} positionKey={} wallet={} symbol={} side={} deltaType={} currentStatus={} closedAt={}",
+                    entity.getIdFuturesPosition(),
+                    mapped == null ? "NA" : safeLog(mapped.positionKey()),
+                    mapped == null ? "NA" : safeLog(mapped.wallet()),
+                    mapped == null ? "NA" : safeLog(mapped.symbol()),
+                    mapped == null ? "NA" : safeLog(mapped.side()),
+                    deltaType,
+                    entity.getStatus(),
+                    entity.getClosedAt());
+            return true;
+        }
+        return false;
     }
 
     private void applyCommonFields(
@@ -349,10 +416,11 @@ public class HyperliquidOriginPositionStoreService {
     ) {
         HyperliquidDeltaRequest request = mapped.request();
         BigDecimal sizeQty = nonNegative(operation.getSizeQty());
-        BigDecimal feedPrice = nonNegative(firstNonNull(operation.getPrecioMercado(), operation.getPrecioEntrada(), ZERO));
         BigDecimal normalizedPrice = priceReference == null ? null : priceReference.price();
-        BigDecimal priceForNotional = positiveOrNull(firstNonNull(normalizedPrice, feedPrice));
-        BigDecimal notional = nonNegative(firstNonNull(operation.getNotionalUsd(), operation.getSize(), sizeQty.multiply(nonZero(priceForNotional))));
+        BigDecimal priceForNotional = positiveOrNull(normalizedPrice);
+        BigDecimal notional = priceForNotional == null
+                ? nonNegative(firstNonNull(entity.getNotionalUsd(), operation.getNotionalUsd(), operation.getSize(), ZERO))
+                : nonNegative(firstNonNull(operation.getNotionalUsd(), operation.getSize(), sizeQty.multiply(priceForNotional)));
         if (sizeQty.compareTo(ZERO) > 0 && priceForNotional != null) {
             notional = sizeQty.multiply(priceForNotional).setScale(CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
         }
@@ -379,9 +447,9 @@ public class HyperliquidOriginPositionStoreService {
             entity.setSizeLegacy(sizeLegacy);
         }
         if (entity.getEntryPrice() == null || entity.getEntryPrice().compareTo(ZERO) <= 0) {
-            entity.setEntryPrice(nonNegative(firstNonNull(normalizedPrice, operation.getPrecioEntrada(), operation.getPrecioMercado(), ZERO)));
+            entity.setEntryPrice(nonNegative(firstNonNull(!closing ? normalizedPrice : null, ZERO)));
         }
-        entity.setMarkPrice(nonNegative(firstNonNull(normalizedPrice, operation.getPrecioMercado(), operation.getPrecioEntrada(), entity.getMarkPrice(), ZERO)));
+        entity.setMarkPrice(nonNegative(firstNonNull(normalizedPrice, entity.getMarkPrice(), ZERO)));
         entity.setUnrealizedPnlUsd(ZERO);
         entity.setSourceTs(resolveSourceTs(operation, request));
         entity.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
@@ -406,9 +474,6 @@ public class HyperliquidOriginPositionStoreService {
         OffsetDateTime closedAt = toOffsetDateTime(firstNonNull(operation.getFechaCierre(), operation.getFechaCreacion(), Instant.now()));
         BigDecimal exitPrice = nonNegative(firstNonNull(
                 priceReference == null ? null : priceReference.price(),
-                operation.getPrecioCierre(),
-                operation.getPrecioMercado(),
-                operation.getPrecioEntrada(),
                 entity.getMarkPrice(),
                 ZERO
         ));
@@ -475,8 +540,10 @@ public class HyperliquidOriginPositionStoreService {
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("__entry_price_feed", operation.getPrecioEntrada());
         meta.put("__mark_price_feed", operation.getPrecioMercado());
-        meta.put("__price_source", priceReference == null ? "feed_only" : priceReference.source());
+        meta.put("__exit_price_feed", operation.getPrecioCierre());
+        meta.put("__price_source", priceReference == null ? "binance_missing" : priceReference.source());
         meta.put("__price_correction_pending", priceReference == null);
+        meta.put("__main_price_columns", "binance_only");
         if (priceReference != null) {
             meta.put("__price_corrected", priceReference.price());
             meta.put("__price_corrected_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
@@ -488,6 +555,7 @@ public class HyperliquidOriginPositionStoreService {
         if (dispatchResult != null) {
             meta.put("__direct_copy_eligible_users", dispatchResult.eligibleUsers());
             meta.put("__direct_copy_submitted_tasks", dispatchResult.submittedTasks());
+            meta.put("__direct_copy_business_skipped", dispatchResult.businessSkipped());
             meta.put("__direct_copy_fallback_jobs", dispatchResult.fallbackJobs());
             meta.put("__direct_copy_fallback_used", dispatchResult.fallbackUsed());
         }

@@ -1,9 +1,9 @@
 package com.apunto.engine.hyperliquid.service;
 
-import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
+import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 
 public interface HyperliquidDirectCopyDispatchService {
 
-    HyperliquidDirectCopyDispatchResult dispatch(OperacionEvent event);
+    HyperliquidDirectCopyDispatchResult dispatch(HyperliquidMappedDelta mappedDelta);
 }

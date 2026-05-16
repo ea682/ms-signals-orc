@@ -28,6 +28,8 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     List<CopyOperationEntity> findAllByIdUserAndIdWalletOriginAndActiveTrue(String idUser, String walletId);
 
+    List<CopyOperationEntity> findAllByActiveTrue();
+
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("""
             UPDATE CopyOperationEntity c
