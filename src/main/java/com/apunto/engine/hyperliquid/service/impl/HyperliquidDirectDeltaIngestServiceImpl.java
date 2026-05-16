@@ -4,6 +4,7 @@ import com.apunto.engine.hyperliquid.config.HyperliquidDirectIngestProperties;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaAcceptedResponse;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 import com.apunto.engine.hyperliquid.exception.HyperliquidDirectIngestRejectedException;
+import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.hyperliquid.service.HyperliquidDirectDeltaIngestService;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.service.HyperliquidDirectCopyDispatchService;
@@ -21,7 +22,9 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 
+import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -116,18 +119,19 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             return response(mappedDelta, false);
         }
 
-        if (properties.isDedupeEnabled() && recentKeys.asMap().putIfAbsent(mappedDelta.idempotencyKey(), Boolean.TRUE) != null) {
+        final String dedupeKey = buildDedupeKey(mappedDelta);
+        if (properties.isDedupeEnabled() && recentKeys.asMap().putIfAbsent(dedupeKey, Boolean.TRUE) != null) {
             duplicates.incrementAndGet();
             meterRegistry.counter("signals.hyperliquid.direct_ingest.duplicates.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
-            log.debug("event=hyperliquid.direct_ingest.duplicate idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
-                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queue.size());
+            log.info("event=hyperliquid.direct_ingest.duplicate dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
+                    dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queue.size());
             return response(mappedDelta, true);
         }
 
-        QueuedDelta queuedDelta = new QueuedDelta(mappedDelta, System.nanoTime());
+        QueuedDelta queuedDelta = new QueuedDelta(mappedDelta, dedupeKey, System.nanoTime());
         if (!queue.offer(queuedDelta)) {
             if (properties.isDedupeEnabled()) {
-                recentKeys.invalidate(mappedDelta.idempotencyKey());
+                recentKeys.invalidate(dedupeKey);
             }
             meterRegistry.counter("signals.hyperliquid.direct_ingest.rejected.total", "reason", "queue_full").increment();
             throw rejected("queue_full", mappedDelta, queue.size());
@@ -135,9 +139,59 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
 
         accepted.incrementAndGet();
         meterRegistry.counter("signals.hyperliquid.direct_ingest.accepted.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
-        log.debug("event=hyperliquid.direct_ingest.accepted idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
-                mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queue.size());
+        log.debug("event=hyperliquid.direct_ingest.accepted dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
+                dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queue.size());
         return response(mappedDelta, false);
+    }
+
+    static String buildDedupeKey(HyperliquidMappedDelta mappedDelta) {
+        if (mappedDelta == null) {
+            return "hyperliquid:missing";
+        }
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(mappedDelta.deltaType());
+        if (!deltaType.canAdjustExistingCopy()) {
+            return firstNonBlank(mappedDelta.idempotencyKey(), mappedDelta.positionKey(), "hyperliquid:missing");
+        }
+        if (mappedDelta.request() == null || mappedDelta.request().sourceTs() == null || mappedDelta.request().sourceTs() <= 0) {
+            return firstNonBlank(mappedDelta.idempotencyKey(), mappedDelta.positionKey(), "hyperliquid:adjustment:missing-source-ts");
+        }
+        return String.join("|",
+                "hyperliquid-adjustment",
+                normalizeKey(mappedDelta.positionKey()),
+                deltaType.name(),
+                String.valueOf(mappedDelta.request().sourceTs()),
+                decimalKey(firstNonNull(mappedDelta.request().sizeQty(), mappedDelta.request().signedSizeQty())),
+                decimalKey(mappedDelta.request().notionalUsd()),
+                decimalKey(mappedDelta.request().marginUsedUsd()),
+                decimalKey(firstNonNull(mappedDelta.request().markPrice(), mappedDelta.request().entryPrice())));
+    }
+
+    private static String firstNonBlank(String first, String second, String fallback) {
+        if (first != null && !first.isBlank()) {
+            return first.trim();
+        }
+        if (second != null && !second.isBlank()) {
+            return second.trim();
+        }
+        return fallback;
+    }
+
+    private static <T> T firstNonNull(T first, T second) {
+        return first != null ? first : second;
+    }
+
+    private static String normalizeKey(String value) {
+        if (value == null || value.isBlank()) {
+            return "NA";
+        }
+        return value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String decimalKey(BigDecimal value) {
+        if (value == null) {
+            return "NA";
+        }
+        return value.stripTrailingZeros().toPlainString();
     }
 
     private void workerLoop() {
@@ -166,16 +220,16 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             long queueDelayMs = elapsedMs(task.acceptedNs());
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
-            log.info("event=hyperliquid.direct_ingest.processed idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} businessSkipped={} fallbackJobs={} fallbackUsed={} queueDelayMs={} elapsedMs={} queueDepth={}",
-                    mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
+            log.info("event=hyperliquid.direct_ingest.processed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} businessSkipped={} fallbackJobs={} fallbackUsed={} queueDelayMs={} elapsedMs={} queueDepth={}",
+                    task.dedupeKey(), mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
                     dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(),
                     queueDelayMs, elapsedMs, queue.size());
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
-            log.error("event=hyperliquid.direct_ingest.failed idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
-                    mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
+            log.error("event=hyperliquid.direct_ingest.failed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
+                    task.dedupeKey(), mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
                     ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queue.size());
         }
     }
@@ -247,7 +301,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         return clean.length() > 1000 ? clean.substring(0, 1000) : clean;
     }
 
-    private record QueuedDelta(HyperliquidMappedDelta mappedDelta, long acceptedNs) {
+    private record QueuedDelta(HyperliquidMappedDelta mappedDelta, String dedupeKey, long acceptedNs) {
     }
 
     private static class NamedThreadFactory implements ThreadFactory {

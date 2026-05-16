@@ -40,7 +40,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private static final String ERR_ID_NULL = "El idOperacion no puede ser null";
 
     private static final String LOG_ENQUEUED =
-            "event=copy.execution.enqueued originId={} wallet={} symbol={} tipo={} action={} copyIntent={} deltaType={} usersCached={} eligibleUsers={} eligibleUserIds={} enqueued={} allocationFilter={}";
+            "event=copy.execution.enqueued originId={} wallet={} symbol={} tipo={} action={} engineAction={} copyIntent={} deltaType={} usersCached={} eligibleUsers={} eligibleUserIds={} enqueued={} allocationFilter={}";
 
     private final UserDetailCachedService userDetailCachedService;
     private final UserCopyAllocationService userCopyAllocationService;
@@ -86,6 +86,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                     walletId,
                     operacion.getParSymbol(),
                     event.getTipo(),
+                    displayAction(action, deltaType),
                     action,
                     copyIntent(action, deltaType),
                     deltaType,
@@ -134,8 +135,8 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                 .toList();
         int skipped = users.size() - allowed.size();
         if (skipped > 0) {
-            log.info("event=copy.execution.business_filter originId={} wallet={} symbol={} action={} deltaType={} eligibleBefore={} eligibleAfter={} skipped={} activeCacheSize={}",
-                    originId, wallet, symbol, action, deltaType, users.size(), allowed.size(), skipped, activeCopyOperationCache.activeSize());
+            log.info("event=copy.execution.business_filter originId={} wallet={} symbol={} action={} engineAction={} deltaType={} eligibleBefore={} eligibleAfter={} skipped={} activeCacheSize={}",
+                    originId, wallet, symbol, displayAction(action, deltaType), action, deltaType, users.size(), allowed.size(), skipped, activeCopyOperationCache.activeSize());
         }
         return allowed;
     }
@@ -143,8 +144,8 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private boolean isBusinessAllowed(String originId, String wallet, String symbol, CopyJobAction action, HyperliquidDeltaType deltaType, UserDetailDto user) {
         String uid = userId(user);
         if (uid == null) {
-            log.info("event=copy.execution.business_skip originId={} userId=NA wallet={} symbol={} action={} deltaType={} reasonCode=user_missing cacheActive=false",
-                    originId, wallet, symbol, action, deltaType);
+            log.info("event=copy.execution.business_skip originId={} userId=NA wallet={} symbol={} action={} engineAction={} deltaType={} reasonCode=user_missing cacheActive=false",
+                    originId, wallet, symbol, displayAction(action, deltaType), action, deltaType);
             return false;
         }
         boolean active = activeCopyOperationCache.isActive(originId, uid);
@@ -152,8 +153,8 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         if (decision.allowed()) {
             return true;
         }
-        log.info("event=copy.execution.business_skip originId={} userId={} wallet={} symbol={} action={} deltaType={} reasonCode={} cacheActive={} activeCacheSize={}",
-                originId, uid, wallet, symbol, action, deltaType, decision.reasonCode(), decision.cacheActive(), activeCopyOperationCache.activeSize());
+        log.info("event=copy.execution.business_skip originId={} userId={} wallet={} symbol={} action={} engineAction={} deltaType={} reasonCode={} cacheActive={} activeCacheSize={}",
+                originId, uid, wallet, symbol, displayAction(action, deltaType), action, deltaType, decision.reasonCode(), decision.cacheActive(), activeCopyOperationCache.activeSize());
         return false;
     }
 
@@ -238,11 +239,23 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                 .collect(Collectors.joining(","));
     }
 
+    private String displayAction(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        String intent = copyIntent(action, deltaType);
+        if ("ADJUST".equals(intent) || "FLIP".equals(intent)) {
+            return intent;
+        }
+        return action == null ? "UNKNOWN" : action.name();
+    }
+
     private String copyIntent(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        HyperliquidDeltaType effectiveDelta = deltaType == null ? HyperliquidDeltaType.UNKNOWN : deltaType;
         if (action == CopyJobAction.CLOSE) {
             return "CLOSE";
         }
-        if (action == CopyJobAction.OPEN && deltaType != null && deltaType.canAdjustExistingCopy()) {
+        if (effectiveDelta == HyperliquidDeltaType.FLIP) {
+            return "FLIP";
+        }
+        if (action == CopyJobAction.OPEN && effectiveDelta.canAdjustExistingCopy()) {
             return "ADJUST";
         }
         if (action == CopyJobAction.OPEN) {

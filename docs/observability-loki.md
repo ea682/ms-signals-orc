@@ -48,3 +48,23 @@ SPRING_OUTPUT_ANSI_ENABLED=NEVER
 HYPERLIQUID_DIRECT_INGEST_DEDUPE_ENABLED=true
 HYPERLIQUID_ORIGIN_STORE_SKIP_LATE_ADJUSTMENTS=true
 ```
+
+## Consultas adicionales para los ajustes finales
+
+Duplicados colapsados por dedupe estable:
+
+```logql
+{app="ms-signals-orc"} | logfmt | event="hyperliquid.direct_ingest.duplicate" | deltaType="RESIZE"
+```
+
+Ajustes bloqueados sin copia activa, con accion legible:
+
+```logql
+{app="ms-signals-orc"} | logfmt | event="hyperliquid.direct_copy.business_skip" | action="ADJUST" | reasonCode="resize_without_open_copy"
+```
+
+RESIZE huerfano que origin_store no debe persistir como OPEN:
+
+```logql
+{app="ms-signals-orc"} | logfmt | event="hyperliquid.origin_store.skipped" | reasonCode=~"late_adjustment_without_active_origin.*"
+```
