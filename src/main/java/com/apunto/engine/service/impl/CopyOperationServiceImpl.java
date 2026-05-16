@@ -4,6 +4,7 @@ import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.entity.CopyOperationEntity;
 import com.apunto.engine.mapper.CopyOperationMapper;
 import com.apunto.engine.repository.CopyOperationRepository;
+import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.CopyOperationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +24,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
     private final CopyOperationRepository copyOperationRepository;
     private final CopyOperationMapper copyOperationMapper;
+    private final ActiveCopyOperationCache activeCopyOperationCache;
 
     @Transactional
     @Override
@@ -35,10 +37,12 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
         try {
             copyOperationRepository.save(entity);
+            activeCopyOperationCache.markOpen(operation);
             log.info("event=copy_operation.insert_ok originId={} userId={} orderId={}",
                     operation.getIdOrderOrigin(), operation.getIdUser(), operation.getIdOrden());
         } catch (DataIntegrityViolationException ex) {
             if (isUniqueViolation(ex)) {
+                activeCopyOperationCache.markOpen(operation);
                 log.info("event=copy_operation.insert_duplicate originId={} userId={} orderId={}",
                         operation.getIdOrderOrigin(), operation.getIdUser(), operation.getIdOrden());
                 return;
@@ -87,6 +91,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
             return;
         }
 
+        activeCopyOperationCache.markClosed(operation.getIdOrderOrigin(), operation.getIdUser());
         log.info("event=copy_operation.close_ok originId={} userId={} active=false updated={}",
                 operation.getIdOrderOrigin(), operation.getIdUser(), updated);
     }
@@ -190,6 +195,11 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         }
 
         copyOperationRepository.save(entity);
+        if (operation.isActive()) {
+            activeCopyOperationCache.markOpen(operation);
+        } else {
+            activeCopyOperationCache.markClosed(operation.getIdOrderOrigin(), operation.getIdUser());
+        }
     }
 
     @Transactional(readOnly = true)

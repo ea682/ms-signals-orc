@@ -20,4 +20,15 @@ public class OperacionEvent {
 
     @JsonAlias("position")
     private OperacionDto operacion;
+
+    /**
+     * Delta original del fast path Hyperliquid: OPEN, RESIZE, UPDATE, CLOSE, FLIP, etc.
+     * Permite aplicar reglas de lifecycle sin consultar la BD en el hot path.
+     */
+    private String deltaType;
+
+    public OperacionEvent(Tipo tipo, OperacionDto operacion) {
+        this.tipo = tipo;
+        this.operacion = operacion;
+    }
 }
