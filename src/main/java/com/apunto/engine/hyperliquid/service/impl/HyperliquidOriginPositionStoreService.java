@@ -6,10 +6,12 @@ import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
+import com.apunto.engine.hyperliquid.exception.HyperliquidOriginLifecycleException;
 import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.repository.FuturesPositionRepository;
 import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
 import com.apunto.engine.shared.enums.PositionStatus;
+import com.apunto.engine.shared.exception.EngineException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -68,6 +70,7 @@ public class HyperliquidOriginPositionStoreService {
     private final boolean enabled;
     private final boolean hydrateOpenPositions;
     private final boolean failCopyOnBindError;
+    private final boolean skipLateAdjustments;
     private final BlockingQueue<PersistTask> queue;
     private final ExecutorService workers;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -75,6 +78,7 @@ public class HyperliquidOriginPositionStoreService {
     private final AtomicLong submitted = new AtomicLong(0);
     private final AtomicLong persisted = new AtomicLong(0);
     private final AtomicLong failed = new AtomicLong(0);
+    private final AtomicLong skipped = new AtomicLong(0);
     private final AtomicLong rejected = new AtomicLong(0);
     private final ConcurrentMap<String, UUID> activeOriginIds = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Object> positionLocks = new ConcurrentHashMap<>();
@@ -93,7 +97,8 @@ public class HyperliquidOriginPositionStoreService {
             @Value("${hyperliquid.direct-ingest.origin-store.worker-threads:2}") int workerThreads,
             @Value("${hyperliquid.direct-ingest.origin-store.queue-capacity:20000}") int queueCapacity,
             @Value("${hyperliquid.direct-ingest.origin-store.hydrate-open-positions:true}") boolean hydrateOpenPositions,
-            @Value("${hyperliquid.direct-ingest.origin-store.fail-copy-on-bind-error:false}") boolean failCopyOnBindError
+            @Value("${hyperliquid.direct-ingest.origin-store.fail-copy-on-bind-error:false}") boolean failCopyOnBindError,
+            @Value("${hyperliquid.direct-ingest.origin-store.skip-late-adjustments:true}") boolean skipLateAdjustments
     ) {
         this.repository = repository;
         this.objectMapper = objectMapper;
@@ -104,10 +109,11 @@ public class HyperliquidOriginPositionStoreService {
         this.enabled = enabled;
         this.hydrateOpenPositions = hydrateOpenPositions;
         this.failCopyOnBindError = failCopyOnBindError;
+        this.skipLateAdjustments = skipLateAdjustments;
         this.queue = new ArrayBlockingQueue<>(Math.max(1, queueCapacity));
         this.workers = Executors.newFixedThreadPool(Math.max(1, workerThreads), new NamedThreadFactory("hl-origin-store-"));
-        log.info("event=hyperliquid.origin_store.config enabled={} workerThreads={} queueCapacity={} hydrateOpenPositions={} failCopyOnBindError={}",
-                enabled, Math.max(1, workerThreads), Math.max(1, queueCapacity), hydrateOpenPositions, failCopyOnBindError);
+        log.info("event=hyperliquid.origin_store.config enabled={} workerThreads={} queueCapacity={} hydrateOpenPositions={} failCopyOnBindError={} skipLateAdjustments={}",
+                enabled, Math.max(1, workerThreads), Math.max(1, queueCapacity), hydrateOpenPositions, failCopyOnBindError, skipLateAdjustments);
     }
 
     @PostConstruct
@@ -129,14 +135,17 @@ public class HyperliquidOriginPositionStoreService {
     public void stop() {
         running.set(false);
         workers.shutdownNow();
-        log.info("event=hyperliquid.origin_store.stopped queueDepth={} submitted={} persisted={} failed={} rejected={} activeCacheSize={}",
-                queue.size(), submitted.get(), persisted.get(), failed.get(), rejected.get(), activeOriginIds.size());
+        log.info("event=hyperliquid.origin_store.stopped queueDepth={} submitted={} persisted={} skipped={} failed={} rejected={} activeCacheSize={}",
+                queue.size(), submitted.get(), persisted.get(), skipped.get(), failed.get(), rejected.get(), activeOriginIds.size());
     }
 
     public HyperliquidMappedDelta bindOriginIdForCopy(HyperliquidMappedDelta mapped) {
         if (mapped == null || mapped.event() == null || mapped.event().getOperacion() == null) {
             if (failCopyOnBindError) {
-                throw new IllegalArgumentException("mapped hyperliquid delta is required");
+                throw new HyperliquidOriginLifecycleException(
+                        "Mapped hyperliquid delta is required",
+                        Map.of("reason", "mapped_delta_missing")
+                );
             }
             return mapped;
         }
@@ -149,6 +158,22 @@ public class HyperliquidOriginPositionStoreService {
 
     public void submitAfterCopy(HyperliquidMappedDelta mapped, HyperliquidDirectCopyDispatchResult dispatchResult) {
         if (!enabled || mapped == null) {
+            return;
+        }
+        if (shouldSkipLateAdjustment(mapped)) {
+            skipped.incrementAndGet();
+            meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "late_adjustment_without_active_origin").increment();
+            log.info("event=hyperliquid.origin_store.skipped reasonCode=late_adjustment_without_active_origin originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} activeCacheSize={} queueDepth={}",
+                    originId(mapped),
+                    safeLog(mapped.idempotencyKey()),
+                    safeLog(mapped.positionKey()),
+                    safeLog(mapped.wallet()),
+                    safeLog(mapped.symbol()),
+                    safeLog(mapped.side()),
+                    safeLog(mapped.deltaType()),
+                    skipLateAdjustments,
+                    activeOriginIds.size(),
+                    queue.size());
             return;
         }
         PersistTask task = new PersistTask(mapped, dispatchResult, System.nanoTime());
@@ -165,28 +190,57 @@ public class HyperliquidOriginPositionStoreService {
 
     private UUID resolveOriginId(HyperliquidMappedDelta mapped) {
         String key = requireText(mapped.positionKey(), "positionKey is required");
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(mapped.deltaType());
         boolean closing = isClosing(mapped);
         if (closing) {
             UUID existing = activeOriginIds.get(key);
             if (existing != null) {
                 return existing;
             }
-            UUID databaseOriginId = findOpenOriginIdForClose(mapped);
+            UUID databaseOriginId = findOpenOriginIdForActivePosition(mapped);
             if (databaseOriginId != null) {
-                activeOriginIds.put(key, databaseOriginId);
-                log.info("event=hyperliquid.origin_store.lifecycle_recovered originId={} positionKey={} wallet={} symbol={} side={} deltaType={} source=db_open_position",
-                        databaseOriginId, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()));
+                cacheRecoveredLifecycle(key, databaseOriginId, mapped, "db_open_position");
                 return databaseOriginId;
             }
             UUID fallback = fallbackLifecycleId(mapped);
-            log.warn("event=hyperliquid.origin_store.lifecycle_missing action=close_fallback originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
+            log.warn("event=hyperliquid.origin_store.lifecycle_missing action=close_fallback reasonCode=close_without_active_origin originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
                     fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()));
             return fallback;
         }
-        return activeOriginIds.computeIfAbsent(key, ignored -> UUID.randomUUID());
+
+        if (deltaType.canStartCopyLifecycle()) {
+            return activeOriginIds.computeIfAbsent(key, ignored -> UUID.randomUUID());
+        }
+
+        if (deltaType.canAdjustExistingCopy()) {
+            UUID existing = activeOriginIds.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            UUID databaseOriginId = findOpenOriginIdForActivePosition(mapped);
+            if (databaseOriginId != null) {
+                cacheRecoveredLifecycle(key, databaseOriginId, mapped, "db_open_position");
+                return databaseOriginId;
+            }
+            UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
+            log.info("event=hyperliquid.origin_store.lifecycle_missing action=adjustment_skip reasonCode=late_adjustment_without_active_origin originId={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={}",
+                    fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()), skipLateAdjustments);
+            return fallback;
+        }
+
+        UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
+        log.info("event=hyperliquid.origin_store.lifecycle_missing action=non_copyable_skip reasonCode=delta_not_lifecycle_start originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
+                fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()));
+        return fallback;
     }
 
-    private UUID findOpenOriginIdForClose(HyperliquidMappedDelta mapped) {
+    private void cacheRecoveredLifecycle(String key, UUID originId, HyperliquidMappedDelta mapped, String source) {
+        activeOriginIds.put(key, originId);
+        log.info("event=hyperliquid.origin_store.lifecycle_recovered originId={} positionKey={} wallet={} symbol={} side={} deltaType={} source={}",
+                originId, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()), source);
+    }
+
+    private UUID findOpenOriginIdForActivePosition(HyperliquidMappedDelta mapped) {
         String accountId = lower(firstNonBlank(mapped.wallet(), null));
         String symbol = firstNonBlank(mapped.symbol(), null);
         String side = safeUpper(mapped.side());
@@ -211,6 +265,28 @@ public class HyperliquidOriginPositionStoreService {
         }
     }
 
+    private boolean shouldSkipLateAdjustment(HyperliquidMappedDelta mapped) {
+        if (!skipLateAdjustments || mapped == null || isClosing(mapped)) {
+            return false;
+        }
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(mapped.deltaType());
+        if (!deltaType.canAdjustExistingCopy()) {
+            return false;
+        }
+        String key = mapped.positionKey();
+        if (key != null && activeOriginIds.containsKey(key)) {
+            return false;
+        }
+        UUID databaseOriginId = findOpenOriginIdForActivePosition(mapped);
+        if (databaseOriginId != null) {
+            if (key != null) {
+                cacheRecoveredLifecycle(key, databaseOriginId, mapped, "db_open_position_before_persist");
+            }
+            return false;
+        }
+        return true;
+    }
+
     private void workerLoop() {
         activeWorkers.incrementAndGet();
         try {
@@ -230,7 +306,7 @@ public class HyperliquidOriginPositionStoreService {
         HyperliquidMappedDelta mapped = task.mappedDelta();
         try {
             if (isUnsupportedBinanceSymbol(mapped)) {
-                rejected.incrementAndGet();
+                skipped.incrementAndGet();
                 meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "binance_symbol_unsupported").increment();
                 log.info("event=hyperliquid.origin_store.skipped reasonCode=binance_symbol_unsupported originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} cacheSize={} queueDelayMs={} elapsedMs={} queueDepth={}",
                         originId(mapped),
@@ -241,6 +317,24 @@ public class HyperliquidOriginPositionStoreService {
                         safeLog(mapped.side()),
                         safeLog(mapped.deltaType()),
                         symbolCatalog.cachedSymbols(),
+                        elapsedMs(task.acceptedNs()),
+                        elapsedMs(startedNs),
+                        queue.size());
+                return;
+            }
+            if (shouldSkipLateAdjustment(mapped)) {
+                skipped.incrementAndGet();
+                meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "late_adjustment_without_active_origin_after_queue").increment();
+                log.info("event=hyperliquid.origin_store.skipped reasonCode=late_adjustment_without_active_origin_after_queue originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} activeCacheSize={} queueDelayMs={} elapsedMs={} queueDepth={}",
+                        originId(mapped),
+                        safeLog(mapped.idempotencyKey()),
+                        safeLog(mapped.positionKey()),
+                        safeLog(mapped.wallet()),
+                        safeLog(mapped.symbol()),
+                        safeLog(mapped.side()),
+                        safeLog(mapped.deltaType()),
+                        skipLateAdjustments,
+                        activeOriginIds.size(),
                         elapsedMs(task.acceptedNs()),
                         elapsedMs(startedNs),
                         queue.size());
@@ -271,7 +365,7 @@ public class HyperliquidOriginPositionStoreService {
                     elapsedMs(task.acceptedNs()),
                     elapsedMs(startedNs),
                     queue.size());
-        } catch (DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
+        } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
             failed.incrementAndGet();
             meterRegistry.timer("signals.hyperliquid.origin_store.persist.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
@@ -325,7 +419,10 @@ public class HyperliquidOriginPositionStoreService {
         OperacionDto operation = event.getOperacion();
         UUID originId = operation.getIdOperacion();
         if (originId == null) {
-            throw new IllegalArgumentException("mapped operation id is required");
+            throw new HyperliquidOriginLifecycleException(
+                    "Mapped operation id is required",
+                    Map.of("reason", "mapped_operation_id_missing")
+            );
         }
 
         FuturesPositionEntity entity = repository.findByIdFuturesPosition(originId).orElse(null);
@@ -664,7 +761,10 @@ public class HyperliquidOriginPositionStoreService {
 
     private String requireText(String value, String message) {
         if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(message);
+            throw new HyperliquidOriginLifecycleException(
+                    message,
+                    Map.of("reason", "required_text_missing", "message", message)
+            );
         }
         return value.trim();
     }
