@@ -3,8 +3,12 @@ package com.apunto.engine.service.impl;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.hyperliquid.model.HyperliquidCopyLifecycleDecision;
+import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
+import com.apunto.engine.hyperliquid.service.HyperliquidCopyLifecycleGuard;
 import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.metric.TradingMetrics;
+import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.OperacionEventIngestService;
 import com.apunto.engine.service.UserCopyAllocationService;
@@ -40,6 +44,8 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private final UserDetailCachedService userDetailCachedService;
     private final UserCopyAllocationService userCopyAllocationService;
     private final CopyExecutionJobService copyExecutionJobService;
+    private final ActiveCopyOperationCache activeCopyOperationCache;
+    private final HyperliquidCopyLifecycleGuard lifecycleGuard;
     private final TradingMetrics tradingMetrics;
 
     @Value("${copy.job.ingest.filter-by-wallet-allocation:true}")
@@ -68,7 +74,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             final CopyJobAction action = mapAction(event.getTipo());
 
             final List<UserDetailDto> usersCached = safeUsers(userDetailCachedService.getUsers());
-            final List<UserDetailDto> eligibleUsers = resolveEligibleUsers(walletId, usersCached);
+            final List<UserDetailDto> eligibleUsers = applyBusinessRules(event, action, resolveCandidateUsers(event, action, usersCached));
             final int enqueued = copyExecutionJobService.enqueueForUsers(event, eligibleUsers, action);
 
             tradingMetrics.jobsEnqueued(action.name(), eligibleUsers.size(), enqueued);
@@ -90,6 +96,77 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         } finally {
             tradingMetrics.ingestDuration(tipo, result, System.nanoTime() - t0);
         }
+    }
+
+
+    private List<UserDetailDto> resolveCandidateUsers(OperacionEvent event, CopyJobAction action, List<UserDetailDto> usersCached) {
+        OperacionDto operation = event.getOperacion();
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
+        if (action == CopyJobAction.CLOSE) {
+            return filterUsersById(usersCached, activeCopyOperationCache.activeUserIds(operation.getIdOperacion().toString()));
+        }
+        if (action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
+            if (deltaType == HyperliquidDeltaType.FLIP) {
+                return filterUsersById(usersCached, activeCopyOperationCache.activeUserIdsByWalletAndSymbol(operation.getIdCuenta(), operation.getParSymbol()));
+            }
+            return filterUsersById(usersCached, activeCopyOperationCache.activeUserIds(operation.getIdOperacion().toString()));
+        }
+        return resolveEligibleUsers(operation.getIdCuenta(), usersCached);
+    }
+
+    private List<UserDetailDto> applyBusinessRules(OperacionEvent event, CopyJobAction action, List<UserDetailDto> users) {
+        if (users == null || users.isEmpty()) {
+            return List.of();
+        }
+        OperacionDto operation = event.getOperacion();
+        String originId = operation.getIdOperacion().toString();
+        String wallet = operation.getIdCuenta();
+        String symbol = operation.getParSymbol();
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
+        List<UserDetailDto> allowed = users.stream()
+                .filter(u -> isBusinessAllowed(originId, wallet, symbol, action, deltaType, u))
+                .toList();
+        int skipped = users.size() - allowed.size();
+        if (skipped > 0) {
+            log.info("event=copy.execution.business_filter originId={} wallet={} symbol={} action={} deltaType={} eligibleBefore={} eligibleAfter={} skipped={} activeCacheSize={}",
+                    originId, wallet, symbol, action, deltaType, users.size(), allowed.size(), skipped, activeCopyOperationCache.activeSize());
+        }
+        return allowed;
+    }
+
+    private boolean isBusinessAllowed(String originId, String wallet, String symbol, CopyJobAction action, HyperliquidDeltaType deltaType, UserDetailDto user) {
+        String uid = userId(user);
+        if (uid == null) {
+            log.info("event=copy.execution.business_skip originId={} userId=NA wallet={} symbol={} action={} deltaType={} reasonCode=user_missing cacheActive=false",
+                    originId, wallet, symbol, action, deltaType);
+            return false;
+        }
+        boolean active = activeCopyOperationCache.isActive(originId, uid);
+        HyperliquidCopyLifecycleDecision decision = lifecycleGuard.decide(action, deltaType, active);
+        if (decision.allowed()) {
+            return true;
+        }
+        log.info("event=copy.execution.business_skip originId={} userId={} wallet={} symbol={} action={} deltaType={} reasonCode={} cacheActive={} activeCacheSize={}",
+                originId, uid, wallet, symbol, action, deltaType, decision.reasonCode(), decision.cacheActive(), activeCopyOperationCache.activeSize());
+        return false;
+    }
+
+    private List<UserDetailDto> filterUsersById(List<UserDetailDto> usersCached, Set<String> userIds) {
+        if (userIds == null || userIds.isEmpty() || usersCached == null || usersCached.isEmpty()) {
+            return List.of();
+        }
+        return usersCached.stream()
+                .filter(Objects::nonNull)
+                .filter(u -> u.getUser() != null && u.getUser().getId() != null)
+                .filter(u -> userIds.contains(u.getUser().getId().toString()))
+                .toList();
+    }
+
+    private String userId(UserDetailDto user) {
+        if (user == null || user.getUser() == null || user.getUser().getId() == null) {
+            return null;
+        }
+        return user.getUser().getId().toString();
     }
 
     private void requireNonNull(Object value, String message) {

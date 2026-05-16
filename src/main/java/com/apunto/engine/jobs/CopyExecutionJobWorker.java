@@ -4,9 +4,13 @@ import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.entity.CopyExecutionJobEntity;
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.hyperliquid.model.HyperliquidCopyLifecycleDecision;
+import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
+import com.apunto.engine.hyperliquid.service.HyperliquidCopyLifecycleGuard;
 import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.jobs.model.CopyJobErrorCategory;
 import com.apunto.engine.metric.TradingMetrics;
+import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.BinanceCopyExecutionService;
 import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.UserDetailCachedService;
@@ -59,6 +63,8 @@ public class CopyExecutionJobWorker {
 
     private final CopyExecutionJobService jobService;
     private final BinanceCopyExecutionService binanceCopyExecutionService;
+    private final ActiveCopyOperationCache activeCopyOperationCache;
+    private final HyperliquidCopyLifecycleGuard lifecycleGuard;
     private final UserDetailCachedService userDetailCachedService;
     private final ObjectMapper objectMapper;
     private final ThreadPoolTaskExecutor executor;
@@ -74,6 +80,8 @@ public class CopyExecutionJobWorker {
     public CopyExecutionJobWorker(
             CopyExecutionJobService jobService,
             BinanceCopyExecutionService binanceCopyExecutionService,
+            ActiveCopyOperationCache activeCopyOperationCache,
+            HyperliquidCopyLifecycleGuard lifecycleGuard,
             UserDetailCachedService userDetailCachedService,
             ObjectMapper objectMapper,
             @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor executor,
@@ -81,6 +89,8 @@ public class CopyExecutionJobWorker {
     ) {
         this.jobService = jobService;
         this.binanceCopyExecutionService = binanceCopyExecutionService;
+        this.activeCopyOperationCache = activeCopyOperationCache;
+        this.lifecycleGuard = lifecycleGuard;
         this.userDetailCachedService = userDetailCachedService;
         this.objectMapper = objectMapper;
         this.executor = executor;
@@ -121,6 +131,33 @@ public class CopyExecutionJobWorker {
         }
     }
 
+
+    private void assertBusinessLifecycleAllowed(CopyExecutionJobEntity job, OperacionEvent event) {
+        if (event == null || event.getDeltaType() == null || event.getDeltaType().isBlank()) {
+            return;
+        }
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
+        boolean active = activeCopyOperationCache.isActive(job.getOriginId(), job.getUserId());
+        HyperliquidCopyLifecycleDecision decision = lifecycleGuard.decide(job.getAction(), deltaType, active);
+        if (decision.allowed()) {
+            return;
+        }
+        OperacionDto op = event.getOperacion();
+        throw new SkipExecutionException(
+                decision.reasonCode(),
+                "Regla de lifecycle de copia bloqueó el job",
+                com.apunto.engine.shared.util.LogFmt.kv(
+                        "originId", job.getOriginId(),
+                        "userId", job.getUserId(),
+                        "wallet", op == null ? null : op.getIdCuenta(),
+                        "symbol", op == null ? null : op.getParSymbol(),
+                        "deltaType", deltaType.name(),
+                        "cacheActive", Boolean.toString(active),
+                        "activeCacheSize", Integer.toString(activeCopyOperationCache.activeSize())
+                )
+        );
+    }
+
     private void submitOrRescheduleOnReject(CopyExecutionJobEntity job) {
         try {
             executor.execute(() -> process(job));
@@ -157,6 +194,8 @@ public class CopyExecutionJobWorker {
             event = readPayload(job);
             log.info("event=copy.job.phase id={} originId={} userId={} action={} phase=load_job elapsedMs={}",
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), elapsedMsSince(phaseNs));
+
+            assertBusinessLifecycleAllowed(job, event);
 
             phaseNs = System.nanoTime();
             UserDetailDto user = resolveUserOrSkip(job.getUserId());

@@ -46,7 +46,7 @@ public record HyperliquidMappedDelta(
                 symbol,
                 side,
                 deltaType,
-                new OperacionEvent(event.getTipo(), reboundOperation),
+                new OperacionEvent(event.getTipo(), reboundOperation, event.getDeltaType()),
                 request
         );
     }
