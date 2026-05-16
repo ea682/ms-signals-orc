@@ -22,6 +22,7 @@ public class CacheConfig {
         CaffeineCache usersCache = new CaffeineCache(
                 "usersCache",
                 Caffeine.newBuilder()
+                        .recordStats()
                         .expireAfterWrite(5, TimeUnit.MINUTES)
                         .maximumSize(1000)
                         .build()
@@ -30,6 +31,7 @@ public class CacheConfig {
         CaffeineCache binanceSymbolsCache = new CaffeineCache(
                 "binanceSymbols",
                 Caffeine.newBuilder()
+                        .recordStats()
                         .expireAfterWrite(1, TimeUnit.DAYS)
                         .maximumSize(1000)
                         .build()

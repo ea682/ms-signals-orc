@@ -57,6 +57,7 @@ spring:
     password: ${DB_PASSWORD:5450940}
 
   jpa:
+    open-in-view: ${SPRING_JPA_OPEN_IN_VIEW:false}
     show-sql: false
     hibernate:
       ddl-auto: validate
@@ -67,6 +68,12 @@ spring:
         default_schema: ${DB_SCHEMA:futuros_operaciones_dev}
         jdbc.time_zone: UTC
         format_sql: true
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:false}
+  swagger-ui:
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:false}
 
 management:
   endpoints:
@@ -161,7 +168,7 @@ hyperliquid:
       skip-late-adjustments: ${HYPERLIQUID_ORIGIN_STORE_SKIP_LATE_ADJUSTMENTS:true}
       binance-price-enabled: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_ENABLED:true}
       binance-price-base-url: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_BASE_URL:https://fapi.binance.com}
-      binance-price-timeout-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_TIMEOUT_MS:350}
+      binance-price-timeout-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_TIMEOUT_MS:1000}
       binance-price-cache-ttl-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_TTL_MS:750}
       binance-price-cache-size: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_SIZE:2048}
       binance-price-miss-cache-ttl-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_MISS_CACHE_TTL_MS:60000}
