@@ -166,9 +166,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             long queueDelayMs = elapsedMs(task.acceptedNs());
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
-            log.info("event=hyperliquid.direct_ingest.processed idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} fallbackJobs={} fallbackUsed={} queueDelayMs={} elapsedMs={} queueDepth={}",
+            log.info("event=hyperliquid.direct_ingest.processed idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} businessSkipped={} fallbackJobs={} fallbackUsed={} queueDelayMs={} elapsedMs={} queueDepth={}",
                     mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
-                    dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(),
+                    dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(),
                     queueDelayMs, elapsedMs, queue.size());
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
@@ -176,7 +176,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
             log.error("event=hyperliquid.direct_ingest.failed idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
                     mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
-                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queue.size(), ex);
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queue.size());
         }
     }
 

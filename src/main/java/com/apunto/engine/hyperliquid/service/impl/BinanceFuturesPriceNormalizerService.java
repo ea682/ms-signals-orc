@@ -1,5 +1,6 @@
 package com.apunto.engine.hyperliquid.service.impl;
 
+import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,11 +34,13 @@ public class BinanceFuturesPriceNormalizerService {
     private final long cacheTtlMs;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final BinanceFuturesSymbolCatalog symbolCatalog;
     private final Cache<String, BinancePriceReference> cache;
     private final Cache<String, Boolean> missCache;
 
     public BinanceFuturesPriceNormalizerService(
             ObjectMapper objectMapper,
+            BinanceFuturesSymbolCatalog symbolCatalog,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-enabled:true}") boolean enabled,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-base-url:https://fapi.binance.com}") String baseUrl,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-timeout-ms:350}") int timeoutMs,
@@ -47,6 +50,7 @@ public class BinanceFuturesPriceNormalizerService {
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-miss-cache-size:4096}") long missCacheSize
     ) {
         this.objectMapper = objectMapper;
+        this.symbolCatalog = symbolCatalog;
         this.enabled = enabled;
         this.cacheTtlMs = Math.max(1L, cacheTtlMs);
         HttpClient httpClient = HttpClient.newBuilder()
@@ -74,10 +78,13 @@ public class BinanceFuturesPriceNormalizerService {
         if (!enabled) {
             return Optional.empty();
         }
-        String normalized = toBinanceSymbol(symbol);
-        if (normalized == null || normalized.isBlank()) {
+        Optional<BinanceFuturesSymbolCatalog.SymbolResolution> symbolResolution = symbolCatalog.resolve(symbol);
+        if (symbolResolution.isEmpty()) {
+            log.debug("event=hyperliquid.origin_store.binance_price.skipped symbol={} reasonCode=binance_symbol_unsupported cacheSize={}",
+                    safeLog(symbol), symbolCatalog.cachedSymbols());
             return Optional.empty();
         }
+        String normalized = symbolResolution.get().canonicalSymbol();
 
         BinancePriceReference cached = cache.getIfPresent(normalized);
         if (cached != null) {

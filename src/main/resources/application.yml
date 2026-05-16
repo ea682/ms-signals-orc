@@ -95,6 +95,9 @@ binance:
     pool-size: ${BINANCE_DISPATCH_POOL_SIZE:8}
   symbols:
     cache-ttl-ms: ${BINANCE_SYMBOLS_CACHE_TTL_MS:60000}
+    api-key: ${BINANCE_SYMBOLS_API_KEY:1llJ9n3dloLfy0MoYLnQbiPxfvWmxS4CyyqUo1otzEWO56BLUW3Ij9dbcepqHAWb}
+    warmup-on-start: ${BINANCE_SYMBOLS_WARMUP_ON_START:true}
+    require-trading-status: ${BINANCE_SYMBOLS_REQUIRE_TRADING_STATUS:true}
 
 copy:
   job:
