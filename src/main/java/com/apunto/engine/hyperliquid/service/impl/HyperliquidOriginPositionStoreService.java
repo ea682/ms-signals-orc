@@ -163,7 +163,7 @@ public class HyperliquidOriginPositionStoreService {
         if (shouldSkipLateAdjustment(mapped)) {
             skipped.incrementAndGet();
             meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "late_adjustment_without_active_origin").increment();
-            log.info("event=hyperliquid.origin_store.skipped reasonCode=late_adjustment_without_active_origin originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} activeCacheSize={} queueDepth={}",
+            log.info("event=hyperliquid.origin_store.skipped category=origin_position reasonCode=late_adjustment_without_active_origin reasonAlias=adjustment_without_active_origin friendlyReason=ajuste_sin_posicion_original_activa explanation=ajuste_no_guardado_porque_no_existe_posicion_original_activa copyImpact=no_copy_order originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} activeCacheSize={} queueDepth={}",
                     originId(mapped),
                     safeLog(mapped.idempotencyKey()),
                     safeLog(mapped.positionKey()),
@@ -203,7 +203,7 @@ public class HyperliquidOriginPositionStoreService {
                 return databaseOriginId;
             }
             UUID fallback = fallbackLifecycleId(mapped);
-            log.warn("event=hyperliquid.origin_store.lifecycle_missing action=close_fallback reasonCode=close_without_active_origin originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
+            log.warn("event=hyperliquid.origin_store.lifecycle_missing category=origin_position action=close_fallback reasonCode=close_without_active_origin reasonAlias=close_without_active_origin friendlyReason=cierre_sin_posicion_original_activa explanation=cierre_recibido_sin_posicion_original_activa_registrada copyImpact=close_fallback originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
                     fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()));
             return fallback;
         }
@@ -223,13 +223,13 @@ public class HyperliquidOriginPositionStoreService {
                 return databaseOriginId;
             }
             UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
-            log.info("event=hyperliquid.origin_store.lifecycle_missing action=adjustment_skip reasonCode=late_adjustment_without_active_origin originId={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={}",
+            log.info("event=hyperliquid.origin_store.lifecycle_missing category=origin_position action=adjustment_skip reasonCode=late_adjustment_without_active_origin reasonAlias=adjustment_without_active_origin friendlyReason=ajuste_sin_posicion_original_activa explanation=ajuste_recibido_sin_posicion_original_activa_no_es_demora_de_websocket copyImpact=no_copy_order originId={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={}",
                     fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()), skipLateAdjustments);
             return fallback;
         }
 
         UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
-        log.info("event=hyperliquid.origin_store.lifecycle_missing action=non_copyable_skip reasonCode=delta_not_lifecycle_start originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
+        log.info("event=hyperliquid.origin_store.lifecycle_missing category=origin_position action=non_copyable_skip reasonCode=delta_not_lifecycle_start reasonAlias=delta_not_lifecycle_start friendlyReason=evento_no_inicia_posicion_original explanation=delta_no_puede_crear_lifecycle_por_regla_de_negocio copyImpact=no_copy_order originId={} positionKey={} wallet={} symbol={} side={} deltaType={}",
                 fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()));
         return fallback;
     }
@@ -325,7 +325,7 @@ public class HyperliquidOriginPositionStoreService {
             if (shouldSkipLateAdjustment(mapped)) {
                 skipped.incrementAndGet();
                 meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "late_adjustment_without_active_origin_after_queue").increment();
-                log.info("event=hyperliquid.origin_store.skipped reasonCode=late_adjustment_without_active_origin_after_queue originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} activeCacheSize={} queueDelayMs={} elapsedMs={} queueDepth={}",
+                log.info("event=hyperliquid.origin_store.skipped category=origin_position reasonCode=late_adjustment_without_active_origin_after_queue reasonAlias=adjustment_without_active_origin_after_queue friendlyReason=ajuste_sin_posicion_original_activa_luego_de_cola explanation=evento_entro_a_cola_pero_al_persistir_seguia_sin_posicion_original_activa copyImpact=no_copy_order originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} activeCacheSize={} queueDelayMs={} elapsedMs={} queueDepth={}",
                         originId(mapped),
                         safeLog(mapped.idempotencyKey()),
                         safeLog(mapped.positionKey()),
