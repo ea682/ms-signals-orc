@@ -1246,7 +1246,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         if (!triggerIsOpen) {
             log.info(
-                    "event=rebalance.copy.open_skip reason=trigger_is_close originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    "event=rebalance.copy.open_skip category=rebalance reasonAlias=trigger_is_close friendlyReason=rebalance_por_cierre_no_abre_posiciones explanation=un_cierre_disparo_rebalance_y_no_se_abren_posiciones_faltantes reason=trigger_is_close copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={}",
                     target.originId(),
                     triggerOriginId,
                     userId,
@@ -1258,7 +1258,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         if (!Objects.equals(target.originId(), triggerOriginId)) {
             log.info(
-                    "event=rebalance.copy.open_skip reason=non_trigger_missing_position originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    "event=rebalance.copy.open_skip category=rebalance reasonAlias=non_trigger_missing_position friendlyReason=posicion_original_sin_copia_no_abierta explanation=rebalance_detecto_posicion_original_abierta_sin_copia_pero_no_la_abrio_porque_no_fue_el_trigger reason=non_trigger_missing_position copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={}",
                     target.originId(),
                     triggerOriginId,
                     userId,
@@ -1271,7 +1271,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final OffsetDateTime sourceCreatedAt = target.sourceCreatedAt();
         if (sourceCreatedAt == null) {
             log.warn(
-                    "event=rebalance.copy.open_skip reason=source_created_at_missing originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    "event=rebalance.copy.open_skip category=rebalance reasonAlias=source_created_at_missing friendlyReason=posicion_original_sin_fecha_de_apertura explanation=no_se_abre_posicion_faltante_porque_no_tiene_fecha_de_apertura reason=source_created_at_missing copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={}",
                     target.originId(),
                     triggerOriginId,
                     userId,
@@ -1286,7 +1286,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             final Duration age = Duration.between(sourceCreatedAt.toInstant(), Instant.now());
             if (age.compareTo(maxAge) > 0) {
                 log.warn(
-                        "event=rebalance.copy.open_skip reason=stale_source_position originId={} triggerOriginId={} userId={} wallet={} symbol={} sourceCreatedAt={} ageMs={} maxAgeMs={}",
+                        "event=rebalance.copy.open_skip category=rebalance reasonAlias=stale_source_position friendlyReason=posicion_original_demasiado_antigua explanation=no_se_abre_posicion_faltante_porque_la_apertura_original_es_muy_antigua reason=stale_source_position copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={} sourceCreatedAt={} ageMs={} maxAgeMs={}",
                         target.originId(),
                         triggerOriginId,
                         userId,
@@ -1304,7 +1304,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal drift = computeEntryPriceDriftPct(target);
         if (driftLimit.compareTo(ZERO) > 0 && drift.compareTo(driftLimit) > 0) {
             log.warn(
-                    "event=rebalance.copy.open_skip reason=entry_price_drift originId={} triggerOriginId={} userId={} wallet={} symbol={} entryPrice={} priceRef={} driftPct={} maxDriftPct={}",
+                    "event=rebalance.copy.open_skip category=rebalance reasonAlias=entry_price_drift friendlyReason=precio_ya_esta_muy_lejos explanation=no_se_abre_o_reabre_porque_el_precio_actual_esta_muy_lejos_del_precio_de_entrada reason=entry_price_drift copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={} entryPrice={} priceRef={} driftPct={} maxDriftPct={}",
                     target.originId(),
                     triggerOriginId,
                     userId,
