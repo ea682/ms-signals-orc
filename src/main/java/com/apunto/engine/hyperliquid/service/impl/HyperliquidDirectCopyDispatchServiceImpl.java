@@ -81,7 +81,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
         if (symbolCatalog.resolve(symbol).isEmpty()) {
             long elapsedMs = Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
-            log.info("event=hyperliquid.direct_copy.business_skip originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode=binance_symbol_unsupported cacheActive=false activeCacheSize={} source=binance_symbol_catalog",
+            log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=binance_symbol_unsupported friendlyReason=simbolo_no_existe_en_binance explanation=no_se_copia_porque_binance_no_soporta_el_simbolo copyImpact=no_copy_order originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode=binance_symbol_unsupported cacheActive=false activeCacheSize={} source=binance_symbol_catalog",
                     originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, activeCopyOperationCache.activeSize());
             log.info("event=hyperliquid.direct_copy.dispatched originId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} usersCached=0 eligibleUsers=0 eligibleUserIds= submitted=0 businessSkipped=1 fallbackJobs=0 fallbackUsed=false source=binance_symbol_catalog elapsedMs={}",
                     originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, elapsedMs);
@@ -97,13 +97,13 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
         if (eligibleUsers.isEmpty() && action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
             businessSkipped.incrementAndGet();
-            log.info("event=hyperliquid.direct_copy.business_skip originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} cacheActive=false activeCacheSize={} source={}",
+            log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=adjustment_without_active_copy friendlyReason=ajuste_sin_copia_activa explanation=ajuste_no_copiado_porque_no_existe_copia_abierta copyImpact=no_copy_order originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} cacheActive=false activeCacheSize={} source={}",
                     originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, adjustmentReason(deltaType), activeCopyOperationCache.activeSize(), candidates.source());
         }
 
         if (eligibleUsers.isEmpty() && action == CopyJobAction.CLOSE) {
             businessSkipped.incrementAndGet();
-            log.info("event=hyperliquid.direct_copy.business_skip originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode=close_without_open_copy cacheActive=false activeCacheSize={} source={}",
+            log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=close_without_active_copy friendlyReason=cierre_sin_copia_activa explanation=cierre_no_copiado_porque_no_existe_copia_abierta copyImpact=no_copy_order originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode=close_without_open_copy cacheActive=false activeCacheSize={} source={}",
                     originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, activeCopyOperationCache.activeSize(), candidates.source());
         }
 
@@ -111,7 +111,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
             HyperliquidCopyLifecycleDecision decision = businessDecision(originId, action, deltaType, user);
             if (!decision.allowed()) {
                 businessSkipped.incrementAndGet();
-                log.info("event=hyperliquid.direct_copy.business_skip originId={} userId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} cacheActive={} activeCacheSize={} source={}",
+                log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=blocked_by_lifecycle_guard friendlyReason=guard_bloqueo_la_copia explanation=no_se_envio_orden_porque_la_regla_de_lifecycle_no_lo_permitio copyImpact=no_copy_order originId={} userId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} cacheActive={} activeCacheSize={} source={}",
                         originId, userId(user), safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, decision.reasonCode(), decision.cacheActive(), activeCopyOperationCache.activeSize(), candidates.source());
                 continue;
             }
