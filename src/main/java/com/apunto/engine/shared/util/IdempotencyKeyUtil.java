@@ -35,6 +35,10 @@ public final class IdempotencyKeyUtil {
         return "cpR_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "red");
     }
 
+    public static String rebalanceReopenClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty) {
+        return "cpN_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "reopen");
+    }
+
     private static String hash32Hex(String originId, String userId, String walletId) {
         String input = String.valueOf(originId) + "|" + String.valueOf(userId) + "|" + String.valueOf(walletId);
         return hash32HexRaw(input);

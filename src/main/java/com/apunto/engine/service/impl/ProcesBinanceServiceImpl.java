@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
@@ -62,10 +63,12 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 .leverage(dto.getLeverage())
                 .positionSide(dto.getPositionSide())
                 .reduceOnly(reduceOnlyForClient)
+                .configureAccountSettings(dto.getConfigureAccountSettings())
                 .clientOrderId(dto.getClientOrderId())
                 .build();
 
-        log.info("event=binance.futures.order.send originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={}",
+        log.info("event=binance.futures.order.send traceId={} originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={}",
+                safeNull(MDC.get("traceId")),
                 safeNull(dto.getOriginId()),
                 safeNull(dto.getUserId()),
                 safeNull(dto.getWalletId()),
@@ -85,11 +88,13 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     dto.getOriginId(),
                     dto.getUserId(),
                     dto.getWalletId(),
+                    safeNull(MDC.get("traceId")),
                     request
             );
             BinanceFuturesOrderClientResponse data = unwrap(resp, "futures.order");
 
-            log.info("event=binance.futures.order.ok originId={} userId={} wallet={} symbol={} orderId={} avgPrice={} origQty={} executedQty={} clientOrderId={}",
+            log.info("event=binance.futures.order.ok traceId={} originId={} userId={} wallet={} symbol={} orderId={} avgPrice={} origQty={} executedQty={} clientOrderId={}",
+                    safeNull(MDC.get("traceId")),
                     safeNull(dto.getOriginId()),
                     safeNull(dto.getUserId()),
                     safeNull(dto.getWalletId()),
@@ -104,7 +109,8 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         } catch (RestClientResponseException ex) {
             BinanceHttpError err = parseBinanceHttpError(ex);
 
-            log.warn("event=binance.futures.order.fail originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" traceId={} path={}",
+            log.warn("event=binance.futures.order.fail traceId={} originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" downstreamTraceId={} path={}",
+                    safeNull(MDC.get("traceId")),
                     safeNull(dto.getOriginId()),
                     safeNull(dto.getUserId()),
                     safeNull(dto.getWalletId()),

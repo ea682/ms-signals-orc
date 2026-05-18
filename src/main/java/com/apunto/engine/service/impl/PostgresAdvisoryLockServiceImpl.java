@@ -6,6 +6,7 @@ import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import javax.sql.DataSource;
@@ -18,6 +19,7 @@ import java.util.function.Supplier;
 
 @Slf4j
 @Service
+@ConditionalOnProperty(name = "engine.copy.lock.provider", havingValue = "postgres")
 @RequiredArgsConstructor
 public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
 
