@@ -2,19 +2,24 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.entity.CopyOperationEntity;
+import com.apunto.engine.mapper.CopyOperationMapper;
 import com.apunto.engine.repository.CopyOperationRepository;
 import com.apunto.engine.service.ActiveCopyOperationCache;
+import com.apunto.engine.shared.util.CopyTraceIdUtil;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -25,10 +30,15 @@ import java.util.stream.Collectors;
 public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
 
     private final CopyOperationRepository repository;
-    private final ConcurrentMap<String, ActiveCopyRef> activeByOriginUser = new ConcurrentHashMap<>();
+    private final CopyOperationMapper mapper;
+    private final ConcurrentMap<String, RuntimeCopyRef> byOriginUser = new ConcurrentHashMap<>();
 
-    public ActiveCopyOperationCacheImpl(CopyOperationRepository repository) {
+    @Value("${copy.operation.active-cache.pending-ttl-ms:120000}")
+    private long pendingTtlMs;
+
+    public ActiveCopyOperationCacheImpl(CopyOperationRepository repository, CopyOperationMapper mapper) {
         this.repository = repository;
+        this.mapper = mapper;
     }
 
     @PostConstruct
@@ -43,8 +53,36 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
 
     @Override
     public boolean isActive(String originId, String userId) {
-        String key = key(originId, userId);
-        return key != null && activeByOriginUser.containsKey(key);
+        RuntimeCopyRef ref = byOriginUser.get(key(originId, userId));
+        return ref != null && ref.status() == RuntimeCopyStatus.ACTIVE;
+    }
+
+    @Override
+    public boolean isKnown(String originId, String userId) {
+        RuntimeCopyRef ref = byOriginUser.get(key(originId, userId));
+        return ref != null && !ref.isExpiredNonActive(pendingTtlMs);
+    }
+
+    @Override
+    public CopyOperationDto activeOperation(String originId, String userId) {
+        RuntimeCopyRef ref = byOriginUser.get(key(originId, userId));
+        return ref == null || ref.status() != RuntimeCopyStatus.ACTIVE ? null : ref.operation();
+    }
+
+    @Override
+    public List<CopyOperationDto> activeOperationsByUserAndWallet(String userId, String walletId) {
+        String normalizedUser = normalize(userId);
+        String normalizedWallet = normalize(walletId);
+        if (normalizedUser == null || normalizedWallet == null) {
+            return List.of();
+        }
+        return byOriginUser.values().stream()
+                .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
+                .filter(ref -> normalizedUser.equals(normalize(ref.userId())))
+                .filter(ref -> normalizedWallet.equals(normalize(ref.wallet())))
+                .map(RuntimeCopyRef::operation)
+                .filter(Objects::nonNull)
+                .toList();
     }
 
     @Override
@@ -53,9 +91,10 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         if (normalizedOrigin == null) {
             return Collections.emptySet();
         }
-        return activeByOriginUser.values().stream()
+        return byOriginUser.values().stream()
+                .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
                 .filter(ref -> normalizedOrigin.equals(normalize(ref.originId())))
-                .map(ActiveCopyRef::userId)
+                .map(RuntimeCopyRef::userId)
                 .filter(v -> v != null && !v.isBlank())
                 .collect(Collectors.toUnmodifiableSet());
     }
@@ -66,9 +105,10 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         if (normalizedWallet == null) {
             return Collections.emptySet();
         }
-        return activeByOriginUser.values().stream()
+        return byOriginUser.values().stream()
+                .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
                 .filter(ref -> normalizedWallet.equals(normalize(ref.wallet())))
-                .map(ActiveCopyRef::userId)
+                .map(RuntimeCopyRef::userId)
                 .filter(v -> v != null && !v.isBlank())
                 .collect(Collectors.toUnmodifiableSet());
     }
@@ -80,12 +120,35 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         if (normalizedWallet == null || normalizedSymbol == null) {
             return Collections.emptySet();
         }
-        return activeByOriginUser.values().stream()
+        return byOriginUser.values().stream()
+                .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
                 .filter(ref -> normalizedWallet.equals(normalize(ref.wallet())))
                 .filter(ref -> normalizedSymbol.equals(normalize(ref.symbol())))
-                .map(ActiveCopyRef::userId)
+                .map(RuntimeCopyRef::userId)
                 .filter(v -> v != null && !v.isBlank())
                 .collect(Collectors.toUnmodifiableSet());
+    }
+
+    @Override
+    public String traceId(String originId, String userId, String walletId, String symbol) {
+        String key = key(originId, userId);
+        RuntimeCopyRef existing = key == null ? null : byOriginUser.get(key);
+        if (existing != null && existing.traceId() != null && !existing.traceId().isBlank()) {
+            return existing.traceId();
+        }
+        return CopyTraceIdUtil.copyTraceId(originId, userId, walletId, symbol);
+    }
+
+    @Override
+    public void markPendingOpen(String originId, String userId, String walletId, String symbol, String typeOperation, String traceId) {
+        String key = key(originId, userId);
+        if (key == null) {
+            return;
+        }
+        RuntimeCopyRef next = RuntimeCopyRef.pending(originId, userId, walletId, symbol, typeOperation, traceId);
+        byOriginUser.put(key, next);
+        log.info("event=copy_runtime_state.pending_open category=runtime_state reasonAlias=open_in_progress friendlyReason=apertura_en_proceso explanation=la_operacion_queda_en_ram_para_evitar_duplicados_mientras_se_envia_a_binance copyImpact=blocks_duplicate_open traceId={} originId={} userId={} wallet={} symbol={} typeOperation={} runtimeSize={}",
+                safeLog(next.traceId()), safeLog(originId), safeLog(userId), safeLog(walletId), safeLog(symbol), safeLog(typeOperation), byOriginUser.size());
     }
 
     @Override
@@ -97,10 +160,43 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         if (key == null) {
             return;
         }
-        activeByOriginUser.put(key, ActiveCopyRef.from(operation));
-        log.debug("event=copy_operation.active_cache.mark_open originId={} userId={} wallet={} symbol={} activeSize={}",
-                safeLog(operation.getIdOrderOrigin()), safeLog(operation.getIdUser()), safeLog(operation.getIdWalletOrigin()),
-                safeLog(operation.getParsymbol()), activeByOriginUser.size());
+        String traceId = traceId(operation.getIdOrderOrigin(), operation.getIdUser(), operation.getIdWalletOrigin(), operation.getParsymbol());
+        RuntimeCopyRef next = RuntimeCopyRef.active(operation, traceId);
+        byOriginUser.put(key, next);
+        log.info("event=copy_runtime_state.active category=runtime_state reasonAlias=copy_active friendlyReason=copia_activa_en_ram explanation=la_copia_quedo_disponible_en_ram_para_la_ruta_caliente copyImpact=copy_tracked traceId={} originId={} userId={} wallet={} symbol={} typeOperation={} qty={} runtimeSize={}",
+                safeLog(traceId), safeLog(operation.getIdOrderOrigin()), safeLog(operation.getIdUser()), safeLog(operation.getIdWalletOrigin()),
+                safeLog(operation.getParsymbol()), safeLog(operation.getTypeOperation()), operation.getSizePar(), byOriginUser.size());
+    }
+
+    @Override
+    public void markUncertain(CopyOperationDto operation, String traceId, String reasonCode) {
+        if (operation == null) {
+            return;
+        }
+        String key = key(operation.getIdOrderOrigin(), operation.getIdUser());
+        if (key == null) {
+            return;
+        }
+        RuntimeCopyRef next = RuntimeCopyRef.uncertain(operation, traceId);
+        byOriginUser.put(key, next);
+        log.warn("event=copy_runtime_state.uncertain category=runtime_state reasonAlias=copy_state_uncertain friendlyReason=estado_de_copia_incierto explanation=hubo_orden_binance_o_estado_parcial_y_se_requiere_reconciliacion copyImpact=blocks_duplicate_open traceId={} originId={} userId={} wallet={} symbol={} typeOperation={} reasonCode={} runtimeSize={}",
+                safeLog(next.traceId()), safeLog(operation.getIdOrderOrigin()), safeLog(operation.getIdUser()), safeLog(operation.getIdWalletOrigin()),
+                safeLog(operation.getParsymbol()), safeLog(operation.getTypeOperation()), safeLog(reasonCode), byOriginUser.size());
+    }
+
+    @Override
+    public void forgetPending(String originId, String userId, String traceId, String reasonCode) {
+        String key = key(originId, userId);
+        if (key == null) {
+            return;
+        }
+        RuntimeCopyRef current = byOriginUser.get(key);
+        if (current == null || current.status() == RuntimeCopyStatus.ACTIVE) {
+            return;
+        }
+        byOriginUser.remove(key, current);
+        log.info("event=copy_runtime_state.pending_removed category=runtime_state reasonAlias=pending_cancelled friendlyReason=apertura_pendiente_cancelada explanation=se_remueve_el_estado_temporal_porque_no_quedo_copia_activa copyImpact=allows_future_open traceId={} originId={} userId={} reasonCode={} runtimeSize={}",
+                safeLog(traceId), safeLog(originId), safeLog(userId), safeLog(reasonCode), byOriginUser.size());
     }
 
     @Override
@@ -109,21 +205,24 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         if (key == null) {
             return;
         }
-        ActiveCopyRef removed = activeByOriginUser.remove(key);
-        log.debug("event=copy_operation.active_cache.mark_closed originId={} userId={} removed={} activeSize={}",
-                safeLog(originId), safeLog(userId), removed != null, activeByOriginUser.size());
+        RuntimeCopyRef removed = byOriginUser.remove(key);
+        log.info("event=copy_runtime_state.closed category=runtime_state reasonAlias=copy_closed friendlyReason=copia_cerrada_en_ram explanation=la_copia_se_removio_de_la_ruta_caliente copyImpact=no_active_copy traceId={} originId={} userId={} removed={} runtimeSize={}",
+                removed == null ? CopyTraceIdUtil.copyTraceId(originId, userId, null, null) : safeLog(removed.traceId()),
+                safeLog(originId), safeLog(userId), removed != null, byOriginUser.size());
     }
 
     @Override
     public int activeSize() {
-        return activeByOriginUser.size();
+        return (int) byOriginUser.values().stream()
+                .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
+                .count();
     }
 
     private void refreshFromDatabase(String trigger) {
         long startedNs = System.nanoTime();
         try {
             List<CopyOperationEntity> active = repository.findAllByActiveTrue();
-            ConcurrentMap<String, ActiveCopyRef> next = new ConcurrentHashMap<>();
+            ConcurrentMap<String, RuntimeCopyRef> next = new ConcurrentHashMap<>();
             Set<String> duplicatedKeys = new HashSet<>();
             for (CopyOperationEntity entity : active) {
                 if (entity == null) {
@@ -133,19 +232,68 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
                 if (key == null) {
                     continue;
                 }
-                ActiveCopyRef previous = next.put(key, ActiveCopyRef.from(entity));
+                CopyOperationDto dto = mapper.toDto(entity);
+                RuntimeCopyRef previous = next.put(key, RuntimeCopyRef.active(dto, traceId(dto.getIdOrderOrigin(), dto.getIdUser(), dto.getIdWalletOrigin(), dto.getParsymbol())));
                 if (previous != null) {
                     duplicatedKeys.add(key);
                 }
             }
-            activeByOriginUser.clear();
-            activeByOriginUser.putAll(next);
-            log.info("event=copy_operation.active_cache.refresh_ok trigger={} dbActive={} cached={} duplicateKeys={} elapsedMs={}",
-                    trigger, active.size(), activeByOriginUser.size(), duplicatedKeys.size(), elapsedMs(startedNs));
+
+            List<RuntimeCopyRef> preserved = preserveFreshNonActive(next.keySet());
+            for (RuntimeCopyRef ref : preserved) {
+                String key = key(ref.originId(), ref.userId());
+                if (key != null) {
+                    next.putIfAbsent(key, ref);
+                }
+            }
+
+            Set<String> previousActiveKeys = byOriginUser.entrySet().stream()
+                    .filter(e -> e.getValue().status() == RuntimeCopyStatus.ACTIVE)
+                    .map(java.util.Map.Entry::getKey)
+                    .collect(Collectors.toSet());
+            Set<String> nextActiveKeys = next.entrySet().stream()
+                    .filter(e -> e.getValue().status() == RuntimeCopyStatus.ACTIVE)
+                    .map(java.util.Map.Entry::getKey)
+                    .collect(Collectors.toSet());
+            int missingInCache = countMissing(nextActiveKeys, previousActiveKeys);
+            int missingInDb = countMissing(previousActiveKeys, nextActiveKeys);
+
+            byOriginUser.clear();
+            byOriginUser.putAll(next);
+            log.info("event=copy_state.reconcile.ok category=runtime_state trigger={} dbActive={} runtimeActive={} runtimeTotal={} missingInCache={} missingInDb={} duplicateKeys={} preservedPending={} elapsedMs={}",
+                    trigger, active.size(), activeSize(), byOriginUser.size(), missingInCache, missingInDb, duplicatedKeys.size(), preserved.size(), elapsedMs(startedNs));
         } catch (DataAccessException | IllegalStateException | IllegalArgumentException ex) {
-            log.warn("event=copy_operation.active_cache.refresh_failed trigger={} cached={} errClass={} errMsg=\"{}\" elapsedMs={}",
-                    trigger, activeByOriginUser.size(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
+            log.warn("event=copy_state.reconcile.failed category=runtime_state trigger={} runtimeActive={} runtimeTotal={} errClass={} errMsg=\"{}\" elapsedMs={}",
+                    trigger, activeSize(), byOriginUser.size(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
         }
+    }
+
+    private List<RuntimeCopyRef> preserveFreshNonActive(Set<String> dbActiveKeys) {
+        if (byOriginUser.isEmpty()) {
+            return List.of();
+        }
+        List<RuntimeCopyRef> preserved = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        for (java.util.Map.Entry<String, RuntimeCopyRef> entry : byOriginUser.entrySet()) {
+            RuntimeCopyRef ref = entry.getValue();
+            if (ref == null || ref.status() == RuntimeCopyStatus.ACTIVE || dbActiveKeys.contains(entry.getKey())) {
+                continue;
+            }
+            if (now - ref.updatedAtMs() <= pendingTtlMs) {
+                preserved.add(ref);
+            }
+        }
+        return preserved;
+    }
+
+    private int countMissing(Set<String> expected, Set<String> actual) {
+        int count = 0;
+        for (String key : expected) {
+            if (!actual.contains(key)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private String key(String originId, String userId) {
@@ -176,31 +324,57 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         return clean.length() > 1000 ? clean.substring(0, 1000) : clean;
     }
 
-    private record ActiveCopyRef(
+    private enum RuntimeCopyStatus {
+        ACTIVE,
+        PENDING_OPEN,
+        UNCERTAIN
+    }
+
+    private record RuntimeCopyRef(
             String originId,
             String userId,
             String wallet,
             String symbol,
-            String side
+            String side,
+            CopyOperationDto operation,
+            RuntimeCopyStatus status,
+            String traceId,
+            long updatedAtMs
     ) {
-        static ActiveCopyRef from(CopyOperationDto dto) {
-            return new ActiveCopyRef(
+        static RuntimeCopyRef active(CopyOperationDto dto, String traceId) {
+            return new RuntimeCopyRef(
                     dto.getIdOrderOrigin(),
                     dto.getIdUser(),
                     dto.getIdWalletOrigin(),
                     dto.getParsymbol(),
-                    dto.getTypeOperation()
+                    dto.getTypeOperation(),
+                    dto,
+                    RuntimeCopyStatus.ACTIVE,
+                    traceId,
+                    System.currentTimeMillis()
             );
         }
 
-        static ActiveCopyRef from(CopyOperationEntity entity) {
-            return new ActiveCopyRef(
-                    entity.getIdOrderOrigin(),
-                    entity.getIdUser(),
-                    entity.getIdWalletOrigin(),
-                    entity.getParsymbol(),
-                    entity.getTypeOperation()
+        static RuntimeCopyRef pending(String originId, String userId, String wallet, String symbol, String side, String traceId) {
+            return new RuntimeCopyRef(originId, userId, wallet, symbol, side, null, RuntimeCopyStatus.PENDING_OPEN, traceId, System.currentTimeMillis());
+        }
+
+        static RuntimeCopyRef uncertain(CopyOperationDto dto, String traceId) {
+            return new RuntimeCopyRef(
+                    dto.getIdOrderOrigin(),
+                    dto.getIdUser(),
+                    dto.getIdWalletOrigin(),
+                    dto.getParsymbol(),
+                    dto.getTypeOperation(),
+                    dto,
+                    RuntimeCopyStatus.UNCERTAIN,
+                    traceId,
+                    System.currentTimeMillis()
             );
+        }
+
+        boolean isExpiredNonActive(long pendingTtlMs) {
+            return status != RuntimeCopyStatus.ACTIVE && System.currentTimeMillis() - updatedAtMs > pendingTtlMs;
         }
     }
 }

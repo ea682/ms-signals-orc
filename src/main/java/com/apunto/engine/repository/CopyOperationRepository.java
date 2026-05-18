@@ -20,6 +20,8 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     Optional<CopyOperationEntity> findByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
 
+    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndTypeOperation(String idOrderOrigin, String idUser, String typeOperation);
+
     boolean existsByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
 
     Optional<CopyOperationEntity> findByIdOrden(String idOrden);

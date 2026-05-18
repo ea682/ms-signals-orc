@@ -114,6 +114,10 @@ binance:
     require-trading-status: ${BINANCE_SYMBOLS_REQUIRE_TRADING_STATUS:true}
 
 copy:
+  operation:
+    active-cache:
+      refresh-ms: ${COPY_OPERATION_ACTIVE_CACHE_REFRESH_MS:60000}
+      pending-ttl-ms: ${COPY_OPERATION_ACTIVE_CACHE_PENDING_TTL_MS:120000}
   job:
     ingest:
       filter-by-wallet-allocation: ${COPY_JOB_INGEST_FILTER_BY_WALLET_ALLOCATION:true}
@@ -127,6 +131,8 @@ copy:
 
 engine:
   copy:
+    lock:
+      provider: ${ENGINE_COPY_LOCK_PROVIDER:local}
     execution-job-worker:
       enabled: true
     reconcile:
@@ -137,6 +143,8 @@ engine:
       max-missing-open-price-drift-pct: ${ENGINE_COPY_RECONCILE_MAX_MISSING_OPEN_PRICE_DRIFT_PCT:0.003}
       skip-stale-increase: ${ENGINE_COPY_RECONCILE_SKIP_STALE_INCREASE:true}
       max-increase-source-age: ${ENGINE_COPY_RECONCILE_MAX_INCREASE_SOURCE_AGE:PT60S}
+    rebalance:
+      skip-small-increase: ${ENGINE_COPY_REBALANCE_SKIP_SMALL_INCREASE:true}
     sizing:
       max-fraction-per-trade: ${ENGINE_COPY_MAX_FRACTION_PER_TRADE:1}
       notional-buffer-pct: ${ENGINE_COPY_NOTIONAL_BUFFER_PCT:0.03}

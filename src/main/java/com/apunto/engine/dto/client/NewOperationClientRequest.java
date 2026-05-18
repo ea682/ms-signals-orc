@@ -20,6 +20,7 @@ public class NewOperationClientRequest {
     private Integer leverage;
     private PositionSide positionSide;
     private Boolean reduceOnly;
+    private Boolean configureAccountSettings;
 
     /**
      * Idempotency key for Binance Futures orders (newClientOrderId).
