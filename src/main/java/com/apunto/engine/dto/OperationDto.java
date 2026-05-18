@@ -20,6 +20,12 @@ public class OperationDto {
     private boolean reduceOnly;
 
     /**
+     * When false, ms-binance-engine skips account-level setup calls (margin type/leverage).
+     * Use false for hot ADJUST/RESIZE increases where the position already exists.
+     */
+    private Boolean configureAccountSettings;
+
+    /**
      * Idempotency key propagated to ms-binance-engine and mapped to Binance Futures
      * parameter "newClientOrderId". Max 36 chars, allowed [A-Za-z0-9._-].
      */

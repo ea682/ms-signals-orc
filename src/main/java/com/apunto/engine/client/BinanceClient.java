@@ -25,6 +25,7 @@ public interface BinanceClient {
             @RequestHeader(value = "X-COPY-ORIGIN-ID", required = false) String originId,
             @RequestHeader(value = "X-COPY-USER-ID", required = false) String userId,
             @RequestHeader(value = "X-COPY-WALLET-ID", required = false) String walletId,
+            @RequestHeader(value = "X-COPY-TRACE-ID", required = false) String traceId,
             @RequestBody NewOperationClientRequest request
     );
 
