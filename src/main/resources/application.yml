@@ -118,6 +118,12 @@ copy:
     active-cache:
       refresh-ms: ${COPY_OPERATION_ACTIVE_CACHE_REFRESH_MS:60000}
       pending-ttl-ms: ${COPY_OPERATION_ACTIVE_CACHE_PENDING_TTL_MS:120000}
+
+operation:
+  movement-ledger:
+    enabled: ${OPERATION_MOVEMENT_LEDGER_ENABLED:true}
+    worker-threads: ${OPERATION_MOVEMENT_LEDGER_WORKER_THREADS:2}
+    queue-capacity: ${OPERATION_MOVEMENT_LEDGER_QUEUE_CAPACITY:20000}
   job:
     ingest:
       filter-by-wallet-allocation: ${COPY_JOB_INGEST_FILTER_BY_WALLET_ALLOCATION:true}

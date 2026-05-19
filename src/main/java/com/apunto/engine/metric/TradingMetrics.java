@@ -90,19 +90,12 @@ public class TradingMetrics {
 
     public void jobResult(CopyExecutionJobEntity job, String result, String reason) {
         String action = job.getAction() == null ? "UNKNOWN" : job.getAction().name();
-
-        if (reason == null || reason.isBlank()) {
-            registry.counter("signals.copy.job.result.total",
-                            "action", action,
-                            "result", safeTag(result))
-                    .increment();
-            return;
-        }
+        String normalizedReason = (reason == null || reason.isBlank()) ? "none" : reason;
 
         registry.counter("signals.copy.job.result.total",
                         "action", action,
                         "result", safeTag(result),
-                        "reason", safeTag(reason))
+                        "reason", safeTag(normalizedReason))
                 .increment();
     }
 
