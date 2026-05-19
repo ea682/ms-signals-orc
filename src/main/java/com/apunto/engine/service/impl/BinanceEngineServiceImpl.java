@@ -78,7 +78,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal REBALANCE_TOLERANCE_PCT = new BigDecimal("0.02");
 
-    private static final String SYMBOLS_API_KEY = "1llJ9n3dloLfy0MoYLnQbiPxfvWmxS4CyyqUo1otzEWO56BLUW3Ij9dbcepqHAWb";
     private static final int DEFAULT_CALC_SCALE = 18;
     private static final long TTL_MS = 60_000L;
 
@@ -118,6 +117,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} sourceMargin={} capitalReference={} fraction={} walletBudget={} usedMargin={} availableBufferedMargin={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={} copyByMinNotional={}";
     private static final String LOG_PREP_COPY_BY_MIN_NOTIONAL = "event=operation.open.copy_by_min_notional originId={} userId={} wallet={} symbol={} candidateNotional={} forcedNotional={} minNotional={} policyMode={} allocationId={} score={} minScore={} historyDays={} minHistoryDays={} operationsCount={} minOperations={} maxForcedNotional={} notionalBudgetCeiling={}";
     private static final BigDecimal MAX_MARGIN_SAFETY_PCT = new BigDecimal("0.30");
+
+    @Value("${binance.symbols.api-key:}")
+    private String symbolsApiKey;
 
     private static final String LOG_QTY_ADJUSTED = "event=binance.qty_adjusted symbol={} qtyOriginal={} qtyFinal={} notionalFinal={} notionalMax={}";
     private static final String LOG_SYMBOLS_CACHE_REFRESH = "event=binance.symbols_cache.refresh size={} ttlMs={}";
@@ -2868,7 +2870,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private SymbolsCache refreshSymbolsCacheSync(String phase) {
         final long startedNs = System.nanoTime();
         try {
-            final List<BinanceFuturesSymbolInfoClientDto> symbols = procesBinanceService.getSymbols(SYMBOLS_API_KEY);
+            final List<BinanceFuturesSymbolInfoClientDto> symbols = procesBinanceService.getSymbols(symbolsApiKey);
             final SymbolsCache loaded = buildSymbolsCache(symbols, System.currentTimeMillis() + symbolsCacheTtlMs);
             symbolsCache = loaded;
             log.info("event=binance.symbols.refresh.ok phase={} totalSymbols={} ttlMs={} elapsedMs={}",

@@ -47,7 +47,7 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
 
     public BinanceFuturesSymbolCatalogService(
             ProcesBinanceService procesBinanceService,
-            @Value("${binance.symbols.api-key:1llJ9n3dloLfy0MoYLnQbiPxfvWmxS4CyyqUo1otzEWO56BLUW3Ij9dbcepqHAWb}") String symbolsApiKey,
+            @Value("${binance.symbols.api-key:}") String symbolsApiKey,
             @Value("${binance.symbols.cache-ttl-ms:60000}") long ttlMs,
             @Value("${binance.symbols.warmup-on-start:true}") boolean warmupOnStart,
             @Value("${binance.symbols.require-trading-status:true}") boolean requireTradingStatus
