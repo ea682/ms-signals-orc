@@ -12,6 +12,7 @@ import com.apunto.engine.repository.FuturesPositionRepository;
 import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
 import com.apunto.engine.shared.enums.PositionStatus;
 import com.apunto.engine.shared.exception.EngineException;
+import com.apunto.engine.shared.util.CopyTraceIdUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -21,6 +22,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
@@ -304,7 +306,7 @@ public class HyperliquidOriginPositionStoreService {
     private void process(PersistTask task) {
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mapped = task.mappedDelta();
-        try {
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", originTraceId(mapped))) {
             if (isUnsupportedBinanceSymbol(mapped)) {
                 skipped.incrementAndGet();
                 meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "binance_symbol_unsupported").increment();
@@ -341,7 +343,7 @@ public class HyperliquidOriginPositionStoreService {
                 return;
             }
             BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference = resolvePriceReference(mapped);
-            Object lock = positionLocks.computeIfAbsent(lockKey(mapped), ignored -> new Object());
+            Object lock = positionLocks.computeIfAbsent(lockKey(mapped), ignoredLock -> new Object());
             PersistOutcome outcome;
             synchronized (lock) {
                 outcome = transactionTemplate.execute(status -> persistLifecycle(mapped, task.dispatchResult(), startedNs, priceReference));
@@ -367,6 +369,7 @@ public class HyperliquidOriginPositionStoreService {
                     queue.size());
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
             failed.incrementAndGet();
+            MDC.put("traceId", originTraceId(mapped));
             meterRegistry.timer("signals.hyperliquid.origin_store.persist.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
             log.error("event=futures_position.origin_upsert_failed originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
@@ -382,7 +385,20 @@ public class HyperliquidOriginPositionStoreService {
                     elapsedMs(task.acceptedNs()),
                     elapsedMs(startedNs),
                     queue.size());
+        } finally {
+            MDC.remove("traceId");
         }
+    }
+
+    private String originTraceId(HyperliquidMappedDelta mapped) {
+        UUID id = originId(mapped);
+        String wallet = mapped == null ? null : mapped.wallet();
+        String symbol = mapped == null ? null : mapped.symbol();
+        if (mapped != null && mapped.event() != null && mapped.event().getOperacion() != null) {
+            wallet = firstNonBlank(wallet, mapped.event().getOperacion().getIdCuenta(), "NA");
+            symbol = firstNonBlank(symbol, mapped.event().getOperacion().getParSymbol(), "NA");
+        }
+        return CopyTraceIdUtil.copyTraceId(id == null ? "NA" : id.toString(), "origin", wallet, symbol);
     }
 
     private boolean isUnsupportedBinanceSymbol(HyperliquidMappedDelta mapped) {
