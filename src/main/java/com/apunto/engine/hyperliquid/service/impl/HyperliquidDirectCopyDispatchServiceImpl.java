@@ -83,7 +83,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
         if (symbolCatalog.resolve(symbol).isEmpty()) {
             long elapsedMs = Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
-            String traceId = activeCopyOperationCache.traceId(originId, "NA", wallet, symbol);
+            String traceId = originTraceId(originId, wallet, symbol);
             log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=binance_symbol_unsupported friendlyReason=simbolo_no_existe_en_binance explanation=no_se_copia_porque_binance_no_soporta_el_simbolo copyImpact=no_copy_order traceId={} originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode=binance_symbol_unsupported cacheActive=false activeCacheSize={} source=binance_symbol_catalog",
                     traceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, activeCopyOperationCache.activeSize());
             log.info("event=hyperliquid.direct_copy.dispatched traceId={} originId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} usersCached=0 eligibleUsers=0 eligibleUserIds= submitted=0 businessSkipped=1 fallbackJobs=0 fallbackUsed=false source=binance_symbol_catalog elapsedMs={}",
@@ -100,14 +100,14 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
         if (eligibleUsers.isEmpty() && action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
             businessSkipped.incrementAndGet();
-            String traceId = activeCopyOperationCache.traceId(originId, "NA", wallet, symbol);
+            String traceId = originTraceId(originId, wallet, symbol);
             log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=adjustment_without_active_copy friendlyReason=ajuste_sin_copia_activa explanation=ajuste_no_copiado_porque_no_existe_copia_abierta copyImpact=no_copy_order traceId={} originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} cacheActive=false activeCacheSize={} source={}",
                     traceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, adjustmentReason(deltaType), activeCopyOperationCache.activeSize(), candidates.source());
         }
 
         if (eligibleUsers.isEmpty() && action == CopyJobAction.CLOSE) {
             businessSkipped.incrementAndGet();
-            String traceId = activeCopyOperationCache.traceId(originId, "NA", wallet, symbol);
+            String traceId = originTraceId(originId, wallet, symbol);
             log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=close_without_active_copy friendlyReason=cierre_sin_copia_activa explanation=cierre_no_copiado_porque_no_existe_copia_abierta copyImpact=no_copy_order traceId={} originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode=close_without_open_copy cacheActive=false activeCacheSize={} source={}",
                     traceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, activeCopyOperationCache.activeSize(), candidates.source());
         }
@@ -135,7 +135,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
         long elapsedMs = Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
         log.info("event=hyperliquid.direct_copy.dispatched traceId={} originId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} usersCached={} eligibleUsers={} eligibleUserIds={} submitted={} businessSkipped={} fallbackJobs={} fallbackUsed={} source={} elapsedMs={}",
-                activeCopyOperationCache.traceId(originId, "summary", wallet, symbol),
+                originTraceId(originId, wallet, symbol),
                 originId,
                 safeLog(wallet),
                 safeLog(symbol),
@@ -160,6 +160,10 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                 fallbackJobs.get(),
                 fallbackSubmitted.get()
         );
+    }
+
+    private String originTraceId(String originId, String wallet, String symbol) {
+        return activeCopyOperationCache.traceId(originId, "origin", wallet, symbol);
     }
 
     private HyperliquidCopyLifecycleDecision businessDecision(String originId, CopyJobAction action, HyperliquidDeltaType deltaType, UserDetailDto user) {
@@ -187,42 +191,44 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         String traceId = activeCopyOperationCache.traceId(originId, userId, wallet, symbol);
         HyperliquidDeltaType eventDeltaType = HyperliquidDeltaType.from(event.getDeltaType());
         String actionLabel = displayAction(action, eventDeltaType);
-        try {
-            if (action == CopyJobAction.OPEN) {
-                binanceCopyExecutionService.executeOpenForUser(event, user);
-            } else {
-                binanceCopyExecutionService.executeCloseForUser(event, user);
-            }
-            log.info("event=hyperliquid.direct_copy.completed traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} elapsedMs={}",
-                    traceId, originId, userId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, eventDeltaType), safeLog(event.getDeltaType()), elapsedMs(startedNs));
-        } catch (SkipExecutionException skip) {
-            log.info("event=hyperliquid.direct_copy.skipped traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} reason=\"{}\" details=\"{}\" elapsedMs={}",
-                    traceId,
-                    originId,
-                    userId,
-                    safeLog(wallet),
-                    safeLog(symbol),
-                    actionLabel,
-                    action,
-                    copyIntent(action, eventDeltaType),
-                    safeLog(event.getDeltaType()),
-                    safeLog(skip.getReasonCode()),
-                    safeLog(skip.getReason()),
-                    safeLog(skip.getDetails()),
-                    elapsedMs(startedNs));
-        } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
-            int fallback = ex instanceof CopyPersistenceConflictException
-                    ? 0
-                    : submitFallbackOnce(event, fallbackSubmitted, "direct_execution_failed");
-            fallbackJobs.addAndGet(fallback);
-            if (shouldLogStacktrace(ex)) {
-                log.error("event=hyperliquid.direct_copy.failed traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} deltaType={} fallbackJobs={} errClass={} errMsg=\"{}\" elapsedMs={}",
-                        traceId, originId, userId, safeLog(wallet), safeLog(symbol), actionLabel, action, safeLog(event.getDeltaType()), fallback,
-                        ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs), ex);
-            } else {
-                log.error("event=hyperliquid.direct_copy.failed traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} deltaType={} fallbackJobs={} errClass={} errMsg=\"{}\" elapsedMs={}",
-                        traceId, originId, userId, safeLog(wallet), safeLog(symbol), actionLabel, action, safeLog(event.getDeltaType()), fallback,
-                        ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", traceId)) {
+            try {
+                if (action == CopyJobAction.OPEN) {
+                    binanceCopyExecutionService.executeOpenForUser(event, user);
+                } else {
+                    binanceCopyExecutionService.executeCloseForUser(event, user);
+                }
+                log.info("event=hyperliquid.direct_copy.completed traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} elapsedMs={}",
+                        traceId, originId, userId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, eventDeltaType), safeLog(event.getDeltaType()), elapsedMs(startedNs));
+            } catch (SkipExecutionException skip) {
+                log.info("event=hyperliquid.direct_copy.skipped traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} reason=\"{}\" details=\"{}\" elapsedMs={}",
+                        traceId,
+                        originId,
+                        userId,
+                        safeLog(wallet),
+                        safeLog(symbol),
+                        actionLabel,
+                        action,
+                        copyIntent(action, eventDeltaType),
+                        safeLog(event.getDeltaType()),
+                        safeLog(skip.getReasonCode()),
+                        safeLog(skip.getReason()),
+                        safeLog(skip.getDetails()),
+                        elapsedMs(startedNs));
+            } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
+                int fallback = ex instanceof CopyPersistenceConflictException
+                        ? 0
+                        : submitFallbackOnce(event, fallbackSubmitted, "direct_execution_failed");
+                fallbackJobs.addAndGet(fallback);
+                if (shouldLogStacktrace(ex)) {
+                    log.error("event=hyperliquid.direct_copy.failed traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} deltaType={} fallbackJobs={} errClass={} errMsg=\"{}\" elapsedMs={}",
+                            traceId, originId, userId, safeLog(wallet), safeLog(symbol), actionLabel, action, safeLog(event.getDeltaType()), fallback,
+                            ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs), ex);
+                } else {
+                    log.error("event=hyperliquid.direct_copy.failed traceId={} originId={} userId={} wallet={} symbol={} action={} engineAction={} deltaType={} fallbackJobs={} errClass={} errMsg=\"{}\" elapsedMs={}",
+                            traceId, originId, userId, safeLog(wallet), safeLog(symbol), actionLabel, action, safeLog(event.getDeltaType()), fallback,
+                            ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
+                }
             }
         }
     }

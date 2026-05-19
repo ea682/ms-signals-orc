@@ -11,6 +11,7 @@ import com.apunto.engine.metric.TradingMetrics;
 import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.OperacionEventIngestService;
+import com.apunto.engine.service.OperationMovementEventService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.shared.exception.EngineException;
@@ -48,6 +49,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private final ActiveCopyOperationCache activeCopyOperationCache;
     private final HyperliquidCopyLifecycleGuard lifecycleGuard;
     private final TradingMetrics tradingMetrics;
+    private final OperationMovementEventService operationMovementEventService;
 
     @Value("${copy.job.ingest.filter-by-wallet-allocation:true}")
     private boolean filterByWalletAllocation;
@@ -74,6 +76,12 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             final String walletId = operacion.getIdCuenta();
             final CopyJobAction action = mapAction(event.getTipo());
             final HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
+            operationMovementEventService.recordAsync(
+                    event,
+                    "copy_job_ingest",
+                    activeCopyOperationCache.traceId(originId, "origin", walletId, operacion.getParSymbol()),
+                    null
+            );
 
             final List<UserDetailDto> usersCached = safeUsers(userDetailCachedService.getUsers());
             final List<UserDetailDto> eligibleUsers = applyBusinessRules(event, action, resolveCandidateUsers(event, action, usersCached));

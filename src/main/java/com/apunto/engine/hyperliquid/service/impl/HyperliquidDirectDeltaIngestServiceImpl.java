@@ -8,7 +8,9 @@ import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.hyperliquid.service.HyperliquidDirectDeltaIngestService;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.service.HyperliquidDirectCopyDispatchService;
+import com.apunto.engine.service.OperationMovementEventService;
 import com.apunto.engine.shared.exception.EngineException;
+import com.apunto.engine.shared.util.CopyTraceIdUtil;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.micrometer.core.instrument.Gauge;
@@ -17,6 +19,7 @@ import io.micrometer.core.instrument.Tags;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -42,6 +45,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final HyperliquidDirectIngestProperties properties;
     private final HyperliquidDirectCopyDispatchService directCopyDispatchService;
     private final HyperliquidOriginPositionStoreService originPositionStoreService;
+    private final OperationMovementEventService operationMovementEventService;
     private final MeterRegistry meterRegistry;
     private final BlockingQueue<QueuedDelta> queue;
     private final ExecutorService workers;
@@ -57,11 +61,13 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             HyperliquidDirectIngestProperties properties,
             HyperliquidDirectCopyDispatchService directCopyDispatchService,
             HyperliquidOriginPositionStoreService originPositionStoreService,
+            OperationMovementEventService operationMovementEventService,
             MeterRegistry meterRegistry
     ) {
         this.properties = properties;
         this.directCopyDispatchService = directCopyDispatchService;
         this.originPositionStoreService = originPositionStoreService;
+        this.operationMovementEventService = operationMovementEventService;
         this.meterRegistry = meterRegistry;
         this.queue = new ArrayBlockingQueue<>(Math.max(1, properties.getQueueCapacity()));
         this.workers = Executors.newFixedThreadPool(
@@ -211,9 +217,12 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private void process(QueuedDelta task) {
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mapped = task.mappedDelta();
-        try {
-            HyperliquidMappedDelta copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
+        HyperliquidMappedDelta copyReady = mapped;
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", originTraceId(mapped))) {
+            copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
+            MDC.put("traceId", originTraceId(copyReady));
             HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady);
+            operationMovementEventService.recordAsync(copyReady, dispatchResult, null);
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
             processed.incrementAndGet();
             long elapsedMs = elapsedMs(startedNs);
@@ -221,17 +230,37 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
             log.info("event=hyperliquid.direct_ingest.processed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} businessSkipped={} fallbackJobs={} fallbackUsed={} queueDelayMs={} elapsedMs={} queueDepth={}",
-                    task.dedupeKey(), mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
+                    task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
                     dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(),
                     queueDelayMs, elapsedMs, queue.size());
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
+            MDC.put("traceId", originTraceId(copyReady));
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
             log.error("event=hyperliquid.direct_ingest.failed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
-                    task.dedupeKey(), mapped.idempotencyKey(), mapped.positionKey(), mapped.wallet(), mapped.symbol(), mapped.side(), mapped.deltaType(),
+                    task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
                     ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queue.size());
+        } finally {
+            MDC.remove("traceId");
         }
+    }
+
+    private String originTraceId(HyperliquidMappedDelta mappedDelta) {
+        if (mappedDelta == null) {
+            return CopyTraceIdUtil.copyTraceId("NA", "origin", "NA", "NA");
+        }
+        String originId = "NA";
+        String wallet = mappedDelta.wallet();
+        String symbol = mappedDelta.symbol();
+        if (mappedDelta.event() != null && mappedDelta.event().getOperacion() != null) {
+            if (mappedDelta.event().getOperacion().getIdOperacion() != null) {
+                originId = mappedDelta.event().getOperacion().getIdOperacion().toString();
+            }
+            wallet = firstNonBlank(wallet, mappedDelta.event().getOperacion().getIdCuenta(), "NA");
+            symbol = firstNonBlank(symbol, mappedDelta.event().getOperacion().getParSymbol(), "NA");
+        }
+        return CopyTraceIdUtil.copyTraceId(originId, "origin", wallet, symbol);
     }
 
     private HyperliquidDeltaAcceptedResponse response(HyperliquidMappedDelta mappedDelta, boolean duplicate) {
