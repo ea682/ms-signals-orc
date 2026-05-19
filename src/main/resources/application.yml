@@ -52,9 +52,9 @@ spring:
         spring.json.add.type.headers: false
 
   datasource:
-    url: ${DB_URL:jdbc:postgresql://postgres:5432/trading_futuros?currentSchema=${DB_SCHEMA:futuros_operaciones}}
+    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=${DB_SCHEMA:futuros_operaciones}}
     username: ${DB_USER:postgres}
-    password: ${DB_PASSWORD:CHANGE_ME}
+    password: ${DB_PASSWORD:5450940}
 
   jpa:
     open-in-view: ${SPRING_JPA_OPEN_IN_VIEW:false}
