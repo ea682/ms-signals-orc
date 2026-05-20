@@ -2,7 +2,7 @@
 -- This migration is intentionally NOT using CREATE INDEX CONCURRENTLY so it can run under Flyway transactions.
 -- If V20260519 was already applied as a regular table, this migrates data into a partitioned table.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- PostgreSQL 16 exposes pg_catalog.sha256(bytea); pgcrypto is not required here.
 
 CREATE OR REPLACE FUNCTION futuros_operaciones.fn_operation_movement_decimal_key(p_value numeric)
 RETURNS text
@@ -33,7 +33,7 @@ IMMUTABLE
 AS $$
     SELECT CASE
         WHEN p_value IS NULL THEN 'NA'
-        ELSE to_char(p_value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        ELSE floor(extract(epoch FROM date_trunc('milliseconds', p_value)) * 1000)::bigint::text
     END;
 $$;
 
@@ -79,7 +79,7 @@ AS $$
             'tradePrice=' || futuros_operaciones.fn_operation_movement_decimal_key(COALESCE(p_mark_or_exit_price, p_entry_price))
         ) AS value
     )
-    SELECT 'movement|sha256:' || encode(digest(value, 'sha256'), 'hex')
+    SELECT 'movement|sha256:' || encode(pg_catalog.sha256(convert_to(value, 'UTF8')), 'hex')
     FROM payload;
 $$;
 

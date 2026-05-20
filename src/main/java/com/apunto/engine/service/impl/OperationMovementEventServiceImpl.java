@@ -688,7 +688,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
 
 
     private String timeKey(OffsetDateTime value) {
-        return value == null ? "NA" : value.withOffsetSameInstant(ZoneOffset.UTC).toInstant().toString();
+        return value == null ? "NA" : String.valueOf(value.toInstant().toEpochMilli());
     }
 
     private String compactKey(String value) {

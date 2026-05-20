@@ -66,7 +66,12 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
         if (!warmupOnStart) {
             return;
         }
-        refreshSync("startup");
+        try {
+            refreshSync("startup");
+        } catch (RuntimeException ex) {
+            log.warn("event=binance.symbol_catalog.warmup_failed phase=startup action=continue_startup errClass={} errMsg=\"{}\"",
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+        }
     }
 
     @Scheduled(fixedDelayString = "${binance.symbols.cache-ttl-ms:60000}")
