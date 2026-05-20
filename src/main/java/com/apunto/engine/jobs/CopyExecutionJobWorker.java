@@ -71,10 +71,10 @@ public class CopyExecutionJobWorker {
     private final TradingMetrics tradingMetrics;
     private final String workerId;
 
-    @Value("${copy.job.worker.max-batch:50}")
+    @Value("${operation.job.worker.max-batch:${copy.job.worker.max-batch:50}}")
     private int maxBatch;
 
-    @Value("${copy.job.worker.max-attempts:10}")
+    @Value("${operation.job.worker.max-attempts:${copy.job.worker.max-attempts:10}}")
     private int maxAttempts;
 
     public CopyExecutionJobWorker(
@@ -98,7 +98,7 @@ public class CopyExecutionJobWorker {
         this.workerId = buildWorkerId();
     }
 
-    @Scheduled(fixedDelayString = "${copy.job.worker.poll-ms:0}")
+    @Scheduled(fixedDelayString = "${operation.job.worker.poll-ms:${copy.job.worker.poll-ms:50}}")
     public void tick() {
         try {
             OffsetDateTime now = OffsetDateTime.now();

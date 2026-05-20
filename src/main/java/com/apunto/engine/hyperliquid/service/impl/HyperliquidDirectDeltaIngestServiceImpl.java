@@ -34,6 +34,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -47,7 +48,8 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final HyperliquidOriginPositionStoreService originPositionStoreService;
     private final OperationMovementEventService operationMovementEventService;
     private final MeterRegistry meterRegistry;
-    private final BlockingQueue<QueuedDelta> queue;
+    private final int laneCount;
+    private final BlockingQueue<QueuedDelta>[] lanes;
     private final ExecutorService workers;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicInteger activeWorkers = new AtomicInteger(0);
@@ -69,9 +71,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         this.originPositionStoreService = originPositionStoreService;
         this.operationMovementEventService = operationMovementEventService;
         this.meterRegistry = meterRegistry;
-        this.queue = new ArrayBlockingQueue<>(Math.max(1, properties.getQueueCapacity()));
+        this.laneCount = Math.max(1, properties.getWorkerThreads());
+        int perLaneCapacity = Math.max(1, (Math.max(1, properties.getQueueCapacity()) + laneCount - 1) / laneCount);
+        this.lanes = new BlockingQueue[laneCount];
+        for (int i = 0; i < laneCount; i++) {
+            this.lanes[i] = new ArrayBlockingQueue<>(perLaneCapacity);
+        }
         this.workers = Executors.newFixedThreadPool(
-                Math.max(1, properties.getWorkerThreads()),
+                laneCount,
                 new NamedThreadFactory("hl-delta-ingest-")
         );
         this.recentKeys = Caffeine.newBuilder()
@@ -89,8 +96,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             return;
         }
         running.set(true);
-        for (int i = 0; i < Math.max(1, properties.getWorkerThreads()); i++) {
-            workers.execute(this::workerLoop);
+        for (int i = 0; i < laneCount; i++) {
+            final BlockingQueue<QueuedDelta> lane = lanes[i];
+            workers.execute(() -> workerLoop(lane));
         }
         log.info("event=hyperliquid.direct_ingest.started queueCapacity={} workerThreads={} dedupeEnabled={} dedupeTtlSeconds={}",
                 properties.getQueueCapacity(), properties.getWorkerThreads(), properties.isDedupeEnabled(), properties.getDedupeTtlSeconds());
@@ -101,7 +109,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         running.set(false);
         workers.shutdownNow();
         log.info("event=hyperliquid.direct_ingest.stopped queueDepth={} accepted={} processed={} failed={} duplicates={}",
-                queue.size(), accepted.get(), processed.get(), failed.get(), duplicates.get());
+                queueDepth(), accepted.get(), processed.get(), failed.get(), duplicates.get());
     }
 
     @Scheduled(fixedDelayString = "${hyperliquid.direct-ingest.log-interval-ms:10000}")
@@ -110,7 +118,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             return;
         }
         log.info("event=hyperliquid.direct_ingest.metrics queueDepth={} queueCapacity={} activeWorkers={} accepted={} processed={} failed={} duplicates={}",
-                queue.size(), properties.getQueueCapacity(), activeWorkers.get(), accepted.get(), processed.get(), failed.get(), duplicates.get());
+                queueDepth(), properties.getQueueCapacity(), activeWorkers.get(), accepted.get(), processed.get(), failed.get(), duplicates.get());
     }
 
     @Override
@@ -120,7 +128,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         }
         if (!properties.isEnabled()) {
             if (properties.isRejectWhenDisabled()) {
-                throw rejected("direct_ingest_disabled", mappedDelta, queue.size());
+                throw rejected("direct_ingest_disabled", mappedDelta, queueDepth());
             }
             return response(mappedDelta, false);
         }
@@ -130,23 +138,24 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             duplicates.incrementAndGet();
             meterRegistry.counter("signals.hyperliquid.direct_ingest.duplicates.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
             log.info("event=hyperliquid.direct_ingest.duplicate dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
-                    dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queue.size());
+                    dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queueDepth());
             return response(mappedDelta, true);
         }
 
         QueuedDelta queuedDelta = new QueuedDelta(mappedDelta, dedupeKey, System.nanoTime());
-        if (!queue.offer(queuedDelta)) {
+        BlockingQueue<QueuedDelta> lane = lanes[laneFor(mappedDelta, dedupeKey)];
+        if (!lane.offer(queuedDelta)) {
             if (properties.isDedupeEnabled()) {
                 recentKeys.invalidate(dedupeKey);
             }
             meterRegistry.counter("signals.hyperliquid.direct_ingest.rejected.total", "reason", "queue_full").increment();
-            throw rejected("queue_full", mappedDelta, queue.size());
+            throw rejected("queue_full", mappedDelta, queueDepth());
         }
 
         accepted.incrementAndGet();
         meterRegistry.counter("signals.hyperliquid.direct_ingest.accepted.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
         log.debug("event=hyperliquid.direct_ingest.accepted dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
-                dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queue.size());
+                dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queueDepth());
         return response(mappedDelta, false);
     }
 
@@ -200,12 +209,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         return value.stripTrailingZeros().toPlainString();
     }
 
-    private void workerLoop() {
+    private void workerLoop(BlockingQueue<QueuedDelta> lane) {
         activeWorkers.incrementAndGet();
         try {
-            while (running.get() || !queue.isEmpty()) {
-                QueuedDelta task = queue.take();
-                process(task);
+            while (running.get() || !lane.isEmpty()) {
+                QueuedDelta task = lane.poll(250, TimeUnit.MILLISECONDS);
+                if (task != null) {
+                    process(task);
+                }
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -232,7 +243,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             log.info("event=hyperliquid.direct_ingest.processed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} businessSkipped={} fallbackJobs={} fallbackUsed={} queueDelayMs={} elapsedMs={} queueDepth={}",
                     task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
                     dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(),
-                    queueDelayMs, elapsedMs, queue.size());
+                    queueDelayMs, elapsedMs, queueDepth());
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
             MDC.put("traceId", originTraceId(copyReady));
@@ -240,7 +251,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
             log.error("event=hyperliquid.direct_ingest.failed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
                     task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
-                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queue.size());
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queueDepth());
         } finally {
             MDC.remove("traceId");
         }
@@ -272,7 +283,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                 mappedDelta.side(),
                 mappedDelta.deltaType(),
                 duplicate,
-                queue.size()
+                queueDepth()
         );
     }
 
@@ -294,7 +305,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     }
 
     private void registerMetrics() {
-        Gauge.builder("signals.hyperliquid.direct_ingest.queue.depth", queue, q -> q.size())
+        Gauge.builder("signals.hyperliquid.direct_ingest.queue.depth", this, svc -> svc.queueDepth())
                 .description("Hyperliquid direct ingest queue depth")
                 .register(meterRegistry);
         Gauge.builder("signals.hyperliquid.direct_ingest.workers.active", activeWorkers, a -> a.get())
@@ -309,6 +320,27 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         Gauge.builder("signals.hyperliquid.direct_ingest.failed.total.gauge", failed, a -> a.get())
                 .description("Hyperliquid direct ingest failed counter gauge")
                 .register(meterRegistry);
+    }
+
+
+    private int laneFor(HyperliquidMappedDelta mappedDelta, String dedupeKey) {
+        String key = firstNonBlank(
+                mappedDelta == null ? null : mappedDelta.positionKey(),
+                mappedDelta == null ? null : String.join("|",
+                        normalizeKey(mappedDelta.wallet()),
+                        normalizeKey(mappedDelta.symbol()),
+                        normalizeKey(mappedDelta.side())),
+                dedupeKey
+        );
+        return Math.floorMod(key.hashCode(), laneCount);
+    }
+
+    private int queueDepth() {
+        int total = 0;
+        for (BlockingQueue<QueuedDelta> lane : lanes) {
+            total += lane.size();
+        }
+        return total;
     }
 
     private long elapsedMs(long startedNs) {

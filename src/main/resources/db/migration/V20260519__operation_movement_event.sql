@@ -2,7 +2,7 @@
 -- Objetivo: que metricas y consultas de rentabilidad no dependan solo de copy_operation_event.
 -- Se graba asincronicamente desde el hot path; si esta cola falla, no bloquea el copiado.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- PostgreSQL 16 trae gen_random_uuid en pg_catalog; no se requiere pgcrypto.
 
 CREATE TABLE IF NOT EXISTS futuros_operaciones.operation_movement_event (
     id_event uuid PRIMARY KEY DEFAULT gen_random_uuid(),

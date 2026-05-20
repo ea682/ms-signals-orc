@@ -343,10 +343,14 @@ public class HyperliquidOriginPositionStoreService {
                 return;
             }
             BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference = resolvePriceReference(mapped);
-            Object lock = positionLocks.computeIfAbsent(lockKey(mapped), ignoredLock -> new Object());
+            String lockKey = lockKey(mapped);
+            Object lock = positionLocks.computeIfAbsent(lockKey, ignoredLock -> new Object());
             PersistOutcome outcome;
             synchronized (lock) {
                 outcome = transactionTemplate.execute(status -> persistLifecycle(mapped, task.dispatchResult(), startedNs, priceReference));
+            }
+            if (outcome != null && outcome.status() != PositionStatus.OPEN) {
+                positionLocks.remove(lockKey, lock);
             }
             persisted.incrementAndGet();
             meterRegistry.timer("signals.hyperliquid.origin_store.persist.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
