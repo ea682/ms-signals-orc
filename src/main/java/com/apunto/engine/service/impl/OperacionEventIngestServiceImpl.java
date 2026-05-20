@@ -51,10 +51,10 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private final TradingMetrics tradingMetrics;
     private final OperationMovementEventService operationMovementEventService;
 
-    @Value("${copy.job.ingest.filter-by-wallet-allocation:true}")
+    @Value("${operation.job.ingest.filter-by-wallet-allocation:${copy.job.ingest.filter-by-wallet-allocation:true}}")
     private boolean filterByWalletAllocation;
 
-    @Value("${copy.job.ingest.fallback-all-users-on-empty-allocation:false}")
+    @Value("${operation.job.ingest.fallback-all-users-on-empty-allocation:${copy.job.ingest.fallback-all-users-on-empty-allocation:false}}")
     private boolean fallbackAllUsersOnEmptyAllocation;
 
     @Override

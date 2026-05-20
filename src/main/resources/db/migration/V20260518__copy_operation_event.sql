@@ -2,7 +2,7 @@
 -- Mantiene separado el estado agregado (copy_operation) del ledger de fills (copy_operation_event).
 -- Ejecutar en el esquema futuros_operaciones.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- PostgreSQL 16 trae gen_random_uuid en pg_catalog; no se requiere pgcrypto.
 
 CREATE TABLE IF NOT EXISTS futuros_operaciones.copy_operation_event (
     id_event uuid PRIMARY KEY DEFAULT gen_random_uuid(),
