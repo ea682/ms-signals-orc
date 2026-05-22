@@ -1,6 +1,7 @@
 package com.apunto.engine.hyperliquid.service.impl;
 
 import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
+import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -139,12 +140,14 @@ public class BinanceFuturesPriceNormalizerService {
                         safeLog(symbol), ex.getStatusCode().value(), elapsedMs(startedNs));
                 return Optional.empty();
             }
-            log.warn("event=hyperliquid.origin_store.binance_price.failed symbol={} errClass={} httpStatus={} errMsg=\"{}\" elapsedMs={}",
-                    safeLog(symbol), ex.getClass().getSimpleName(), ex.getStatusCode().value(), safeLog(ex.getMessage()), elapsedMs(startedNs));
+            log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=origin_metrics_only errClass={} httpStatus={} errMsg=\"{}\" elapsedMs={} {}",
+                    safeLog(symbol), ex.getClass().getSimpleName(), ex.getStatusCode().value(), safeLog(ex.getMessage()), elapsedMs(startedNs),
+                    CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
             return Optional.empty();
         } catch (RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException | JsonProcessingException ex) {
-            log.warn("event=hyperliquid.origin_store.binance_price.failed symbol={} errClass={} errMsg=\"{}\" elapsedMs={}",
-                    safeLog(symbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
+            log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=origin_metrics_only errClass={} errMsg=\"{}\" elapsedMs={} {}",
+                    safeLog(symbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs),
+                    CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
             return Optional.empty();
         }
     }

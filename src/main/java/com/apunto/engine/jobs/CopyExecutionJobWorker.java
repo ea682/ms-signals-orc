@@ -21,6 +21,7 @@ import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
+import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -243,7 +244,7 @@ public class CopyExecutionJobWorker {
             tradingMetrics.jobResult(job, "skipped", skip.getReasonCode());
 
             CopyJobLogContext ctx = copyJobLogContext(event, skip);
-            log.info("event=copy.job.skipped id={} originId={} userId={} action={} wallet={} symbol={} side={} positionSide={} qty={} attempts={} category={} retryable=false workerId={} reasonCode={} errCode={} httpStatus={} binanceCode={} traceId={} reason=\"{}\" errMsg=\"{}\" details=\"{}\"",
+            log.info("event=copy.job.skipped id={} originId={} userId={} action={} wallet={} symbol={} side={} positionSide={} qty={} attempts={} category={} retryable=false workerId={} reasonCode={} errCode={} httpStatus={} binanceCode={} traceId={} reason=\"{}\" errMsg=\"{}\" details=\"{}\" {}",
                     job.getId(),
                     job.getOriginId(),
                     job.getUserId(),
@@ -263,7 +264,8 @@ public class CopyExecutionJobWorker {
                     orNA(extractLogFmtValue(skip.getDetails(), "traceId")),
                     safeMsgForLog(skip.getReason()),
                     safeMsgForLog(skip.getMessage()),
-                    safeMsgForLog(skip.getDetails()));
+                    safeMsgForLog(skip.getDetails()),
+                    CopyLogAdvice.fields(skip.getReasonCode(), CopyLogAdvice.context(null, null, null, 1, null, null, null, "copy_job_worker")));
 
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             handleFailure(job, event, ex);

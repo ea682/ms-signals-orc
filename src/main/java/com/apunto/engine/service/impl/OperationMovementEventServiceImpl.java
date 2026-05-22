@@ -12,6 +12,7 @@ import com.apunto.engine.repository.OperationMovementEventRepository;
 import com.apunto.engine.service.OperationMovementEventService;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.util.CopyTraceIdUtil;
+import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.Gauge;
@@ -153,9 +154,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         if (!queue.offer(queuedMovement)) {
             rejected.incrementAndGet();
             meterRegistry.counter("signals.operation_movement_event.rejected.total", "reason", "queue_full").increment();
-            log.error("event=operation_movement_event.rejected category=audit reasonAlias=ledger_queue_full friendlyReason=cola_de_historial_llena explanation=no_se_bloquea_el_copiado_pero_no_se_pudo_encolar_el_movimiento copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} queueDepth={}",
+            log.error("event=operation_movement_event.rejected category=audit reasonCode=queue_full reasonAlias=ledger_queue_full friendlyReason=cola_de_historial_llena explanation=no_se_bloquea_el_copiado_pero_no_se_pudo_encolar_el_movimiento copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} queueDepth={} {}",
                     safe(command.getTraceId()), safe(asString(command.getIdOrderOrigin())), safe(command.getIdWalletOrigin()), safe(command.getParsymbol()),
-                    safe(command.getDeltaType()), safe(command.getMovementKey()), queue.size());
+                    safe(command.getDeltaType()), safe(command.getMovementKey()), queue.size(),
+                    CopyLogAdvice.fields("queue_full", CopyLogAdvice.context(null, null, null, null, queue.size(), null, null, "operation_movement_event")));
             return;
         }
         submitted.incrementAndGet();
@@ -184,9 +186,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         } catch (DataIntegrityViolationException ex) {
             if (isUniqueViolation(ex)) {
                 skipped.incrementAndGet();
-                log.info("event=operation_movement_event.insert_duplicate category=audit reasonAlias=ledger_duplicate_ignored friendlyReason=historial_ya_tenia_el_movimiento explanation=se_ignora_duplicado_por_movementKey copyImpact=ledger_idempotent traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={}",
+                log.info("event=operation_movement_event.insert_duplicate category=audit reasonCode=ledger_duplicate_ignored reasonAlias=ledger_duplicate_ignored friendlyReason=historial_ya_tenia_el_movimiento explanation=se_ignora_duplicado_por_movementKey copyImpact=ledger_idempotent traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} {}",
                         safe(command.getTraceId()), safe(asString(command.getIdOrderOrigin())), safe(command.getIdWalletOrigin()), safe(command.getParsymbol()),
-                        safe(command.getDeltaType()), safe(command.getMovementKey()));
+                        safe(command.getDeltaType()), safe(command.getMovementKey()),
+                        CopyLogAdvice.fields("ledger_duplicate_ignored", CopyLogAdvice.context(null, null, null, null, queue.size(), null, null, "operation_movement_event")));
                 return;
             }
             failed(command, task, ex);
@@ -198,9 +201,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     private void persist(OperationMovementEventRecordCommand command, long acceptedNs, long startedNs) {
         if (repository.existsByMovementKeyInGuard(command.getMovementKey())) {
             skipped.incrementAndGet();
-            log.info("event=operation_movement_event.idempotent category=audit reasonAlias=movement_already_recorded friendlyReason=movimiento_ya_registrado explanation=movementKey_ya_existia_en_guard_y_no_se_duplica copyImpact=ledger_idempotent traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={}",
+            log.info("event=operation_movement_event.idempotent category=audit reasonCode=movement_already_recorded reasonAlias=movement_already_recorded friendlyReason=movimiento_ya_registrado explanation=movementKey_ya_existia_en_guard_y_no_se_duplica copyImpact=ledger_idempotent traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} {}",
                     safe(command.getTraceId()), safe(asString(command.getIdOrderOrigin())), safe(command.getIdWalletOrigin()), safe(command.getParsymbol()),
-                    safe(command.getDeltaType()), safe(command.getMovementKey()));
+                    safe(command.getDeltaType()), safe(command.getMovementKey()),
+                    CopyLogAdvice.fields("movement_already_recorded", CopyLogAdvice.context(null, null, null, null, queue.size(), null, null, "operation_movement_event")));
             return;
         }
 
@@ -211,10 +215,14 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         meterRegistry.counter("signals.operation_movement_event.persisted.total", "eventType", safeTag(entity.getEventType()), "deltaType", safeTag(entity.getDeltaType())).increment();
         meterRegistry.timer("signals.operation_movement_event.persist.duration", "result", "ok", "eventType", safeTag(entity.getEventType()))
                 .record(Duration.ofNanos(System.nanoTime() - startedNs));
-        log.info("event=operation_movement_event.insert_ok category=audit reasonAlias=origin_movement_recorded friendlyReason=historial_de_operacion_actualizado explanation=se_guardo_el_movimiento_original_para_reconstruir_rentabilidad_y_trazabilidad copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} side={} eventType={} deltaType={} previousSizeQty={} resultingSizeQty={} deltaSizeQty={} realizedPnlUsd={} copyEligibleUsers={} copySubmittedTasks={} queueDelayMs={} elapsedMs={} queueDepth={}",
+        String ledgerDiagnostic = entity.getReasonCode() == null ? "" : CopyLogAdvice.fields(
+                entity.getReasonCode(),
+                CopyLogAdvice.context(entity.getCopyEligibleUsers(), entity.getCopyEligibleUsers(), entity.getCopySubmittedTasks(), entity.getCopyBusinessSkipped(), queue.size(), null, null, "operation_movement_event")
+        );
+        log.info("event=operation_movement_event.insert_ok category=audit reasonAlias=origin_movement_recorded friendlyReason=historial_de_operacion_actualizado explanation=se_guardo_el_movimiento_original_para_reconstruir_rentabilidad_y_trazabilidad copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} side={} eventType={} deltaType={} reasonCode={} previousSizeQty={} resultingSizeQty={} deltaSizeQty={} realizedPnlUsd={} copyEligibleUsers={} copySubmittedTasks={} copyBusinessSkipped={} queueDelayMs={} elapsedMs={} queueDepth={} {}",
                 safe(entity.getTraceId()), safe(asString(entity.getIdOrderOrigin())), safe(entity.getIdWalletOrigin()), safe(entity.getParsymbol()), safe(entity.getTypeOperation()),
-                safe(entity.getEventType()), safe(entity.getDeltaType()), entity.getPreviousSizeQty(), entity.getResultingSizeQty(), entity.getDeltaSizeQty(), entity.getRealizedPnlUsd(),
-                entity.getCopyEligibleUsers(), entity.getCopySubmittedTasks(), elapsedMs(acceptedNs), elapsedMs(startedNs), queue.size());
+                safe(entity.getEventType()), safe(entity.getDeltaType()), safe(entity.getReasonCode()), entity.getPreviousSizeQty(), entity.getResultingSizeQty(), entity.getDeltaSizeQty(), entity.getRealizedPnlUsd(),
+                entity.getCopyEligibleUsers(), entity.getCopySubmittedTasks(), entity.getCopyBusinessSkipped(), elapsedMs(acceptedNs), elapsedMs(startedNs), queue.size(), ledgerDiagnostic);
     }
 
     private OperationMovementEventEntity previousMovement(OperationMovementEventRecordCommand command) {
@@ -231,14 +239,15 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     private void failed(OperationMovementEventRecordCommand command, QueuedMovement task, RuntimeException ex) {
         failed.incrementAndGet();
         meterRegistry.counter("signals.operation_movement_event.failed.total", "reason", safeTag(ex.getClass().getSimpleName())).increment();
-        log.error("event=operation_movement_event.insert_failed category=audit reasonAlias=ledger_insert_failed friendlyReason=no_se_pudo_guardar_historial_de_operacion explanation=fallo_bd_al_guardar_movimiento_original copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
+        log.error("event=operation_movement_event.insert_failed category=audit reasonCode=ledger_insert_failed reasonAlias=ledger_insert_failed friendlyReason=no_se_pudo_guardar_historial_de_operacion explanation=fallo_bd_al_guardar_movimiento_original copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={} {}",
                 safe(command == null ? null : command.getTraceId()),
                 safe(command == null ? null : asString(command.getIdOrderOrigin())),
                 safe(command == null ? null : command.getIdWalletOrigin()),
                 safe(command == null ? null : command.getParsymbol()),
                 safe(command == null ? null : command.getDeltaType()),
                 safe(command == null ? null : command.getMovementKey()),
-                ex.getClass().getSimpleName(), safe(ex.getMessage()), elapsedMs(task.acceptedNs()), 0L, queue.size(), ex);
+                ex.getClass().getSimpleName(), safe(ex.getMessage()), elapsedMs(task.acceptedNs()), 0L, queue.size(),
+                CopyLogAdvice.fields("ledger_insert_failed", CopyLogAdvice.context(null, null, null, null, queue.size(), null, null, "operation_movement_event")), ex);
     }
 
     private OperationMovementEventRecordCommand fromMappedDelta(HyperliquidMappedDelta mappedDelta, HyperliquidDirectCopyDispatchResult dispatchResult, String reasonCode) {
@@ -254,6 +263,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         OffsetDateTime eventTime = firstNonNull(sourceTs, detectedAt, publishedAt, fromInstant(op.getFechaCierre()), fromInstant(op.getFechaCreacion()), utcNow());
         String deltaType = firstNonBlank(mappedDelta.deltaType(), event.getDeltaType(), req == null ? null : req.deltaType(), "UNKNOWN");
         String traceId = currentOrOriginTraceId(op.getIdOperacion(), firstNonBlank(mappedDelta.wallet(), op.getIdCuenta()), firstNonBlank(mappedDelta.symbol(), op.getParSymbol()));
+        String effectiveReasonCode = firstNonBlank(reasonCode, dispatchResult == null ? null : dispatchResult.reasonCode());
 
         return OperationMovementEventRecordCommand.builder()
                 .idOrderOrigin(op.getIdOperacion())
@@ -283,13 +293,13 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .eventTime(eventTime)
                 .traceId(traceId)
                 .source(SOURCE_DIRECT_INGEST)
-                .reasonCode(reasonCode)
+                .reasonCode(effectiveReasonCode)
                 .copyEligibleUsers(dispatchResult == null ? null : dispatchResult.eligibleUsers())
                 .copySubmittedTasks(dispatchResult == null ? null : dispatchResult.submittedTasks())
                 .copyBusinessSkipped(dispatchResult == null ? null : dispatchResult.businessSkipped())
                 .copyFallbackJobs(dispatchResult == null ? null : dispatchResult.fallbackJobs())
                 .copyFallbackUsed(dispatchResult == null ? null : dispatchResult.fallbackUsed())
-                .raw(rawFromMapped(mappedDelta, dispatchResult, reasonCode))
+                .raw(rawFromMapped(mappedDelta, dispatchResult, effectiveReasonCode))
                 .build();
     }
 
