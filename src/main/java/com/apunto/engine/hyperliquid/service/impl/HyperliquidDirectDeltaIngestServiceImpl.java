@@ -11,6 +11,7 @@ import com.apunto.engine.hyperliquid.service.HyperliquidDirectCopyDispatchServic
 import com.apunto.engine.service.OperationMovementEventService;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.util.CopyTraceIdUtil;
+import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.micrometer.core.instrument.Gauge;
@@ -137,8 +138,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         if (properties.isDedupeEnabled() && recentKeys.asMap().putIfAbsent(dedupeKey, Boolean.TRUE) != null) {
             duplicates.incrementAndGet();
             meterRegistry.counter("signals.hyperliquid.direct_ingest.duplicates.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
-            log.info("event=hyperliquid.direct_ingest.duplicate dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
-                    dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queueDepth());
+            log.info("event=hyperliquid.direct_ingest.duplicate dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} reasonCode=movement_already_recorded queueDepth={} {}",
+                    dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queueDepth(),
+                    CopyLogAdvice.fields("movement_already_recorded", CopyLogAdvice.context(null, null, null, null, queueDepth(), null, null, "direct_ingest_dedupe")));
             return response(mappedDelta, true);
         }
 
@@ -233,17 +235,22 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
             MDC.put("traceId", originTraceId(copyReady));
             HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady);
-            operationMovementEventService.recordAsync(copyReady, dispatchResult, null);
+            operationMovementEventService.recordAsync(copyReady, dispatchResult, dispatchResult.reasonCode());
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
             processed.incrementAndGet();
             long elapsedMs = elapsedMs(startedNs);
             long queueDelayMs = elapsedMs(task.acceptedNs());
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
-            log.info("event=hyperliquid.direct_ingest.processed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} businessSkipped={} fallbackJobs={} fallbackUsed={} queueDelayMs={} elapsedMs={} queueDepth={}",
+            String copySkipReasonCode = dispatchResult.reasonCode();
+            String copySkipDiagnostic = copySkipReasonCode == null ? "" : CopyLogAdvice.fields(
+                    copySkipReasonCode,
+                    CopyLogAdvice.context(dispatchResult.eligibleUsers(), dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), queueDepth(), null, null, "direct_ingest")
+            );
+            log.info("event=hyperliquid.direct_ingest.processed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} eligibleUsers={} submittedTasks={} businessSkipped={} fallbackJobs={} fallbackUsed={} copySkipReasonCode={} queueDelayMs={} elapsedMs={} queueDepth={} {}",
                     task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
-                    dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(),
-                    queueDelayMs, elapsedMs, queueDepth());
+                    dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(), safeLog(copySkipReasonCode),
+                    queueDelayMs, elapsedMs, queueDepth(), copySkipDiagnostic);
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
             MDC.put("traceId", originTraceId(copyReady));

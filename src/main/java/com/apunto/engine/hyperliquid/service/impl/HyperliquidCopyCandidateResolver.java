@@ -9,6 +9,7 @@ import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
+import com.apunto.engine.shared.util.CopyLogAdvice;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -68,15 +69,23 @@ public class HyperliquidCopyCandidateResolver {
         String originId = operation.getIdOperacion() == null ? null : operation.getIdOperacion().toString();
         Set<String> activeUserIds = activeCopyOperationCache.activeUserIds(originId);
         List<UserDetailDto> eligible = filterUsersById(usersCached, activeUserIds);
-        log.info("event=hyperliquid.direct_copy.user_filter source={} originId={} wallet={} symbol={} activeCopyUsers={} usersCached={} eligibleUsers={} eligibleUserIds={}",
-                source, safeLog(originId), safeLog(operation.getIdCuenta()), safeLog(operation.getParSymbol()), activeUserIds.size(), usersCached.size(), eligible.size(), userIdsCsv(eligible));
+        String reasonCode = eligible.isEmpty() ? ("active_copy_close".equals(source) ? "close_without_open_copy" : "resize_without_open_copy") : "active_copy_users_found";
+        String diagnostic = eligible.isEmpty()
+                ? CopyLogAdvice.fields(reasonCode, CopyLogAdvice.context(activeUserIds.size(), eligible.size(), 0, 0, null, null, activeUserIds.size(), source))
+                : "";
+        log.info("event=hyperliquid.direct_copy.user_filter source={} originId={} wallet={} symbol={} activeCopyUsers={} usersCached={} eligibleUsers={} eligibleUserIds={} reasonCode={} {}",
+                source, safeLog(originId), safeLog(operation.getIdCuenta()), safeLog(operation.getParSymbol()), activeUserIds.size(), usersCached.size(), eligible.size(), userIdsCsv(eligible), reasonCode, diagnostic);
         return new CandidateUsers(usersCached, eligible, source);
     }
 
     private CandidateUsers activeCopyUsersByWalletAndSymbol(OperacionDto operation, List<UserDetailDto> usersCached, String source) {
         Set<String> activeUserIds = activeCopyOperationCache.activeUserIdsByWalletAndSymbol(operation.getIdCuenta(), operation.getParSymbol());
         List<UserDetailDto> eligible = filterUsersById(usersCached, activeUserIds);
-        log.info("event=hyperliquid.direct_copy.user_filter source={} originId={} wallet={} symbol={} activeCopyUsers={} usersCached={} eligibleUsers={} eligibleUserIds={}",
+        String reasonCode = eligible.isEmpty() ? "flip_without_open_copy" : "active_copy_users_found";
+        String diagnostic = eligible.isEmpty()
+                ? CopyLogAdvice.fields(reasonCode, CopyLogAdvice.context(activeUserIds.size(), eligible.size(), 0, 0, null, null, activeUserIds.size(), source))
+                : "";
+        log.info("event=hyperliquid.direct_copy.user_filter source={} originId={} wallet={} symbol={} activeCopyUsers={} usersCached={} eligibleUsers={} eligibleUserIds={} reasonCode={} {}",
                 source,
                 operation.getIdOperacion(),
                 safeLog(operation.getIdCuenta()),
@@ -84,7 +93,9 @@ public class HyperliquidCopyCandidateResolver {
                 activeUserIds.size(),
                 usersCached.size(),
                 eligible.size(),
-                userIdsCsv(eligible));
+                userIdsCsv(eligible),
+                reasonCode,
+                diagnostic);
         return new CandidateUsers(usersCached, eligible, source);
     }
 
@@ -94,15 +105,17 @@ public class HyperliquidCopyCandidateResolver {
             return new CandidateUsers(usersCached, usersCached, "all_users_config");
         }
         if (walletId == null || walletId.isBlank()) {
-            log.warn("event=hyperliquid.direct_copy.user_filter_skipped reason=wallet_missing usersCached={}", usersCached.size());
+            log.warn("event=hyperliquid.direct_copy.user_filter_skipped reasonCode=wallet_missing usersCached={} {}", usersCached.size(),
+                    CopyLogAdvice.fields("wallet_missing", CopyLogAdvice.context(null, 0, 0, 0, null, null, null, "allocation_wallet_missing")));
             List<UserDetailDto> eligible = fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
             return new CandidateUsers(usersCached, eligible, "allocation_wallet_missing");
         }
 
         Set<UUID> activeUserIds = userCopyAllocationService.getActiveUserIdsByWallet(walletId);
         if (activeUserIds.isEmpty()) {
-            log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} activeAllocationUsers=0 usersCached={} eligibleUsers=0 fallbackAllUsers={}",
-                    safeLog(walletId), usersCached.size(), fallbackAllUsersOnEmptyAllocation);
+            log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} activeAllocationUsers=0 usersCached={} eligibleUsers=0 fallbackAllUsers={} reasonCode=allocation_empty {}",
+                    safeLog(walletId), usersCached.size(), fallbackAllUsersOnEmptyAllocation,
+                    CopyLogAdvice.fields("allocation_empty", CopyLogAdvice.context(0, 0, 0, 0, null, null, 0, "allocation")));
             List<UserDetailDto> eligible = fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
             return new CandidateUsers(usersCached, eligible, "allocation_empty");
         }
