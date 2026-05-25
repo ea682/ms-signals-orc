@@ -93,6 +93,182 @@ public final class CopyLogAdvice {
                     true,
                     false
             );
+
+            case "flip_starts_new_side" -> new Advice(
+                    code,
+                    "INFO",
+                    "FLIP detectado: se prepara una nueva posicion del lado contrario.",
+                    "Hyperliquid cambio de LONG a SHORT o de SHORT a LONG.",
+                    "El estado original queda separado en cierre del lado anterior y apertura del lado nuevo.",
+                    "Correcto en produccion; verificar solo si no aparece el cierre del lado anterior cuando existia posicion previa.",
+                    false,
+                    false
+            );
+            case "flip_closed_previous_side", "flip_close_previous_side" -> new Advice(
+                    code,
+                    "INFO",
+                    "FLIP cerro primero el lado anterior antes de abrir el nuevo.",
+                    "Para copiar un FLIP de forma segura se debe cerrar la posicion previa y luego abrir la direccion contraria.",
+                    "Evita quedar con posiciones opuestas o con riesgo duplicado en Binance.",
+                    "Correcto; revisar solo si luego falla la apertura del nuevo lado para reconciliar la posicion manualmente.",
+                    false,
+                    false
+            );
+            case "flip_open_new_side" -> new Advice(
+                    code,
+                    "INFO",
+                    "FLIP abrio la nueva posicion del lado contrario.",
+                    "Despues de cerrar la copia anterior, el sistema envio la apertura de la nueva direccion.",
+                    "La copia queda alineada con la nueva direccion de la wallet original.",
+                    "Correcto; si falla, reconciliar Binance antes de reintentar para evitar duplicados.",
+                    false,
+                    false
+            );
+            case "flip_replaces_previous_side" -> new Advice(
+                    code,
+                    "INFO",
+                    "El FLIP reemplaza el lado anterior en el basket de reconciliacion.",
+                    "La fuente actual trae una posicion nueva del lado contrario y la pierna opuesta ya no debe seguir como objetivo.",
+                    "Fuerza cierre de la copia antigua y apertura de la nueva, en vez de mantener ambas.",
+                    "Correcto; revisar si aparecen dos copias activas del mismo simbolo y wallet.",
+                    false,
+                    false
+            );
+
+
+            case "flip_preflight_blocked", "flip_preflight_no_new_target", "flip_preflight_metric_blocked", "flip_preflight_budget_blocked" -> new Advice(
+                    code,
+                    "CRITICAL",
+                    "FLIP bloqueado por validacion previa antes de abrir el lado nuevo.",
+                    "El sistema no pudo construir un objetivo seguro para la nueva direccion del FLIP, por metricas, presupuesto o datos insuficientes.",
+                    "Puede quedar sin copiar el cambio de direccion o cerrar solo el lado anterior segun politica de seguridad configurada.",
+                    "Revisar metricas, presupuesto, simbolo, targetQty y posicion real en Binance antes de reintentar.",
+                    false,
+                    true
+            );
+            case "flip_open_blocked_after_close" -> new Advice(
+                    code,
+                    "CRITICAL",
+                    "FLIP dejo el lado nuevo bloqueado despues de la validacion.",
+                    "La politica de seguridad permitio cerrar el lado anterior, pero no habia condiciones para abrir la direccion nueva.",
+                    "La cuenta puede quedar plana respecto a la wallet original hasta que se recupere la apertura.",
+                    "Reconciliar Binance y reintentar apertura del lado nuevo con el mismo clientOrderId/idempotencia.",
+                    false,
+                    true
+            );
+            case "flip_open_retry_allowed" -> new Advice(
+                    code,
+                    "REVIEW",
+                    "Se permite reintentar la apertura pendiente de un FLIP.",
+                    "Habia un estado pending/uncertain para el lado nuevo, pero el retry usa el mismo clientOrderId idempotente.",
+                    "Ayuda a recuperar un FLIP que cerro el lado anterior y fallo o quedó dudoso al abrir el nuevo.",
+                    "Correcto si el retry viene de reconciliacion; revisar solo si se repite muchas veces.",
+                    false,
+                    false
+            );
+            case "trigger_is_close" -> new Advice(
+                    code,
+                    "INFO",
+                    "Un cierre disparo reconciliacion y no se abren posiciones nuevas.",
+                    "El trigger era de cierre; abrir otras posiciones desde este evento podria copiar historico fuera de orden.",
+                    "No se envia orden de apertura/aumento.",
+                    "Correcto; revisar solo si esperabas una apertura por evento OPEN/FLIP.",
+                    false,
+                    false
+            );
+            case "non_trigger_position" -> new Advice(
+                    code,
+                    "INFO",
+                    "La posicion no era el evento que disparo el rebalance.",
+                    "Para evitar copiar historico atrasado, el sistema solo abre/aumenta la posicion del trigger actual.",
+                    "No se envia orden para esa pierna del basket.",
+                    "Correcto; si se necesita hidratar una wallet nueva, usar flujo explicito de hidratacion inicial.",
+                    false,
+                    false
+            );
+            case "source_update_time_missing" -> new Advice(
+                    code,
+                    "REVIEW",
+                    "No se aumento porque la fuente no trae fecha confiable.",
+                    "Sin timestamp no se puede saber si el resize es reciente o antiguo.",
+                    "Evita aumentar una copia con un estado viejo.",
+                    "Validar parser de timestamps de Hyperliquid y revisar el evento por traceId.",
+                    false,
+                    true
+            );
+            case "stale_source_update" -> new Advice(
+                    code,
+                    "INFO",
+                    "No se aumento porque el estado fuente estaba fuera de tiempo.",
+                    "El resize llego tarde o fue procesado despues del limite aceptado.",
+                    "Evita ajustar la copia con datos viejos.",
+                    "Correcto; si ocurre en wallets activas con frecuencia, revisar cola origin_store/websocket.",
+                    false,
+                    false
+            );
+
+            case "adjustment_reconcile_required" -> new Advice(
+                    code,
+                    "INFO",
+                    "El ajuste se resuelve por reconciliacion del basket, no como apertura directa.",
+                    "RESIZE, UPDATE y FLIP necesitan comparar estado objetivo contra copia actual para evitar duplicados o tamanos viejos.",
+                    "La copia se ajusta al tamano correcto usando una sola ruta controlada.",
+                    "Correcto; revisar solo si no aparece luego un increase, reduce, close u open esperado.",
+                    false,
+                    false
+            );
+            case "rebalance_open" -> new Advice(
+                    code,
+                    "INFO",
+                    "Se abre una copia faltante durante la reconciliacion.",
+                    "La wallet original tiene una posicion copiable que aun no existe en Binance para el usuario.",
+                    "Se envia una apertura controlada y se registra en copy_operation_event.",
+                    "Correcto si la wallet esta asignada; revisar presupuesto y filtros si no aparece la orden.",
+                    false,
+                    false
+            );
+            case "rebalance_full_close" -> new Advice(
+                    code,
+                    "INFO",
+                    "Se cierra una copia que ya no existe como objetivo en la wallet original.",
+                    "La reconciliacion detecto que Binance mantiene una copia que la fuente ya no debe tener activa.",
+                    "Reduce riesgo de quedar con posiciones colgadas.",
+                    "Correcto; verificar solo si se reabre inmediatamente por datos fuera de orden.",
+                    false,
+                    false
+            );
+            case "rebalance_reduce" -> new Advice(
+                    code,
+                    "INFO",
+                    "Se reduce una copia para igualar el nuevo tamano objetivo.",
+                    "La wallet original bajo exposicion y Binance debe reducir con reduceOnly.",
+                    "Disminuye posicion sin abrir riesgo contrario.",
+                    "Correcto; revisar si Binance rechaza reduceOnly o si el tamano final no coincide.",
+                    false,
+                    false
+            );
+            case "rebalance_increase" -> new Advice(
+                    code,
+                    "INFO",
+                    "Se aumenta una copia para igualar el nuevo tamano objetivo.",
+                    "La wallet original subio exposicion y el presupuesto permite aumentar.",
+                    "La posicion copiada queda mas cerca del sizing objetivo.",
+                    "Correcto; revisar si falta margen, minimo notional o filtro de riesgo.",
+                    false,
+                    false
+            );
+
+            case "direct_close" -> new Advice(
+                    code,
+                    "INFO",
+                    "Se cierra una copia activa en Binance.",
+                    "La wallet original cerro o la reconciliacion determino que la copia ya no debe seguir abierta.",
+                    "La orden se envia con reduceOnly para evitar abrir exposicion contraria.",
+                    "Correcto; revisar solo si Binance rechaza el cierre o la copia queda activa despues del evento.",
+                    false,
+                    false
+            );
+
             case "delta_not_lifecycle_start" -> new Advice(
                     code,
                     "INFO",
@@ -215,6 +391,78 @@ public final class CopyLogAdvice {
                     true,
                     false
             );
+
+            case "database_error" -> new Advice(
+                    code,
+                    "ERROR",
+                    "La base de datos rechazo o no pudo completar la operacion.",
+                    "Hubo error de conexion, constraint, timeout, lock o consulta invalida en Postgres.",
+                    "La solicitud no queda confirmada y se debe revisar antes de reintentar si involucra ordenes.",
+                    "Revisar errMsg, tabla/constraint, locks y estado de la transaccion antes de repetir la accion.",
+                    false,
+                    true
+            );
+            case "request_invalid", "validation_error" -> new Advice(
+                    code,
+                    "INFO",
+                    "La solicitud recibida no cumple el formato esperado.",
+                    "Faltan campos obligatorios o algun valor tiene tipo/formato invalido.",
+                    "No se procesa el evento para evitar guardar o ejecutar datos incompletos.",
+                    "Corregir payload/parametros y validar contrato del endpoint que llamo al servicio.",
+                    false,
+                    false
+            );
+            case "business_error" -> new Advice(
+                    code,
+                    "REVIEW",
+                    "Una regla de negocio bloqueo la operacion.",
+                    "El request era valido tecnicamente, pero no cumple una condicion segura del flujo de copia.",
+                    "No se ejecuta la accion para evitar descuadres o riesgo no permitido.",
+                    "Revisar reasonCode especifico y estado de copy_operation/cache antes de forzar cambios.",
+                    false,
+                    true
+            );
+            case "binance_rate_limit" -> new Advice(
+                    code,
+                    "ERROR",
+                    "Binance limito temporalmente las solicitudes.",
+                    "Se alcanzo un limite de requests o peso de API.",
+                    "Las ordenes/reintentos pueden demorarse y deben respetar backoff para no duplicar ni banear la cuenta.",
+                    "Activar backoff, revisar volumen por API key y esperar reconciliacion antes de repetir manualmente.",
+                    false,
+                    true
+            );
+            case "copy_order_rejected" -> new Advice(
+                    code,
+                    "ERROR",
+                    "Binance rechazo la orden de copia.",
+                    "La orden no cumplio una regla del exchange: simbolo, cantidad, notional, modo de posicion, margen o parametro invalido.",
+                    "No hay que asumir que la posicion quedo copiada; se requiere reconciliacion.",
+                    "Revisar binanceCode/binanceMsg/clientOrderId y consultar estado real en Binance antes de reintentar.",
+                    false,
+                    true
+            );
+            case "copy_binance_client_error", "external_service_error" -> new Advice(
+                    code,
+                    "ERROR",
+                    "El servicio externo que ejecuta la copia fallo o no respondio correctamente.",
+                    "ms-binance-engine, red o Binance devolvieron error no seguro para asumir exito.",
+                    "La copia puede quedar pendiente o incierta y debe reconciliarse contra Binance.",
+                    "Buscar clientOrderId en Binance, revisar retry/fallback y no reenviar a ciegas.",
+                    false,
+                    true
+            );
+            case "internal_error" -> new Advice(
+                    code,
+                    "CRITICAL",
+                    "El servicio tuvo un error interno no recuperado.",
+                    "Una excepcion no controlada llego al manejador global.",
+                    "Puede dejar una accion sin confirmar; si involucra copia, requiere reconciliacion antes de reintentar.",
+                    "Revisar stacktrace, traceId y estado real de Binance/DB; agregar reasonCode especifico si se repite.",
+                    false,
+                    true
+            );
+
             case "unknown" -> new Advice(
                     code,
                     "REVIEW",

@@ -1,5 +1,6 @@
 package com.apunto.engine.hyperliquid.service.impl;
 
+import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
@@ -124,7 +125,15 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
         for (UserDetailDto user : eligibleUsers) {
             String userTraceId = activeCopyOperationCache.traceId(originId, userId(user), wallet, symbol);
-            HyperliquidCopyLifecycleDecision decision = businessDecision(originId, action, deltaType, user);
+            HyperliquidCopyLifecycleDecision decision = businessDecision(
+                    originId,
+                    wallet,
+                    symbol,
+                    operacion.getTipoOperacion() == null ? null : operacion.getTipoOperacion().name(),
+                    action,
+                    deltaType,
+                    user
+            );
             if (!decision.allowed()) {
                 businessSkipped.incrementAndGet();
                 firstReasonCode.compareAndSet(null, decision.reasonCode());
@@ -187,13 +196,37 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         return activeCopyOperationCache.traceId(originId, "origin", wallet, symbol);
     }
 
-    private HyperliquidCopyLifecycleDecision businessDecision(String originId, CopyJobAction action, HyperliquidDeltaType deltaType, UserDetailDto user) {
+    private HyperliquidCopyLifecycleDecision businessDecision(
+            String originId,
+            String wallet,
+            String symbol,
+            String newSide,
+            CopyJobAction action,
+            HyperliquidDeltaType deltaType,
+            UserDetailDto user
+    ) {
         String uid = userId(user);
         if (uid == null || uid.isBlank() || "unknown".equals(uid)) {
             return HyperliquidCopyLifecycleDecision.skip("user_missing", false);
         }
-        boolean active = activeCopyOperationCache.isActive(originId, uid);
+        boolean active = deltaType == HyperliquidDeltaType.FLIP
+                ? hasActiveCopyForFlip(uid, wallet, symbol, newSide)
+                : activeCopyOperationCache.isActive(originId, uid);
         return lifecycleGuard.decide(action, deltaType, active);
+    }
+
+    private boolean hasActiveCopyForFlip(String userId, String wallet, String symbol, String newSide) {
+        if (userId == null || userId.isBlank() || wallet == null || wallet.isBlank()
+                || symbol == null || symbol.isBlank() || newSide == null || newSide.isBlank()) {
+            return false;
+        }
+        // FLIP llega con un originId nuevo porque cambia el lado (LONG<->SHORT).
+        // Para permitirlo debe existir una copia activa del mismo wallet+symbol, pero del lado anterior.
+        return activeCopyOperationCache.activeOperationsByUserAndWallet(userId, wallet).stream()
+                .filter(Objects::nonNull)
+                .filter(CopyOperationDto::isActive)
+                .filter(copy -> symbol.equalsIgnoreCase(copy.getParsymbol()))
+                .anyMatch(copy -> copy.getTypeOperation() != null && !newSide.equalsIgnoreCase(copy.getTypeOperation()));
     }
 
     private void executeCopy(
