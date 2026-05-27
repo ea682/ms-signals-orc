@@ -43,6 +43,9 @@ public class DetailUserEntity {
     @Column(name = "capital", nullable = false)
     private Integer capital = 1000;
 
+    @Column(name = "capital_asset", nullable = false, length = 4)
+    private String capitalAsset = "USDT";
+
     @Column(name = "max_wallet", nullable = false)
     private Integer maxWallet = 1;
 

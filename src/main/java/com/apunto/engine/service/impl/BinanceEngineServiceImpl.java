@@ -29,6 +29,7 @@ import com.apunto.engine.service.copy.ProportionalCopySizingCalculator;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.PositionStatus;
+import com.apunto.engine.shared.enums.FuturesCapitalAsset;
 import com.apunto.engine.shared.enums.Side;
 import com.apunto.engine.shared.exception.CopyBinanceClientException;
 import com.apunto.engine.shared.exception.EngineException;
@@ -1234,7 +1235,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 continue;
             }
             try {
-                final String symbol = resolveCanonicalSymbol(leg.getSymbol());
+                final String symbol = resolveCanonicalSymbol(leg.getSymbol(), resolveCapitalAsset(userDetail));
                 final BigDecimal priceRef = resolvePriceRef(leg.getMarkPrice(), leg.getEntryPrice());
                 if (priceRef.compareTo(ZERO) <= 0 || leg.getSide() == null) {
                     continue;
@@ -2568,7 +2569,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String rawSymbol = originOperation.getParSymbol();
         final long symbolMetadataNs = System.nanoTime();
-        final String symbol = resolveCanonicalSymbol(rawSymbol);
+        final String symbol = resolveCanonicalSymbol(rawSymbol, resolveCapitalAsset(userDetail));
         final Map<String, BinanceFuturesSymbolInfoClientDto> symbolsBySymbol = getSymbolsBySymbol();
         log.info("event=copy.job.phase action=OPEN phase=load_symbol_metadata originId={} userId={} wallet={} rawSymbol={} symbol={} elapsedMs={}",
                 originId, userId, walletId, safeLog(rawSymbol), safeLog(symbol), elapsedMsSince(symbolMetadataNs));
@@ -3149,13 +3150,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private String resolveCanonicalSymbol(String rawSymbol) {
+        return resolveCanonicalSymbol(rawSymbol, FuturesCapitalAsset.defaultAsset());
+    }
+
+    private String resolveCanonicalSymbol(String rawSymbol, FuturesCapitalAsset preferredAsset) {
         if (rawSymbol == null || rawSymbol.isBlank()) {
             return rawSymbol;
         }
 
         final SymbolsCache cache = getOrRefreshSymbolsCache();
 
-        for (String candidate : buildSymbolCandidates(rawSymbol)) {
+        for (String candidate : buildSymbolCandidates(rawSymbol, preferredAsset)) {
             if (candidate == null || candidate.isBlank()) {
                 continue;
             }
@@ -3813,6 +3818,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private List<String> buildSymbolCandidates(String rawSymbol) {
+        return buildSymbolCandidates(rawSymbol, FuturesCapitalAsset.defaultAsset());
+    }
+
+    private List<String> buildSymbolCandidates(String rawSymbol, FuturesCapitalAsset preferredAsset) {
         final LinkedHashSet<String> candidates = new LinkedHashSet<>();
 
         final String key = normalizeSymbolKey(rawSymbol);
@@ -3820,35 +3829,72 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return List.of();
         }
 
-        candidates.add(key);
+        final FuturesCapitalAsset safePreferredAsset = preferredAsset == null ? FuturesCapitalAsset.defaultAsset() : preferredAsset;
+        final String preferredQuote = safePreferredAsset.name();
 
         final String strippedVersion = stripVersionSuffix(key);
-        candidates.add(strippedVersion);
+        addPreferredQuoteCandidates(candidates, key, preferredQuote);
+        addPreferredQuoteCandidates(candidates, strippedVersion, preferredQuote);
+
+        addIfSameQuoteOrQuoteMissing(candidates, key, preferredQuote);
+        addIfSameQuoteOrQuoteMissing(candidates, strippedVersion, preferredQuote);
 
         final String manualAlias = MANUAL_SYMBOL_ALIASES.get(key);
         if (manualAlias != null && !manualAlias.isBlank()) {
-            candidates.add(normalizeSymbolKey(manualAlias));
+            addPreferredQuoteCandidates(candidates, normalizeSymbolKey(manualAlias), preferredQuote);
         }
 
         final String manualAliasStripped = MANUAL_SYMBOL_ALIASES.get(strippedVersion);
         if (manualAliasStripped != null && !manualAliasStripped.isBlank()) {
-            candidates.add(normalizeSymbolKey(manualAliasStripped));
+            addPreferredQuoteCandidates(candidates, normalizeSymbolKey(manualAliasStripped), preferredQuote);
         }
 
-        addUsdToUsdtCandidates(candidates, key);
-        addUsdToUsdtCandidates(candidates, strippedVersion);
+        addUsdToPreferredQuoteCandidates(candidates, key, preferredQuote);
+        addUsdToPreferredQuoteCandidates(candidates, strippedVersion, preferredQuote);
 
         return new ArrayList<>(candidates);
     }
 
-    private void addUsdToUsdtCandidates(Set<String> candidates, String symbol) {
+    private void addUsdToPreferredQuoteCandidates(Set<String> candidates, String symbol, String preferredQuote) {
         if (symbol == null || symbol.isBlank()) {
             return;
         }
 
         if (symbol.endsWith("USD") && !symbol.endsWith("USDT")) {
-            candidates.add(symbol.substring(0, symbol.length() - 3) + "USDT");
+            candidates.add(symbol.substring(0, symbol.length() - 3) + preferredQuote);
         }
+    }
+
+    private void addPreferredQuoteCandidates(Set<String> candidates, String symbol, String preferredQuote) {
+        if (symbol == null || symbol.isBlank() || preferredQuote == null || preferredQuote.isBlank()) {
+            return;
+        }
+        String quote = extractQuote(symbol);
+        if (quote == null) {
+            addUsdToPreferredQuoteCandidates(candidates, symbol, preferredQuote);
+            return;
+        }
+        String base = symbol.substring(0, symbol.length() - quote.length());
+        if (!base.isBlank()) {
+            candidates.add(base + preferredQuote);
+        }
+    }
+
+    private void addIfSameQuoteOrQuoteMissing(Set<String> candidates, String symbol, String preferredQuote) {
+        if (symbol == null || symbol.isBlank()) {
+            return;
+        }
+        String quote = extractQuote(symbol);
+        if (quote == null || quote.equals(preferredQuote)) {
+            candidates.add(symbol);
+        }
+    }
+
+    private FuturesCapitalAsset resolveCapitalAsset(UserDetailDto userDetail) {
+        if (userDetail == null || userDetail.getDetail() == null) {
+            return FuturesCapitalAsset.defaultAsset();
+        }
+        return FuturesCapitalAsset.fromNullable(userDetail.getDetail().getCapitalAsset());
     }
 
     private String stripVersionSuffix(String symbol) {
