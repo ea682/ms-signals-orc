@@ -1,5 +1,6 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
@@ -16,6 +17,7 @@ import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ValidationException;
+import com.apunto.engine.shared.util.CopySymbolIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -122,7 +124,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         }
         if (action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
             if (deltaType == HyperliquidDeltaType.FLIP) {
-                return filterUsersById(usersCached, activeCopyOperationCache.activeUserIdsByWalletAndSymbol(operation.getIdCuenta(), operation.getParSymbol()));
+                return filterUsersById(usersCached, activeCopyOperationCache.activeUserIdsByWalletAndBaseSymbol(operation.getIdCuenta(), operation.getParSymbol()));
             }
             return filterUsersById(usersCached, activeCopyOperationCache.activeUserIds(operation.getIdOperacion().toString()));
         }
@@ -138,8 +140,9 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         String wallet = operation.getIdCuenta();
         String symbol = operation.getParSymbol();
         HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
+        String newSide = operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
         List<UserDetailDto> allowed = users.stream()
-                .filter(u -> isBusinessAllowed(originId, wallet, symbol, action, deltaType, u))
+                .filter(u -> isBusinessAllowed(originId, wallet, symbol, newSide, action, deltaType, u))
                 .toList();
         int skipped = users.size() - allowed.size();
         if (skipped > 0) {
@@ -149,14 +152,16 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         return allowed;
     }
 
-    private boolean isBusinessAllowed(String originId, String wallet, String symbol, CopyJobAction action, HyperliquidDeltaType deltaType, UserDetailDto user) {
+    private boolean isBusinessAllowed(String originId, String wallet, String symbol, String newSide, CopyJobAction action, HyperliquidDeltaType deltaType, UserDetailDto user) {
         String uid = userId(user);
         if (uid == null) {
             log.info("event=copy.execution.business_skip originId={} userId=NA wallet={} symbol={} action={} engineAction={} deltaType={} reasonCode=user_missing cacheActive=false",
                     originId, wallet, symbol, displayAction(action, deltaType), action, deltaType);
             return false;
         }
-        boolean active = activeCopyOperationCache.isActive(originId, uid);
+        boolean active = deltaType == HyperliquidDeltaType.FLIP
+                ? hasActiveCopyForFlip(uid, wallet, symbol, newSide)
+                : activeCopyOperationCache.isActive(originId, uid);
         HyperliquidCopyLifecycleDecision decision = lifecycleGuard.decide(action, deltaType, active);
         if (decision.allowed()) {
             return true;
@@ -164,6 +169,19 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         log.info("event=copy.execution.business_skip originId={} userId={} wallet={} symbol={} action={} engineAction={} deltaType={} reasonCode={} cacheActive={} activeCacheSize={}",
                 originId, uid, wallet, symbol, displayAction(action, deltaType), action, deltaType, decision.reasonCode(), decision.cacheActive(), activeCopyOperationCache.activeSize());
         return false;
+    }
+
+
+    private boolean hasActiveCopyForFlip(String userId, String wallet, String symbol, String newSide) {
+        if (userId == null || userId.isBlank() || wallet == null || wallet.isBlank()
+                || symbol == null || symbol.isBlank() || newSide == null || newSide.isBlank()) {
+            return false;
+        }
+        return activeCopyOperationCache.activeOperationsByUserAndWallet(userId, wallet).stream()
+                .filter(Objects::nonNull)
+                .filter(CopyOperationDto::isActive)
+                .filter(copy -> CopySymbolIdentity.sameBaseAsset(copy.getParsymbol(), symbol))
+                .anyMatch(copy -> copy.getTypeOperation() != null && !newSide.equalsIgnoreCase(copy.getTypeOperation()));
     }
 
     private List<UserDetailDto> filterUsersById(List<UserDetailDto> usersCached, Set<String> userIds) {

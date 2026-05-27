@@ -39,6 +39,7 @@ import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.LogFmt;
 import com.apunto.engine.shared.util.IdempotencyKeyUtil;
 import com.apunto.engine.shared.util.CopyLogAdvice;
+import com.apunto.engine.shared.util.CopySymbolIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
@@ -1185,8 +1186,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (p == null || operation == null) {
             return false;
         }
-        return equalsIgnoreCase(p.getWalletId(), operation.getIdCuenta())
-                && equalsIgnoreCase(p.getSymbol(), operation.getParSymbol())
+        return CopySymbolIdentity.sameWalletAndBaseAsset(p.getWalletId(), operation.getIdCuenta(), p.getSymbol(), operation.getParSymbol())
                 && p.getSide() != null
                 && operation.getTipoOperacion() != null
                 && p.getSide() != operation.getTipoOperacion();
@@ -1197,8 +1197,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return false;
         }
         PositionSide copySide = parsePositionSide(copy.getTypeOperation());
-        return equalsIgnoreCase(copy.getIdWalletOrigin(), operation.getIdCuenta())
-                && equalsIgnoreCase(copy.getParsymbol(), operation.getParSymbol())
+        return CopySymbolIdentity.sameWalletAndBaseAsset(copy.getIdWalletOrigin(), operation.getIdCuenta(), copy.getParsymbol(), operation.getParSymbol())
                 && copySide != null
                 && operation.getTipoOperacion() != null
                 && copySide != operation.getTipoOperacion();

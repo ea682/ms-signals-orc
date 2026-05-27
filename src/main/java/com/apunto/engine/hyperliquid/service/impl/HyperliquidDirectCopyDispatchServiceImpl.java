@@ -19,6 +19,7 @@ import com.apunto.engine.shared.exception.CopyPersistenceConflictException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.CopyLogAdvice;
+import com.apunto.engine.shared.util.CopySymbolIdentity;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -220,12 +221,13 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                 || symbol == null || symbol.isBlank() || newSide == null || newSide.isBlank()) {
             return false;
         }
-        // FLIP llega con un originId nuevo porque cambia el lado (LONG<->SHORT).
-        // Para permitirlo debe existir una copia activa del mismo wallet+symbol, pero del lado anterior.
+        // FLIP llega con originId nuevo porque cambia el lado (LONG<->SHORT).
+        // Para permitirlo debe existir una copia activa del mismo wallet + activo base, pero del lado anterior.
+        // Ejemplo valido: evento BTCUSD y copia BTCUSDT/BTCUSDC.
         return activeCopyOperationCache.activeOperationsByUserAndWallet(userId, wallet).stream()
                 .filter(Objects::nonNull)
                 .filter(CopyOperationDto::isActive)
-                .filter(copy -> symbol.equalsIgnoreCase(copy.getParsymbol()))
+                .filter(copy -> CopySymbolIdentity.sameBaseAsset(copy.getParsymbol(), symbol))
                 .anyMatch(copy -> copy.getTypeOperation() != null && !newSide.equalsIgnoreCase(copy.getTypeOperation()));
     }
 

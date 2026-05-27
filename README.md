@@ -82,6 +82,20 @@ El copytrading usa `detail_user.capital_asset` para elegir el par Futures:
 
 Si el símbolo no existe en Binance para la moneda elegida, la operación se salta con una excepción controlada `SkipExecutionException` y queda logueada con `reasonCode=symbol_alias_not_found` o una regla equivalente. No se hace fallback silencioso a otra moneda porque eso usaría un capital distinto al configurado por el usuario.
 
+### FLIP con Hyperliquid y Binance
+
+Para eventos `FLIP`, el sistema compara por **wallet + activo base**, no por símbolo completo. Esto evita que un cambio de lado se pierda cuando Hyperliquid envía `BTCUSD` y la copia guardada en Binance está como `BTCUSDT` o `BTCUSDC`.
+
+Ejemplo seguro:
+
+```text
+Evento Hyperliquid: BTCUSD SHORT
+Copia activa usuario USDC: BTCUSDC LONG
+Resultado: se reconoce como el mismo activo base BTC, se cierra LONG y se abre SHORT.
+```
+
+Esta comparación se aplica tanto en la ruta directa como en el fallback de jobs, para que ambos caminos tengan la misma regla de negocio.
+
 ## Logs
 
 Los logs tienen formato simple y explican cada paso con `friendlyStep`:
