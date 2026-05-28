@@ -1,5 +1,6 @@
 package com.apunto.engine.jobs;
 
+import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.entity.CopyExecutionJobEntity;
@@ -22,6 +23,7 @@ import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
 import com.apunto.engine.shared.util.CopyLogAdvice;
+import com.apunto.engine.shared.util.CopySymbolIdentity;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -138,12 +140,14 @@ public class CopyExecutionJobWorker {
             return;
         }
         HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
-        boolean active = activeCopyOperationCache.isActive(job.getOriginId(), job.getUserId());
+        OperacionDto op = event.getOperacion();
+        boolean active = deltaType == HyperliquidDeltaType.FLIP
+                ? hasActiveCopyForFlip(job, op)
+                : activeCopyOperationCache.isActive(job.getOriginId(), job.getUserId());
         HyperliquidCopyLifecycleDecision decision = lifecycleGuard.decide(job.getAction(), deltaType, active);
         if (decision.allowed()) {
             return;
         }
-        OperacionDto op = event.getOperacion();
         throw new SkipExecutionException(
                 decision.reasonCode(),
                 "Regla de lifecycle de copia bloqueó el job",
@@ -157,6 +161,22 @@ public class CopyExecutionJobWorker {
                         "activeCacheSize", Integer.toString(activeCopyOperationCache.activeSize())
                 )
         );
+    }
+
+
+    private boolean hasActiveCopyForFlip(CopyExecutionJobEntity job, OperacionDto op) {
+        if (job == null || op == null || op.getTipoOperacion() == null
+                || op.getIdCuenta() == null || op.getIdCuenta().isBlank()
+                || op.getParSymbol() == null || op.getParSymbol().isBlank()
+                || job.getUserId() == null || job.getUserId().isBlank()) {
+            return false;
+        }
+        String newSide = op.getTipoOperacion().name();
+        return activeCopyOperationCache.activeOperationsByUserAndWallet(job.getUserId(), op.getIdCuenta()).stream()
+                .filter(java.util.Objects::nonNull)
+                .filter(CopyOperationDto::isActive)
+                .filter(copy -> CopySymbolIdentity.sameBaseAsset(copy.getParsymbol(), op.getParSymbol()))
+                .anyMatch(copy -> copy.getTypeOperation() != null && !newSide.equalsIgnoreCase(copy.getTypeOperation()));
     }
 
     private void submitOrRescheduleOnReject(CopyExecutionJobEntity job) {

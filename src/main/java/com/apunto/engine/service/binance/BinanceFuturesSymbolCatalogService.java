@@ -261,7 +261,9 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
         }
         candidates.add(normalized);
         if (normalized.endsWith("USD") && !normalized.endsWith("USDT") && !normalized.endsWith("USDC") && !normalized.endsWith("BUSD")) {
-            candidates.add(normalized.substring(0, normalized.length() - 3) + "USDT");
+            String base = normalized.substring(0, normalized.length() - 3);
+            candidates.add(base + "USDT");
+            candidates.add(base + "USDC");
         }
         candidates.add("1000" + normalized);
         if (normalized.startsWith("1000") && normalized.length() > 4) {

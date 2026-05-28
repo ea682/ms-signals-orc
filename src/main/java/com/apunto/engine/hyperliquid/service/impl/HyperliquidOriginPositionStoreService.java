@@ -230,8 +230,14 @@ public class HyperliquidOriginPositionStoreService {
             return fallback;
         }
 
-        if (deltaType.canStartCopyLifecycle()) {
-            return activeOriginIds.computeIfAbsent(key, ignored -> UUID.randomUUID());
+        if (deltaType.canStartCopyLifecycle() || deltaType == HyperliquidDeltaType.FLIP) {
+            UUID lifecycleId = activeOriginIds.computeIfAbsent(key, ignored -> UUID.randomUUID());
+            if (deltaType == HyperliquidDeltaType.FLIP) {
+                log.info("event=hyperliquid.origin_store.flip_lifecycle_start category=origin_position reasonCode=flip_starts_new_side reasonAlias=flip_starts_new_side friendlyReason=flip_inicia_nuevo_lado explanation=el_FLIP_se_persiste_como_nueva_posicion_y_cierra_el_lado_anterior_si_existe copyImpact=origin_state_consistent originId={} positionKey={} wallet={} symbol={} side={} deltaType={} {}",
+                        lifecycleId, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()),
+                        CopyLogAdvice.fields("flip_starts_new_side", CopyLogAdvice.context(null, null, null, null, queue.size(), null, activeOriginIds.size(), "origin_store_bind")));
+            }
+            return lifecycleId;
         }
 
         if (deltaType.canAdjustExistingCopy()) {
@@ -294,6 +300,9 @@ public class HyperliquidOriginPositionStoreService {
             return false;
         }
         HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(mapped.deltaType());
+        if (deltaType == HyperliquidDeltaType.FLIP) {
+            return false;
+        }
         if (!deltaType.canAdjustExistingCopy()) {
             return false;
         }
@@ -491,6 +500,16 @@ public class HyperliquidOriginPositionStoreService {
     }
 
     private String lockKey(HyperliquidMappedDelta mapped) {
+        if (HyperliquidDeltaType.from(mapped == null ? null : mapped.deltaType()) == HyperliquidDeltaType.FLIP) {
+            String wallet = lower(mapped == null ? null : mapped.wallet());
+            String symbol = mapped == null ? null : mapped.symbol();
+            if (symbol != null && symbol.isBlank()) {
+                symbol = null;
+            }
+            if (wallet != null && symbol != null) {
+                return "flip:" + wallet + ":" + symbol;
+            }
+        }
         if (mapped != null && mapped.positionKey() != null && !mapped.positionKey().isBlank()) {
             return mapped.positionKey();
         }
@@ -540,6 +559,8 @@ public class HyperliquidOriginPositionStoreService {
             );
         }
 
+        closeOppositeSideWhenFlip(mapped, operation, priceReference);
+
         applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing);
         applyStatusFields(entity, event, operation, priceReference);
 
@@ -588,6 +609,72 @@ public class HyperliquidOriginPositionStoreService {
             return true;
         }
         return false;
+    }
+
+    private void closeOppositeSideWhenFlip(HyperliquidMappedDelta mapped,
+                                           OperacionDto operation,
+                                           BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference) {
+        if (HyperliquidDeltaType.from(mapped == null ? null : mapped.deltaType()) != HyperliquidDeltaType.FLIP || operation == null) {
+            return;
+        }
+        com.apunto.engine.shared.enums.PositionSide newSide = operation.getTipoOperacion();
+        com.apunto.engine.shared.enums.PositionSide previousSide = opposite(newSide);
+        if (previousSide == null) {
+            return;
+        }
+        String accountId = lower(firstNonBlank(operation.getIdCuenta(), mapped == null ? null : mapped.wallet()));
+        String symbol = firstNonBlank(operation.getParSymbol(), mapped == null ? null : mapped.symbol());
+        if (accountId == null || symbol == null) {
+            return;
+        }
+        repository.findLatestActiveByPlatformAccountSymbolSide(
+                        PLATFORM,
+                        accountId,
+                        symbol,
+                        previousSide.name(),
+                        PositionStatus.OPEN.name()
+                )
+                .ifPresent(previous -> {
+                    OffsetDateTime closedAt = toOffsetDateTime(firstNonNull(operation.getFechaCreacion(), Instant.now()));
+                    BigDecimal exitPrice = nonNegative(firstNonNull(
+                            priceReference == null ? null : priceReference.price(),
+                            previous.getMarkPrice(),
+                            ZERO
+                    ));
+                    previous.setStatus(PositionStatus.CLOSED);
+                    previous.setIsActive(false);
+                    previous.setClosedAt(closedAt);
+                    previous.setExitPrice(exitPrice);
+                    previous.setMarkPrice(exitPrice);
+                    previous.setRealizedPnlUsd(realizedPnl(previous.getSide(), effectiveSizeQtyForPnl(previous), previous.getEntryPrice(), exitPrice));
+                    previous.setUnrealizedPnlUsd(ZERO);
+                    previous.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+                    repository.saveAndFlush(previous);
+                    String previousKey = positionKey(previous.getAccountId(), previous.getSymbol(), previous.getSide() == null ? null : previous.getSide().name());
+                    if (previousKey != null) {
+                        activeOriginIds.remove(previousKey, previous.getIdFuturesPosition());
+                    }
+                    log.info("event=hyperliquid.origin_store.flip_previous_closed category=origin_position reasonCode=flip_closed_previous_side reasonAlias=flip_closed_previous_side friendlyReason=flip_cerro_lado_anterior explanation=se_cerro_la_posicion_original_opuesta_antes_de_abrir_el_nuevo_lado copyImpact=origin_state_consistent previousOriginId={} newOriginId={} wallet={} symbol={} previousSide={} newSide={} exitPrice={} realizedPnlUsd={} {}",
+                            previous.getIdFuturesPosition(),
+                            operation.getIdOperacion(),
+                            safeLog(accountId),
+                            safeLog(symbol),
+                            previousSide,
+                            newSide,
+                            exitPrice,
+                            previous.getRealizedPnlUsd(),
+                            CopyLogAdvice.fields("flip_closed_previous_side", CopyLogAdvice.context(null, null, null, null, queue.size(), true, activeOriginIds.size(), "origin_store_flip")));
+                });
+    }
+
+    private com.apunto.engine.shared.enums.PositionSide opposite(com.apunto.engine.shared.enums.PositionSide side) {
+        if (side == com.apunto.engine.shared.enums.PositionSide.LONG) {
+            return com.apunto.engine.shared.enums.PositionSide.SHORT;
+        }
+        if (side == com.apunto.engine.shared.enums.PositionSide.SHORT) {
+            return com.apunto.engine.shared.enums.PositionSide.LONG;
+        }
+        return null;
     }
 
     private void applyCommonFields(

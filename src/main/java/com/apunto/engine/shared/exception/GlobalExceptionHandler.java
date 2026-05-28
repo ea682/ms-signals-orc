@@ -1,6 +1,7 @@
 package com.apunto.engine.shared.exception;
 
 import com.apunto.engine.shared.dto.ApiResponse;
+import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.apunto.engine.shared.util.LogFmt;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
@@ -37,10 +38,34 @@ public class GlobalExceptionHandler {
     ) {
         ErrorCode errorCode = ex.getErrorCode();
         Map<String, Object> data = baseData(errorCode);
+        if (ex instanceof CopyExecutionException copyEx) {
+            data.put("reasonCode", copyEx.getErrCode());
+        }
         if (ex.getDetails() != null && !ex.getDetails().isEmpty()) {
             data.put("details", ex.getDetails());
         }
         return buildErrorResponse(errorCode.getHttpStatus(), errorCode, ex.getMessage(), data, request, ex);
+    }
+
+    @ExceptionHandler(SkipExecutionException.class)
+    public ResponseEntity<ApiResponse<Object>> handleSkipExecutionException(
+            SkipExecutionException ex,
+            HttpServletRequest request
+    ) {
+        Map<String, Object> data = baseData(ErrorCode.BUSINESS_ERROR);
+        data.put("reasonCode", ex.getReasonCode());
+        data.put("reason", ex.getReason());
+        if (ex.getDetails() != null && !ex.getDetails().isBlank()) {
+            data.put("details", ex.getDetails());
+        }
+        return buildErrorResponse(
+                ErrorCode.BUSINESS_ERROR.getHttpStatus(),
+                ErrorCode.BUSINESS_ERROR,
+                ex.getReason(),
+                data,
+                request,
+                ex
+        );
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -266,13 +291,16 @@ public class GlobalExceptionHandler {
     ) {
         String traceId = resolveTraceId();
         String path = request.getRequestURI();
+        String reasonCode = reasonCode(errorCode, ex);
+        Map<String, Object> responseData = data == null ? new LinkedHashMap<>() : new LinkedHashMap<>(data);
+        responseData.putIfAbsent("reasonCode", reasonCode);
         logHttpError(status, errorCode, request, traceId, ex);
 
         ApiResponse<Object> body = ApiResponse.<Object>builder()
                 .status("ERROR")
                 .statusCode(status.value())
                 .message(LogFmt.sanitize(message != null ? message : errorCode.getDefaultMessage()))
-                .data(data == null || data.isEmpty() ? null : data)
+                .data(responseData.isEmpty() ? null : responseData)
                 .timestamp(Instant.now())
                 .path(path)
                 .traceId(traceId)
@@ -288,18 +316,22 @@ public class GlobalExceptionHandler {
             String traceId,
             Throwable ex
     ) {
-        String message = "event=http.error traceId={} status={} code={} method={} path={} query=\"{}\" remoteIp={} userAgent=\"{}\" errClass={} errMsg=\"{}\"";
+        String reasonCode = reasonCode(errorCode, ex);
+        String adviceFields = CopyLogAdvice.fields(reasonCode);
+        String message = "event=http.error traceId={} status={} code={} reasonCode={} method={} path={} query=\"{}\" remoteIp={} userAgent=\"{}\" errClass={} errMsg=\"{}\" {}";
         Object[] args = new Object[] {
                 traceId,
                 status.value(),
                 errorCode.name(),
+                safeLog(reasonCode),
                 safeLog(request.getMethod()),
                 safeLog(request.getRequestURI()),
                 safeLog(request.getQueryString()),
                 safeLog(clientIp(request)),
                 safeLog(request.getHeader("User-Agent")),
                 ex.getClass().getSimpleName(),
-                safeLog(ex.getMessage())
+                safeLog(ex.getMessage()),
+                adviceFields
         };
 
         if (status.is5xxServerError()) {
@@ -310,6 +342,25 @@ public class GlobalExceptionHandler {
             return;
         }
         log.warn(message, args);
+    }
+
+    private String reasonCode(ErrorCode errorCode, Throwable ex) {
+        if (ex instanceof SkipExecutionException skip) {
+            return skip.getReasonCode();
+        }
+        if (ex instanceof CopyExecutionException copy) {
+            return copy.getErrCode();
+        }
+        if (ex instanceof BinanceRateLimitException) {
+            return "binance_rate_limit";
+        }
+        if (ex instanceof DataAccessException) {
+            return "database_error";
+        }
+        if (ex instanceof IllegalArgumentException) {
+            return "request_invalid";
+        }
+        return errorCode == null ? "http_error" : errorCode.name().toLowerCase();
     }
 
     private Map<String, Object> baseData(ErrorCode errorCode) {
