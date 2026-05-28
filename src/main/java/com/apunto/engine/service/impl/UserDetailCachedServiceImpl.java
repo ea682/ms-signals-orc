@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -44,6 +45,23 @@ public class UserDetailCachedServiceImpl implements UserDetailCachedService {
             return current;
         }
         return refreshSnapshotIfNeeded();
+    }
+
+    @Override
+    public synchronized void updateRuntimeCapital(UUID userId, Integer capital, String capitalAsset) {
+        if (userId == null || snapshot == null || snapshot.byUserId() == null) {
+            return;
+        }
+        UserDetailDto userDetail = snapshot.byUserId().get(userId.toString());
+        if (userDetail == null || userDetail.getDetail() == null) {
+            return;
+        }
+        if (capital != null) {
+            userDetail.getDetail().setCapital(Math.max(0, capital));
+        }
+        if (capitalAsset != null && !capitalAsset.isBlank()) {
+            userDetail.getDetail().setCapitalAsset(capitalAsset.trim().toUpperCase(java.util.Locale.ROOT));
+        }
     }
 
     private synchronized UserSnapshot refreshSnapshotIfNeeded() {

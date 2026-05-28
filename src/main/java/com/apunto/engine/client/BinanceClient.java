@@ -4,6 +4,7 @@ import com.apunto.engine.dto.client.*;
 import com.apunto.engine.shared.dto.ApiResponse;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.service.annotation.GetExchange;
 import org.springframework.web.service.annotation.HttpExchange;
 import org.springframework.web.service.annotation.PostExchange;
@@ -39,5 +40,19 @@ public interface BinanceClient {
     @GetExchange("/symbols")
     ApiResponse<List<BinanceFuturesSymbolInfoClientDto>> symbols(
             @RequestHeader("X-BINANCE-APIKEY") String apiKey
+    );
+
+    @GetExchange("/wallet/asset-balance")
+    ApiResponse<FuturesAssetBalanceClientResponse> assetBalance(
+            @RequestHeader("X-BINANCE-APIKEY") String apiKey,
+            @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestParam("asset") String asset
+    );
+
+    @PostExchange("/wallet/convert-to-bnb")
+    ApiResponse<FuturesConvertToBnbClientResponse> convertToBnb(
+            @RequestHeader("X-BINANCE-APIKEY") String apiKey,
+            @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestBody FuturesConvertToBnbClientRequest request
     );
 }

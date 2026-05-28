@@ -12,6 +12,7 @@ import com.apunto.engine.dto.client.BinanceFuturesSymbolFilterDto;
 import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.mapper.CopyTradingMapper;
 import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.BinanceCopyExecutionService;
@@ -28,6 +29,7 @@ import com.apunto.engine.service.copy.ProportionalCopySizingCalculator;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.PositionStatus;
+import com.apunto.engine.shared.enums.FuturesCapitalAsset;
 import com.apunto.engine.shared.enums.Side;
 import com.apunto.engine.shared.exception.CopyBinanceClientException;
 import com.apunto.engine.shared.exception.EngineException;
@@ -36,6 +38,8 @@ import com.apunto.engine.shared.exception.CopySymbolMetadataException;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.LogFmt;
 import com.apunto.engine.shared.util.IdempotencyKeyUtil;
+import com.apunto.engine.shared.util.CopyLogAdvice;
+import com.apunto.engine.shared.util.CopySymbolIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
@@ -198,6 +202,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     @Value("${engine.copy.reconcile.max-increase-source-age:PT60S}")
     private Duration maxIncreaseSourceAge;
 
+    @Value("${engine.copy.flip.close-previous-when-new-open-blocked:true}")
+    private boolean closePreviousSideWhenFlipOpenBlocked;
+
     @Value("${engine.copy.rebalance.skip-small-increase:true}")
     private boolean skipSmallRebalanceIncrease;
 
@@ -338,6 +345,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
         final UUID userId = userDetail.getUser().getId();
+        final HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
         final Optional<FuturesPositionDto> positionOriginDto = futuresPositionService.getIdFuturesPosition(originId);
 
         log.debug(LOG_OPEN_START, originId, userId);
@@ -356,6 +364,19 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             log.info("event=copy_open_skipped reasonCode=stale_open_event reason=stale_open_event originId={} userId={} wallet={} symbol={} originStatus={}",
                     originId, userId, safeLog(originOperation.getIdCuenta()), safeLog(originOperation.getParSymbol()),
                     positionOriginDto.map(FuturesPositionDto::getIsActive).orElse(null));
+            return;
+        }
+
+        if (deltaType.canAdjustExistingCopy()) {
+            log.info("event=copy.adjust.reconcile_required category=copy reasonCode=adjustment_reconcile_required reasonAlias=adjustment_uses_basket friendlyReason=ajuste_por_reconciliacion explanation=los_RESIZE_UPDATE_FLIP_se_resuelven_con_reconciliacion_para_evitar_usar_estado_viejo_o_abrir_duplicados copyImpact=copy_safe_path originId={} userId={} wallet={} symbol={} deltaType={} triggerScopedReconcile={} {}",
+                    originId,
+                    userId,
+                    safeLog(originOperation.getIdCuenta()),
+                    safeLog(originOperation.getParSymbol()),
+                    deltaType,
+                    triggerScopedReconcile,
+                    CopyLogAdvice.fields("adjustment_reconcile_required", CopyLogAdvice.context(null, null, null, null, null, null, activeCopyOperationCache.activeSize(), "binance_engine")));
+            reconcileWalletBasketForUser(event, userDetail);
             return;
         }
 
@@ -740,6 +761,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String triggerOriginId = originOperation.getIdOperacion().toString();
         final String walletId = originOperation.getIdCuenta();
         final String userId = userDetail.getUser().getId().toString();
+        final HyperliquidDeltaType triggerDeltaType = HyperliquidDeltaType.from(event.getDeltaType());
+        final boolean flipTrigger = triggerDeltaType == HyperliquidDeltaType.FLIP;
 
         if (walletId == null || walletId.isBlank()) {
             throw new SkipExecutionException(
@@ -766,7 +789,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
             final List<OriginBasketPositionDto> sourceBasket = patchSourceBasket(
                     futuresPositionService.getOpenBasketByWallet(walletId),
-                    originOperation
+                    originOperation,
+                    triggerDeltaType
             );
             final Set<String> sourceOriginIds = sourceBasket.stream()
                     .map(OriginBasketPositionDto::getOriginId)
@@ -779,8 +803,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .stream()
                     .filter(Objects::nonNull)
                     .collect(Collectors.toMap(CopyOperationDto::getIdOrderOrigin, java.util.function.Function.identity(), (a, b) -> a, HashMap::new));
-            log.info("event=copy_runtime_state.hot_path_loaded category=runtime_state reasonAlias=ram_state_used friendlyReason=estado_en_ram_usado explanation=la_reconciliacion_usa_ram_para_evitar_consultar_bd_en_la_ruta_caliente copyImpact=fast_path traceId={} triggerOriginId={} userId={} wallet={} activeCopies={}",
-                    activeCopyOperationCache.traceId(triggerOriginId, userId, walletId, originOperation.getParSymbol()), triggerOriginId, userId, walletId, current.size());
+            final BigDecimal hardCap = walletBudget.multiply(BigDecimal.ONE.add(walletHardcapOverPct == null ? ZERO : walletHardcapOverPct));
+            final BigDecimal reserve = walletBudget.multiply(walletReservePct == null ? ZERO : walletReservePct);
+            final TargetLeg flipTarget = flipTrigger ? targets.get(triggerOriginId) : null;
+            final boolean flipOpenAllowed = !flipTrigger || isFlipOpenPreflightAllowed(
+                    flipTarget, triggerOriginId, userId, walletId, canOpenOrResize, walletBudget, hardCap, reserve);
+            if (flipTrigger && !flipOpenAllowed && !closePreviousSideWhenFlipOpenBlocked) {
+                log.warn("event=rebalance.copy.flip_blocked category=rebalance reasonCode=flip_preflight_blocked reasonAlias=flip_preflight_blocked friendlyReason=flip_no_ejecutado_por_preflight explanation=no_se_cierra_el_lado_anterior_ni_se_abre_el_nuevo_porque_la_validacion_previa_fallo copyImpact=no_copy_order traceId={} triggerOriginId={} userId={} wallet={} symbol={} {}",
+                        activeCopyOperationCache.traceId(triggerOriginId, userId, walletId, originOperation.getParSymbol()),
+                        triggerOriginId, userId, walletId, safeLog(originOperation.getParSymbol()),
+                        CopyLogAdvice.fields("flip_preflight_blocked", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
+                return null;
+            }
+            log.info("event=copy_runtime_state.hot_path_loaded category=runtime_state reasonAlias=ram_state_used friendlyReason=estado_en_ram_usado explanation=la_reconciliacion_usa_ram_para_evitar_consultar_bd_en_la_ruta_caliente copyImpact=fast_path traceId={} triggerOriginId={} userId={} wallet={} activeCopies={} flipTrigger={} flipOpenAllowed={}",
+                    activeCopyOperationCache.traceId(triggerOriginId, userId, walletId, originOperation.getParSymbol()), triggerOriginId, userId, walletId, current.size(), flipTrigger, flipOpenAllowed);
 
             for (CopyOperationDto copy : new ArrayList<>(current.values())) {
                 if (copy == null) continue;
@@ -788,7 +824,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 if (copyOriginId == null) continue;
 
                 if (!sourceOriginIds.contains(copyOriginId)) {
-                    executeFullClose(copy, userDetail);
+                    boolean closeFromFlip = flipTrigger && sameWalletSymbolDifferentSide(copy, originOperation);
+                    executeFullClose(
+                            copy,
+                            userDetail,
+                            closeFromFlip ? "FLIP" : "CLOSE",
+                            closeFromFlip ? "flip_close_previous_side" : "rebalance_full_close",
+                            closeFromFlip ? "flip_close_previous_side" : null
+                    );
                     current.remove(copyOriginId);
                     continue;
                 }
@@ -822,8 +865,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             BigDecimal usedMargin = sumBufferedMargin(current.values());
-            final BigDecimal hardCap = walletBudget.multiply(BigDecimal.ONE.add(walletHardcapOverPct == null ? ZERO : walletHardcapOverPct));
-            final BigDecimal reserve = walletBudget.multiply(walletReservePct == null ? ZERO : walletReservePct);
 
             for (TargetLeg target : targets.values()) {
                 if (target == null || safeQty(target.targetQty()).compareTo(ZERO) <= 0) {
@@ -840,15 +881,30 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                 activeCopyOperationCache.traceId(target.originId(), userId, walletId, target.symbol()),
                                 target.originId(), triggerOriginId, userId, walletId, target.symbol(), currentCopy.getIdOperation(), currentCopy.getIdOrden());
                     } else if (activeCopyOperationCache.isKnown(target.originId(), userId)) {
-                        log.info("event=rebalance.copy.open_skip category=rebalance reasonCode=copy_state_pending_or_uncertain reasonAlias=copy_state_pending_or_uncertain friendlyReason=copia_pendiente_o_incierta explanation=no_se_abre_otra_orden_porque_la_ruta_caliente_ya_tiene_un_estado_pendiente_o_incierto copyImpact=no_copy_order traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                        final boolean retryFlipOpen = flipTrigger && Objects.equals(target.originId(), triggerOriginId);
+                        if (!retryFlipOpen) {
+                            log.info("event=rebalance.copy.open_skip category=rebalance reasonCode=copy_state_pending_or_uncertain reasonAlias=copy_state_pending_or_uncertain friendlyReason=copia_pendiente_o_incierta explanation=no_se_abre_otra_orden_porque_la_ruta_caliente_ya_tiene_un_estado_pendiente_o_incierto copyImpact=no_copy_order traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                                    activeCopyOperationCache.traceId(target.originId(), userId, walletId, target.symbol()),
+                                    target.originId(), triggerOriginId, userId, walletId, target.symbol());
+                            continue;
+                        }
+                        log.warn("event=rebalance.copy.flip_open_retry_allowed category=rebalance reasonCode=flip_open_retry_allowed reasonAlias=flip_open_retry_allowed friendlyReason=reintento_de_apertura_flip explanation=se_permite_reintentar_la_apertura_del_FLIP_con_el_mismo_clientOrderId_para_recuperar_un_estado_pendiente_o_incierto copyImpact=copy_recovery traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} {}",
                                 activeCopyOperationCache.traceId(target.originId(), userId, walletId, target.symbol()),
-                                target.originId(), triggerOriginId, userId, walletId, target.symbol());
-                        continue;
+                                target.originId(), triggerOriginId, userId, walletId, target.symbol(),
+                                CopyLogAdvice.fields("flip_open_retry_allowed", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
                     }
                 }
 
                 if (currentCopy == null || !currentCopy.isActive()) {
-                    if (shouldSkipMissingReconcileOpen(target, triggerOriginId, userId, walletId, originOperation.isOperacionActiva())) {
+                    final boolean targetIsFlipOpen = flipTrigger && Objects.equals(target.originId(), triggerOriginId);
+                    if (targetIsFlipOpen && !flipOpenAllowed) {
+                        log.warn("event=rebalance.copy.open_skip category=rebalance reasonCode=flip_open_blocked_after_close reasonAlias=flip_open_blocked_after_close friendlyReason=apertura_flip_bloqueada explanation=el_lado_anterior_pudo_cerrarse_pero_la_apertura_nueva_no_paso_preflight copyImpact=copy_flat_or_desynced traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} {}",
+                                activeCopyOperationCache.traceId(target.originId(), userId, walletId, target.symbol()),
+                                target.originId(), triggerOriginId, userId, walletId, target.symbol(),
+                                CopyLogAdvice.fields("flip_open_blocked_after_close", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
+                        continue;
+                    }
+                    if (shouldSkipMissingReconcileOpen(target, triggerOriginId, userId, walletId, originOperation.isOperacionActiva(), flipTrigger)) {
                         continue;
                     }
                     final BigDecimal required = computeBufferedMargin(target.targetQty(), target.priceRef(), target.leverage());
@@ -857,7 +913,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         continue;
                     }
                     CopyOperationDto created = currentCopy == null
-                            ? executeOpenTarget(target, triggerOriginId, userDetail)
+                            ? executeOpenTarget(
+                            target,
+                            triggerOriginId,
+                            userDetail,
+                            flipTrigger && Objects.equals(target.originId(), triggerOriginId) ? "FLIP" : "OPEN",
+                            flipTrigger && Objects.equals(target.originId(), triggerOriginId) ? "flip_open_new_side" : "rebalance_open",
+                            flipTrigger && Objects.equals(target.originId(), triggerOriginId) ? "flip_open_new_side" : null
+                    )
                             : executeReopenExistingTarget(currentCopy, target, triggerOriginId, userDetail);
                     current.put(target.originId(), created);
                     usedMargin = usedMargin.add(computeCopyBufferedMargin(created));
@@ -891,6 +954,39 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     current.size());
             return null;
         });
+    }
+
+    private boolean isFlipOpenPreflightAllowed(TargetLeg flipTarget,
+                                                String triggerOriginId,
+                                                String userId,
+                                                String walletId,
+                                                boolean canOpenOrResize,
+                                                BigDecimal walletBudget,
+                                                BigDecimal hardCap,
+                                                BigDecimal reserve) {
+        if (flipTarget == null || safeQty(flipTarget.targetQty()).compareTo(ZERO) <= 0) {
+            log.error("event=rebalance.copy.flip_preflight_failed category=rebalance reasonCode=flip_preflight_no_new_target reasonAlias=flip_preflight_no_new_target friendlyReason=flip_sin_objetivo_nuevo explanation=se_detecto_FLIP_pero_no_existe_un_objetivo_valido_para_el_lado_nuevo copyImpact=copy_desync_risk traceId={} triggerOriginId={} userId={} wallet={} {}",
+                    activeCopyOperationCache.traceId(triggerOriginId, userId, walletId, null),
+                    triggerOriginId, userId, walletId,
+                    CopyLogAdvice.fields("flip_preflight_no_new_target", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
+            return false;
+        }
+        if (!canOpenOrResize || walletBudget == null || walletBudget.compareTo(ZERO) <= 0) {
+            log.error("event=rebalance.copy.flip_preflight_failed category=rebalance reasonCode=flip_preflight_metric_blocked reasonAlias=flip_preflight_metric_blocked friendlyReason=flip_bloqueado_por_metricas explanation=no_hay_presupuesto_o_metricas_validas_para_abrir_el_lado_nuevo copyImpact=copy_flat_or_desynced traceId={} originId={} userId={} wallet={} symbol={} targetQty={} walletBudget={} {}",
+                    activeCopyOperationCache.traceId(flipTarget.originId(), userId, walletId, flipTarget.symbol()),
+                    flipTarget.originId(), userId, walletId, flipTarget.symbol(), safeQty(flipTarget.targetQty()).toPlainString(), walletBudget,
+                    CopyLogAdvice.fields("flip_preflight_metric_blocked", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
+            return false;
+        }
+        BigDecimal required = computeBufferedMargin(flipTarget.targetQty(), flipTarget.priceRef(), flipTarget.leverage());
+        if (required.compareTo(ZERO) <= 0 || required.add(reserve == null ? ZERO : reserve).compareTo(hardCap == null ? ZERO : hardCap) > 0) {
+            log.error("event=rebalance.copy.flip_preflight_failed category=rebalance reasonCode=flip_preflight_budget_blocked reasonAlias=flip_preflight_budget_blocked friendlyReason=flip_bloqueado_por_presupuesto explanation=el_lado_nuevo_del_FLIP_supera_el_presupuesto_disponible_o_no_tiene_margen_calculable copyImpact=copy_flat_or_desynced traceId={} originId={} userId={} wallet={} symbol={} requiredMargin={} hardCap={} reserve={} {}",
+                    activeCopyOperationCache.traceId(flipTarget.originId(), userId, walletId, flipTarget.symbol()),
+                    flipTarget.originId(), userId, walletId, flipTarget.symbol(), required.toPlainString(), hardCap, reserve,
+                    CopyLogAdvice.fields("flip_preflight_budget_blocked", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
+            return false;
+        }
+        return true;
     }
 
     private MetricaWalletDto resolveWalletMetric(String walletId, UserDetailDto userDetail) {
@@ -1031,7 +1127,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .toPlainString();
     }
 
-    private List<OriginBasketPositionDto> patchSourceBasket(List<OriginBasketPositionDto> currentBasket, OperacionDto originOperation) {
+    private List<OriginBasketPositionDto> patchSourceBasket(List<OriginBasketPositionDto> currentBasket,
+                                                              OperacionDto originOperation,
+                                                              HyperliquidDeltaType triggerDeltaType) {
         final Map<String, OriginBasketPositionDto> byOriginId = new HashMap<>();
         if (currentBasket != null) {
             for (OriginBasketPositionDto p : currentBasket) {
@@ -1042,30 +1140,74 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String originId = originOperation.getIdOperacion().toString();
         if (originOperation.isOperacionActiva()) {
-            if (!byOriginId.containsKey(originId)) {
-                final BigDecimal inferredNotional = inferEconomicNotionalFromEvent(originOperation);
-                byOriginId.put(originId, OriginBasketPositionDto.builder()
-                        .originId(originId)
-                        .walletId(originOperation.getIdCuenta())
-                        .symbol(originOperation.getParSymbol())
-                        .side(originOperation.getTipoOperacion())
-                        .entryPrice(originOperation.getPrecioEntrada())
-                        .markPrice(originOperation.getPrecioMercado())
-                        .marginUsedUsd(originOperation.getMarginUsedUsd())
-                        .notionalUsd(inferredNotional)
-                        .sizeQty(originOperation.getSizeQty())
-                        .sizeLegacy(originOperation.getSize())
-                        .createdAt(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
-                        .updatedAt(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
-                        .sourceTs(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
-                        .build());
-            } else {
-                log.debug("event=rebalance.source.patch_skipped reason=db_position_is_newer originId={}", originId);
+            if (triggerDeltaType == HyperliquidDeltaType.FLIP) {
+                List<String> oppositeOriginIds = byOriginId.values().stream()
+                        .filter(p -> sameWalletSymbolDifferentSide(p, originOperation))
+                        .map(OriginBasketPositionDto::getOriginId)
+                        .filter(Objects::nonNull)
+                        .toList();
+                for (String oppositeOriginId : oppositeOriginIds) {
+                    byOriginId.remove(oppositeOriginId);
+                    log.info("event=rebalance.source.flip_opposite_removed category=rebalance reasonCode=flip_replaces_previous_side reasonAlias=flip_replaces_previous_side friendlyReason=flip_cierra_lado_anterior explanation=el_FLIP_remueve_la_pierna_opuesta_del_basket_para_forzar_cierre_y_apertura_contraria copyImpact=copy_safe_path oldOriginId={} newOriginId={} wallet={} symbol={} newSide={} {}",
+                            oppositeOriginId,
+                            originId,
+                            safeLog(originOperation.getIdCuenta()),
+                            safeLog(originOperation.getParSymbol()),
+                            originOperation.getTipoOperacion(),
+                            CopyLogAdvice.fields("flip_replaces_previous_side", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
+                }
             }
+
+            final BigDecimal inferredNotional = inferEconomicNotionalFromEvent(originOperation);
+            byOriginId.put(originId, OriginBasketPositionDto.builder()
+                    .originId(originId)
+                    .walletId(originOperation.getIdCuenta())
+                    .symbol(originOperation.getParSymbol())
+                    .side(originOperation.getTipoOperacion())
+                    .entryPrice(originOperation.getPrecioEntrada())
+                    .markPrice(originOperation.getPrecioMercado())
+                    .marginUsedUsd(originOperation.getMarginUsedUsd())
+                    .notionalUsd(inferredNotional)
+                    .sizeQty(originOperation.getSizeQty())
+                    .sizeLegacy(originOperation.getSize())
+                    .createdAt(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
+                    .updatedAt(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
+                    .sourceTs(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
+                    .build());
+            log.debug("event=rebalance.source.patch_applied originId={} deltaType={} sizeQty={} notionalUsd={}",
+                    originId, triggerDeltaType, originOperation.getSizeQty(), inferredNotional);
         } else {
             byOriginId.remove(originId);
         }
         return new ArrayList<>(byOriginId.values());
+    }
+
+    private boolean sameWalletSymbolDifferentSide(OriginBasketPositionDto p, OperacionDto operation) {
+        if (p == null || operation == null) {
+            return false;
+        }
+        return CopySymbolIdentity.sameWalletAndBaseAsset(p.getWalletId(), operation.getIdCuenta(), p.getSymbol(), operation.getParSymbol())
+                && p.getSide() != null
+                && operation.getTipoOperacion() != null
+                && p.getSide() != operation.getTipoOperacion();
+    }
+
+    private boolean sameWalletSymbolDifferentSide(CopyOperationDto copy, OperacionDto operation) {
+        if (copy == null || operation == null) {
+            return false;
+        }
+        PositionSide copySide = parsePositionSide(copy.getTypeOperation());
+        return CopySymbolIdentity.sameWalletAndBaseAsset(copy.getIdWalletOrigin(), operation.getIdCuenta(), copy.getParsymbol(), operation.getParSymbol())
+                && copySide != null
+                && operation.getTipoOperacion() != null
+                && copySide != operation.getTipoOperacion();
+    }
+
+    private boolean equalsIgnoreCase(String a, String b) {
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.equalsIgnoreCase(b);
     }
 
     private Map<String, TargetLeg> buildTargetBasket(UserDetailDto userDetail,
@@ -1092,7 +1234,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 continue;
             }
             try {
-                final String symbol = resolveCanonicalSymbol(leg.getSymbol());
+                final String symbol = resolveCanonicalSymbol(leg.getSymbol(), resolveCapitalAsset(userDetail));
                 final BigDecimal priceRef = resolvePriceRef(leg.getMarkPrice(), leg.getEntryPrice());
                 if (priceRef.compareTo(ZERO) <= 0 || leg.getSide() == null) {
                     continue;
@@ -1347,9 +1489,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                                    String triggerOriginId,
                                                    String userId,
                                                    String walletId,
-                                                   boolean triggerIsOpen) {
+                                                   boolean triggerIsOpen,
+                                                   boolean flipTrigger) {
         if (target == null) {
             return true;
+        }
+
+        if (flipTrigger && Objects.equals(target.originId(), triggerOriginId)) {
+            log.info("event=rebalance.copy.open_preflight_ok category=rebalance reasonCode=flip_open_new_side reasonAlias=flip_open_new_side friendlyReason=apertura_flip_validada explanation=la_apertura_del_lado_nuevo_del_FLIP_no_usa_reglas_de_apertura_tardia copyImpact=copy_safe_path originId={} triggerOriginId={} userId={} wallet={} symbol={} {}",
+                    target.originId(), triggerOriginId, userId, walletId, target.symbol(),
+                    CopyLogAdvice.fields("flip_open_new_side", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")));
+            return false;
         }
 
         if (!triggerIsOpen) {
@@ -1440,24 +1590,26 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         if (!triggerIsOpen) {
             log.info(
-                    "event=rebalance.copy.increase_skip reason=trigger_is_close originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    "event=rebalance.copy.increase_skip category=rebalance reasonCode=trigger_is_close reasonAlias=trigger_is_close friendlyReason=aumento_ignorado_por_cierre explanation=un_cierre_disparo_rebalance_y_no_corresponde_aumentar_posiciones copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={} {}",
                     target.originId(),
                     triggerOriginId,
                     userId,
                     walletId,
-                    target.symbol()
+                    target.symbol(),
+                    CopyLogAdvice.fields("trigger_is_close", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance"))
             );
             return true;
         }
 
         if (!Objects.equals(target.originId(), triggerOriginId)) {
             log.info(
-                    "event=rebalance.copy.increase_skip reason=non_trigger_position originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    "event=rebalance.copy.increase_skip category=rebalance reasonCode=non_trigger_position reasonAlias=non_trigger_position friendlyReason=aumento_no_es_del_trigger explanation=solo_se_aumenta_la_posicion_que_disparo_el_evento_para_no_copiar_historico_fuera_de_orden copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={} {}",
                     target.originId(),
                     triggerOriginId,
                     userId,
                     walletId,
-                    target.symbol()
+                    target.symbol(),
+                    CopyLogAdvice.fields("non_trigger_position", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance"))
             );
             return true;
         }
@@ -1474,12 +1626,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final OffsetDateTime sourceUpdatedAt = firstNonNull(target.sourceUpdatedAt(), target.sourceTs(), target.sourceCreatedAt());
         if (sourceUpdatedAt == null) {
             log.warn(
-                    "event=rebalance.copy.increase_skip reason=source_update_time_missing originId={} triggerOriginId={} userId={} wallet={} symbol={}",
+                    "event=rebalance.copy.increase_skip category=rebalance reasonCode=source_update_time_missing reasonAlias=source_update_time_missing friendlyReason=aumento_sin_fecha_fuente explanation=no_se_aumenta_porque_no_hay_fecha_confiable_para_validar_que_el_evento_es_reciente copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={} {}",
                     target.originId(),
                     triggerOriginId,
                     userId,
                     walletId,
-                    target.symbol()
+                    target.symbol(),
+                    CopyLogAdvice.fields("source_update_time_missing", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance"))
             );
             return true;
         }
@@ -1490,7 +1643,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         log.warn(
-                "event=rebalance.copy.increase_skip reason=stale_source_update originId={} triggerOriginId={} userId={} wallet={} symbol={} sourceUpdatedAt={} ageMs={} maxAgeMs={}",
+                "event=rebalance.copy.increase_skip category=rebalance reasonCode=stale_source_update reasonAlias=stale_source_update friendlyReason=aumento_fuera_de_tiempo explanation=no_se_aumenta_porque_el_estado_fuente_es_antiguo_y_podria_descuadrar_la_copia copyImpact=no_copy_order originId={} triggerOriginId={} userId={} wallet={} symbol={} sourceUpdatedAt={} ageMs={} maxAgeMs={} "+ CopyLogAdvice.fields("stale_source_update", CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), "rebalance")),
                 target.originId(),
                 triggerOriginId,
                 userId,
@@ -1581,16 +1734,31 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return activeCopyOperationCache.activeOperation(target.originId(), userId);
     }
 
-    private CopyOperationDto executeOpenTarget(TargetLeg target, String triggerOriginId, UserDetailDto userDetail) {
+    private CopyOperationDto executeOpenTarget(TargetLeg target, String triggerOriginId, UserDetailDto userDetail, String copyIntent, String source, String reasonCode) {
         final String userId = userDetail.getUser().getId().toString();
         final String traceId = activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol());
+        final String effectiveReasonCode = reasonCode == null ? "rebalance_open" : reasonCode;
+        final boolean flipOpen = "FLIP".equalsIgnoreCase(copyIntent);
         final OperationDto dto = buildOpenOrIncreaseOrder(target, target.targetQty(), userDetail,
                 IdempotencyKeyUtil.openClientOrderId(target.originId(), userId, target.walletId()), true);
 
         activeCopyOperationCache.markPendingOpen(target.originId(), userId, target.walletId(), target.symbol(),
                 target.side() == null ? null : target.side().name(), traceId);
-        log.info("event=rebalance.copy.open_send category=rebalance reasonAlias=missing_copy_open friendlyReason=apertura_de_copia_faltante explanation=se_envia_orden_para_crear_una_copia_que_no_existia_en_ram copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} qty={} positionSide={} clientOrderId={}",
-                traceId, target.originId(), triggerOriginId, userId, target.walletId(), target.symbol(), dto.getQuantity(), dto.getPositionSide(), dto.getClientOrderId());
+        log.info("event=rebalance.copy.open_send category=rebalance reasonCode={} reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} qty={} positionSide={} clientOrderId={} {}",
+                effectiveReasonCode,
+                flipOpen ? "flip_open_new_side" : "missing_copy_open",
+                flipOpen ? "flip_abre_nuevo_lado" : "apertura_de_copia_faltante",
+                flipOpen ? "se_envia_la_apertura_del_lado_contrario_despues_de_cerrar_la_copia_anterior" : "se_envia_orden_para_crear_una_copia_que_no_existia_en_ram",
+                traceId,
+                target.originId(),
+                triggerOriginId,
+                userId,
+                target.walletId(),
+                target.symbol(),
+                dto.getQuantity(),
+                dto.getPositionSide(),
+                dto.getClientOrderId(),
+                CopyLogAdvice.fields(effectiveReasonCode, CopyLogAdvice.context(null, null, null, null, null, null, activeCopyOperationCache.activeSize(), source == null ? "rebalance" : source)));
 
         final BinanceFuturesOrderClientResponse response = procesBinanceService.operationPosition(dto);
         if (!isValidOrderResponse(response)) {
@@ -1608,7 +1776,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         );
         recordCopyOperationEvent(
                 "OPEN",
-                "OPEN",
+                copyIntent == null ? "OPEN" : copyIntent,
                 target.originId(),
                 userId,
                 target.walletId(),
@@ -1622,12 +1790,24 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 safeQty(copyTradingMapper.resolveFilledQty(response)),
                 null,
                 traceId,
-                "rebalance_open",
-                null
+                source == null ? "rebalance_open" : source,
+                reasonCode
         );
         persistActiveAfterOrder(created, activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol()), "rebalance_open_persist_failed");
-        log.info("event=rebalance.copy.open_ok category=rebalance reasonAlias=missing_copy_opened friendlyReason=copia_faltante_abierta explanation=la_copia_faltante_quedo_abierta_y_registrada copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} qty={}",
-                traceId, target.originId(), triggerOriginId, userId, target.walletId(), target.symbol(), response.getOrderId(), safeQty(copyTradingMapper.resolveFilledQty(response)).toPlainString());
+        log.info("event=rebalance.copy.open_ok category=rebalance reasonCode={} reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} qty={} {}",
+                effectiveReasonCode,
+                flipOpen ? "flip_open_new_side" : "missing_copy_opened",
+                flipOpen ? "flip_nuevo_lado_abierto" : "copia_faltante_abierta",
+                flipOpen ? "la_nueva_direccion_del_FLIP_quedo_abierta_y_registrada" : "la_copia_faltante_quedo_abierta_y_registrada",
+                traceId,
+                target.originId(),
+                triggerOriginId,
+                userId,
+                target.walletId(),
+                target.symbol(),
+                response.getOrderId(),
+                safeQty(copyTradingMapper.resolveFilledQty(response)).toPlainString(),
+                CopyLogAdvice.fields(effectiveReasonCode, CopyLogAdvice.context(null, null, 1, null, null, true, activeCopyOperationCache.activeSize(), source == null ? "rebalance" : source)));
         return created;
     }
 
@@ -1821,6 +2001,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 )
         );
 
+        final String traceId = activeCopyOperationCache.traceId(target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.symbol());
+        log.info("event=rebalance.copy.reduce_send category=rebalance reasonAlias=resize_reduce friendlyReason=reduccion_de_copia explanation=se_envia_orden_reduceOnly_para_bajar_la_copia_al_tamano_objetivo copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} currentQty={} targetQty={} deltaQty={} positionSide={} clientOrderId={}",
+                traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(),
+                currentQty.toPlainString(), targetQty.toPlainString(), deltaQty.toPlainString(), dto.getPositionSide(), dto.getClientOrderId());
         final BinanceFuturesOrderClientResponse response = procesBinanceService.operationPosition(dto);
 
         if (!isValidOrderResponse(response)) {
@@ -1833,7 +2017,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final BigDecimal remainingQty = currentQty.subtract(filledQty);
-        final String traceId = activeCopyOperationCache.traceId(target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.symbol());
         recordCopyOperationEvent(
                 remainingQty.compareTo(ZERO) <= 0 || targetQty.compareTo(ZERO) <= 0 ? "CLOSE" : "REDUCE",
                 remainingQty.compareTo(ZERO) <= 0 || targetQty.compareTo(ZERO) <= 0 ? "CLOSE" : "ADJUST",
@@ -1876,6 +2059,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .build();
 
             copyOperationService.closeOperation(closed);
+            activeCopyOperationCache.markClosed(currentCopy.getIdOrderOrigin(), userDetail.getUser().getId().toString());
+            log.info("event=rebalance.copy.reduce_to_close_ok category=rebalance reasonAlias=resize_reduce_closed friendlyReason=reduccion_cerro_copia explanation=la_reduccion_dejo_la_copia_en_cero_y_se_marco_como_cerrada copyImpact=copy_closed traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} filledQty={}",
+                    traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(), response.getOrderId(), filledQty.toPlainString());
             return closed;
         }
 
@@ -1904,11 +2090,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .build();
 
         persistActiveAfterOrder(updated, activeCopyOperationCache.traceId(updated.getIdOrderOrigin(), updated.getIdUser(), updated.getIdWalletOrigin(), updated.getParsymbol()), "rebalance_update_persist_failed");
+        log.info("event=rebalance.copy.reduce_ok category=rebalance reasonAlias=resize_reduce_applied friendlyReason=reduccion_de_copia_aplicada explanation=la_copia_quedo_actualizada_con_la_cantidad_restante copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} filledQty={} remainingQty={}",
+                traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(),
+                response.getOrderId(), filledQty.toPlainString(), remainingQty.max(ZERO).toPlainString());
         return updated;
     }
 
     private void executeFullClose(CopyOperationDto copyOperation, UserDetailDto userDetail) {
-        executeCloseOperation(copyOperation, userDetail);
+        executeFullClose(copyOperation, userDetail, "CLOSE", "rebalance_full_close", null);
+    }
+
+    private void executeFullClose(CopyOperationDto copyOperation, UserDetailDto userDetail, String copyIntent, String source, String reasonCode) {
+        executeCloseOperation(copyOperation, userDetail, copyIntent, source, reasonCode);
     }
 
     private OperationDto buildOpenOrIncreaseOrder(TargetLeg target, BigDecimal quantity, UserDetailDto userDetail, String clientOrderId, boolean configureAccountSettings) {
@@ -2172,14 +2365,31 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail) {
+        executeCloseOperation(copyOperation, userDetail, "CLOSE", "direct_close", null);
+    }
+
+    private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail, String copyIntent, String source, String reasonCode) {
         final String originId = copyOperation.getIdOrderOrigin();
         final String userId = userDetail.getUser().getId().toString();
+        final String effectiveReasonCode = reasonCode == null ? "direct_close" : reasonCode;
+        final boolean flipClose = "FLIP".equalsIgnoreCase(copyIntent);
         final OperationDto closeRequest = copyTradingMapper.buildClosePosition(copyOperation, userDetail);
 
         final long sendNs = System.nanoTime();
-        log.info("event=copy.close.order.send originId={} userId={} wallet={} symbol={} qty={} positionSide={} reduceOnly={} clientOrderId={}",
-                originId, userId, copyOperation.getIdWalletOrigin(), closeRequest.getSymbol(), closeRequest.getQuantity(),
-                closeRequest.getPositionSide(), closeRequest.isReduceOnly(), closeRequest.getClientOrderId());
+        log.info("event=copy.close.order.send category=copy reasonCode={} reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_order_sent originId={} userId={} wallet={} symbol={} qty={} positionSide={} reduceOnly={} clientOrderId={} {}",
+                effectiveReasonCode,
+                flipClose ? "flip_close_previous_side" : "direct_close",
+                flipClose ? "flip_cierra_copia_anterior" : "cierre_de_copia",
+                flipClose ? "se_envia_cierre_reduceOnly_del_lado_anterior_antes_de_abrir_el_lado_nuevo" : "se_envia_cierre_reduceOnly_para_salir_de_la_copia",
+                originId,
+                userId,
+                copyOperation.getIdWalletOrigin(),
+                closeRequest.getSymbol(),
+                closeRequest.getQuantity(),
+                closeRequest.getPositionSide(),
+                closeRequest.isReduceOnly(),
+                closeRequest.getClientOrderId(),
+                CopyLogAdvice.fields(effectiveReasonCode, CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), source == null ? "direct_close" : source)));
         final BinanceFuturesOrderClientResponse order =
                 procesBinanceService.operationPosition(closeRequest);
 
@@ -2201,12 +2411,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        log.info("event=copy.close.order.ok originId={} userId={} wallet={} symbol={} orderId={} elapsedMs={}",
-                originId, userId, copyOperation.getIdWalletOrigin(), closeRequest.getSymbol(), order.getOrderId(), elapsedMsSince(sendNs));
+        log.info("event=copy.close.order.ok category=copy reasonCode={} reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_closed originId={} userId={} wallet={} symbol={} orderId={} elapsedMs={} {}",
+                effectiveReasonCode,
+                flipClose ? "flip_close_previous_side" : "direct_close",
+                flipClose ? "flip_copia_anterior_cerrada" : "copia_cerrada",
+                flipClose ? "la_copia_del_lado_anterior_quedo_cerrada_antes_de_abrir_el_lado_nuevo" : "la_copia_quedo_cerrada_en_Binance_y_se_actualizara_el_estado_local",
+                originId,
+                userId,
+                copyOperation.getIdWalletOrigin(),
+                closeRequest.getSymbol(),
+                order.getOrderId(),
+                elapsedMsSince(sendNs),
+                CopyLogAdvice.fields(effectiveReasonCode, CopyLogAdvice.context(null, null, 1, null, null, true, activeCopyOperationCache.activeSize(), source == null ? "direct_close" : source)));
         final String traceId = activeCopyOperationCache.traceId(originId, userId, copyOperation.getIdWalletOrigin(), copyOperation.getParsymbol());
         recordCopyOperationEvent(
                 "CLOSE",
-                "CLOSE",
+                copyIntent == null ? "CLOSE" : copyIntent,
                 originId,
                 userId,
                 copyOperation.getIdWalletOrigin(),
@@ -2220,13 +2440,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 ZERO,
                 copyOperation.getPriceEntry(),
                 traceId,
-                "direct_close",
-                null
+                source == null ? "direct_close" : source,
+                reasonCode
         );
 
         final CopyOperationDto buildCopyOperation = copyTradingMapper.buildCopyCloseOperationDto(copyOperation, order);
         final long saveNs = System.nanoTime();
         copyOperationService.closeOperation(buildCopyOperation);
+        activeCopyOperationCache.markClosed(originId, userId);
         log.info("event=copy.job.phase action=CLOSE phase=save_copy_operation originId={} userId={} wallet={} symbol={} elapsedMs={}",
                 originId, userId, copyOperation.getIdWalletOrigin(), copyOperation.getParsymbol(), elapsedMsSince(saveNs));
 
@@ -2347,7 +2568,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String rawSymbol = originOperation.getParSymbol();
         final long symbolMetadataNs = System.nanoTime();
-        final String symbol = resolveCanonicalSymbol(rawSymbol);
+        final String symbol = resolveCanonicalSymbol(rawSymbol, resolveCapitalAsset(userDetail));
         final Map<String, BinanceFuturesSymbolInfoClientDto> symbolsBySymbol = getSymbolsBySymbol();
         log.info("event=copy.job.phase action=OPEN phase=load_symbol_metadata originId={} userId={} wallet={} rawSymbol={} symbol={} elapsedMs={}",
                 originId, userId, walletId, safeLog(rawSymbol), safeLog(symbol), elapsedMsSince(symbolMetadataNs));
@@ -2928,13 +3149,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private String resolveCanonicalSymbol(String rawSymbol) {
+        return resolveCanonicalSymbol(rawSymbol, FuturesCapitalAsset.defaultAsset());
+    }
+
+    private String resolveCanonicalSymbol(String rawSymbol, FuturesCapitalAsset preferredAsset) {
         if (rawSymbol == null || rawSymbol.isBlank()) {
             return rawSymbol;
         }
 
         final SymbolsCache cache = getOrRefreshSymbolsCache();
 
-        for (String candidate : buildSymbolCandidates(rawSymbol)) {
+        for (String candidate : buildSymbolCandidates(rawSymbol, preferredAsset)) {
             if (candidate == null || candidate.isBlank()) {
                 continue;
             }
@@ -3592,6 +3817,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private List<String> buildSymbolCandidates(String rawSymbol) {
+        return buildSymbolCandidates(rawSymbol, FuturesCapitalAsset.defaultAsset());
+    }
+
+    private List<String> buildSymbolCandidates(String rawSymbol, FuturesCapitalAsset preferredAsset) {
         final LinkedHashSet<String> candidates = new LinkedHashSet<>();
 
         final String key = normalizeSymbolKey(rawSymbol);
@@ -3599,35 +3828,72 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return List.of();
         }
 
-        candidates.add(key);
+        final FuturesCapitalAsset safePreferredAsset = preferredAsset == null ? FuturesCapitalAsset.defaultAsset() : preferredAsset;
+        final String preferredQuote = safePreferredAsset.name();
 
         final String strippedVersion = stripVersionSuffix(key);
-        candidates.add(strippedVersion);
+        addPreferredQuoteCandidates(candidates, key, preferredQuote);
+        addPreferredQuoteCandidates(candidates, strippedVersion, preferredQuote);
+
+        addIfSameQuoteOrQuoteMissing(candidates, key, preferredQuote);
+        addIfSameQuoteOrQuoteMissing(candidates, strippedVersion, preferredQuote);
 
         final String manualAlias = MANUAL_SYMBOL_ALIASES.get(key);
         if (manualAlias != null && !manualAlias.isBlank()) {
-            candidates.add(normalizeSymbolKey(manualAlias));
+            addPreferredQuoteCandidates(candidates, normalizeSymbolKey(manualAlias), preferredQuote);
         }
 
         final String manualAliasStripped = MANUAL_SYMBOL_ALIASES.get(strippedVersion);
         if (manualAliasStripped != null && !manualAliasStripped.isBlank()) {
-            candidates.add(normalizeSymbolKey(manualAliasStripped));
+            addPreferredQuoteCandidates(candidates, normalizeSymbolKey(manualAliasStripped), preferredQuote);
         }
 
-        addUsdToUsdtCandidates(candidates, key);
-        addUsdToUsdtCandidates(candidates, strippedVersion);
+        addUsdToPreferredQuoteCandidates(candidates, key, preferredQuote);
+        addUsdToPreferredQuoteCandidates(candidates, strippedVersion, preferredQuote);
 
         return new ArrayList<>(candidates);
     }
 
-    private void addUsdToUsdtCandidates(Set<String> candidates, String symbol) {
+    private void addUsdToPreferredQuoteCandidates(Set<String> candidates, String symbol, String preferredQuote) {
         if (symbol == null || symbol.isBlank()) {
             return;
         }
 
         if (symbol.endsWith("USD") && !symbol.endsWith("USDT")) {
-            candidates.add(symbol.substring(0, symbol.length() - 3) + "USDT");
+            candidates.add(symbol.substring(0, symbol.length() - 3) + preferredQuote);
         }
+    }
+
+    private void addPreferredQuoteCandidates(Set<String> candidates, String symbol, String preferredQuote) {
+        if (symbol == null || symbol.isBlank() || preferredQuote == null || preferredQuote.isBlank()) {
+            return;
+        }
+        String quote = extractQuote(symbol);
+        if (quote == null) {
+            addUsdToPreferredQuoteCandidates(candidates, symbol, preferredQuote);
+            return;
+        }
+        String base = symbol.substring(0, symbol.length() - quote.length());
+        if (!base.isBlank()) {
+            candidates.add(base + preferredQuote);
+        }
+    }
+
+    private void addIfSameQuoteOrQuoteMissing(Set<String> candidates, String symbol, String preferredQuote) {
+        if (symbol == null || symbol.isBlank()) {
+            return;
+        }
+        String quote = extractQuote(symbol);
+        if (quote == null || quote.equals(preferredQuote)) {
+            candidates.add(symbol);
+        }
+    }
+
+    private FuturesCapitalAsset resolveCapitalAsset(UserDetailDto userDetail) {
+        if (userDetail == null || userDetail.getDetail() == null) {
+            return FuturesCapitalAsset.defaultAsset();
+        }
+        return FuturesCapitalAsset.fromNullable(userDetail.getDetail().getCapitalAsset());
     }
 
     private String stripVersionSuffix(String symbol) {

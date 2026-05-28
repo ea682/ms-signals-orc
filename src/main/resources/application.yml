@@ -173,6 +173,18 @@ metric-wallet:
     refresh-job: 2m
 
 
+futures:
+  capital-maintenance:
+    enabled: ${FUTURES_CAPITAL_MAINTENANCE_ENABLED:true}
+    initial-delay-ms: ${FUTURES_CAPITAL_MAINTENANCE_INITIAL_DELAY_MS:30000}
+    fixed-delay-ms: ${FUTURES_CAPITAL_MAINTENANCE_FIXED_DELAY_MS:600000}
+    min-available: ${FUTURES_CAPITAL_MAINTENANCE_MIN_AVAILABLE:50}
+    bnb-min-ratio: ${FUTURES_CAPITAL_MAINTENANCE_BNB_MIN_RATIO:0.03}
+    conversion-ratio: ${FUTURES_CAPITAL_MAINTENANCE_CONVERSION_RATIO:0.10}
+    bnb-price-base-url: ${FUTURES_CAPITAL_MAINTENANCE_BNB_PRICE_BASE_URL:https://fapi.binance.com}
+    bnb-price-timeout-ms: ${FUTURES_CAPITAL_MAINTENANCE_BNB_PRICE_TIMEOUT_MS:1000}
+    bnb-price-cache-ttl-ms: ${FUTURES_CAPITAL_MAINTENANCE_BNB_PRICE_CACHE_TTL_MS:60000}
+
 hyperliquid:
   direct-ingest:
     enabled: ${HYPERLIQUID_DIRECT_INGEST_ENABLED:true}

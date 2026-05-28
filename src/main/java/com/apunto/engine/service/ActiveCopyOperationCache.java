@@ -21,6 +21,8 @@ public interface ActiveCopyOperationCache {
 
     Set<String> activeUserIdsByWalletAndSymbol(String walletId, String symbol);
 
+    Set<String> activeUserIdsByWalletAndBaseSymbol(String walletId, String symbol);
+
     String traceId(String originId, String userId, String walletId, String symbol);
 
     void markPendingOpen(String originId, String userId, String walletId, String symbol, String typeOperation, String traceId);

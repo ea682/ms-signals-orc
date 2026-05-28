@@ -5,6 +5,7 @@ import com.apunto.engine.entity.CopyOperationEntity;
 import com.apunto.engine.mapper.CopyOperationMapper;
 import com.apunto.engine.repository.CopyOperationRepository;
 import com.apunto.engine.service.ActiveCopyOperationCache;
+import com.apunto.engine.shared.util.CopySymbolIdentity;
 import com.apunto.engine.shared.util.CopyTraceIdUtil;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
@@ -124,6 +125,21 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
                 .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
                 .filter(ref -> normalizedWallet.equals(normalize(ref.wallet())))
                 .filter(ref -> normalizedSymbol.equals(normalize(ref.symbol())))
+                .map(RuntimeCopyRef::userId)
+                .filter(v -> v != null && !v.isBlank())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    @Override
+    public Set<String> activeUserIdsByWalletAndBaseSymbol(String walletId, String symbol) {
+        String normalizedWallet = normalize(walletId);
+        if (normalizedWallet == null || CopySymbolIdentity.primaryBaseAsset(symbol) == null) {
+            return Collections.emptySet();
+        }
+        return byOriginUser.values().stream()
+                .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
+                .filter(ref -> normalizedWallet.equals(normalize(ref.wallet())))
+                .filter(ref -> CopySymbolIdentity.sameBaseAsset(ref.symbol(), symbol))
                 .map(RuntimeCopyRef::userId)
                 .filter(v -> v != null && !v.isBlank())
                 .collect(Collectors.toUnmodifiableSet());
