@@ -72,6 +72,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import static java.math.BigDecimal.ONE;
+
 @Service
 @Slf4j
 @RequiredArgsConstructor
@@ -141,11 +143,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final int USER_LEVERAGE_MAX = 20;
 
     private static final List<String> KNOWN_QUOTES = List.of(
-            "USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH"
+            "USDT", "USDC", "FDUSD", "BUSD", "USD", "BTC", "ETH"
     );
 
     private static final Pattern LEADING_MULTIPLIER_PATTERN =
             Pattern.compile("^(\\d+)([A-Z0-9]+)$");
+    private static final List<String> CONTRACT_MULTIPLIERS = List.of("1000000000", "1000000", "1000");
 
     private final ProcesBinanceService procesBinanceService;
     private final ThreadPoolTaskScheduler binanceTaskScheduler;
@@ -803,7 +806,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .stream()
                     .filter(Objects::nonNull)
                     .collect(Collectors.toMap(CopyOperationDto::getIdOrderOrigin, java.util.function.Function.identity(), (a, b) -> a, HashMap::new));
-            final BigDecimal hardCap = walletBudget.multiply(BigDecimal.ONE.add(walletHardcapOverPct == null ? ZERO : walletHardcapOverPct));
+            final BigDecimal hardCap = walletBudget.multiply(ONE.add(walletHardcapOverPct == null ? ZERO : walletHardcapOverPct));
             final BigDecimal reserve = walletBudget.multiply(walletReservePct == null ? ZERO : walletReservePct);
             final TargetLeg flipTarget = flipTrigger ? targets.get(triggerOriginId) : null;
             final boolean flipOpenAllowed = !flipTrigger || isFlipOpenPreflightAllowed(
@@ -1234,10 +1237,23 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 continue;
             }
             try {
-                final String symbol = resolveCanonicalSymbol(leg.getSymbol(), resolveCapitalAsset(userDetail));
-                final BigDecimal priceRef = resolvePriceRef(leg.getMarkPrice(), leg.getEntryPrice());
+                final SymbolContractResolution symbolContract = resolveSymbolContract(leg.getSymbol(), resolveCapitalAsset(userDetail));
+                final String symbol = symbolContract.canonicalSymbol();
+                final BigDecimal originPriceRef = resolvePriceRef(leg.getMarkPrice(), leg.getEntryPrice());
+                final BigDecimal priceRef = symbolContract.executionPrice(originPriceRef);
+                final BigDecimal entryPriceRef = symbolContract.executionPrice(leg.getEntryPrice());
                 if (priceRef.compareTo(ZERO) <= 0 || leg.getSide() == null) {
                     continue;
+                }
+                if (symbolContract.usesDifferentContractUnit()) {
+                    log.info("event=rebalance.symbol_contract.sizing originLegId={} wallet={} rawSymbol={} canonicalSymbol={} originPriceRef={} contractPriceRef={} contractMultiplier={} humanMessage=rebalance_usara_el_precio_del_contrato_binance_para_calcular_cantidad",
+                            leg.getOriginId(),
+                            leg.getWalletId(),
+                            safeLog(leg.getSymbol()),
+                            safeLog(symbol),
+                            originPriceRef.toPlainString(),
+                            priceRef.toPlainString(),
+                            symbolContract.priceMultiplier().toPlainString());
                 }
 
                 final BigDecimal sourceMargin = resolveSourceMarginForSizing(leg, walletMetric);
@@ -1299,7 +1315,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 final BigDecimal notionalMax = targetMargin.multiply(BigDecimal.valueOf(leverage));
                 final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
-                BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+                BigDecimal targetNotional = notionalMax.multiply(ONE.subtract(buf));
                 BigDecimal notionalBudgetCeiling = walletBudget.multiply(BigDecimal.valueOf(leverage));
                 boolean copyByMinNotional = false;
 
@@ -1452,7 +1468,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         priceRef,
                         targetQty,
                         targetNotionalFinal,
-                        leg.getEntryPrice(),
+                        entryPriceRef,
                         leg.getCreatedAt(),
                         leg.getUpdatedAt(),
                         leg.getSourceTs()
@@ -1558,7 +1574,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
         }
 
-        final BigDecimal driftLimit = safePct(maxMissingOpenPriceDriftPct, BigDecimal.ONE);
+        final BigDecimal driftLimit = safePct(maxMissingOpenPriceDriftPct, ONE);
         final BigDecimal drift = computeEntryPriceDriftPct(target);
         if (driftLimit.compareTo(ZERO) > 0 && drift.compareTo(driftLimit) > 0) {
             log.warn(
@@ -2153,7 +2169,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private BigDecimal computeBufferedMarginForNotional(BigDecimal notional, int leverage) {
         if (notional == null || leverage <= 0 || notional.compareTo(ZERO) <= 0) return ZERO;
         final BigDecimal margin = notional.divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
-        return margin.multiply(BigDecimal.ONE.add(safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT)));
+        return margin.multiply(ONE.add(safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT)));
     }
 
     private BigDecimal sumBufferedMargin(java.util.Collection<CopyOperationDto> operations) {
@@ -2170,9 +2186,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal qty = safeQty(op.getSizePar());
         if (qty.compareTo(ZERO) <= 0) return ZERO;
         final BigDecimal usd = safeUsd(op.getSiseUsd(), qty, op.getPriceEntry());
-        final BigDecimal lev = op.getLeverage() == null || op.getLeverage().compareTo(ZERO) <= 0 ? BigDecimal.ONE : op.getLeverage();
+        final BigDecimal lev = op.getLeverage() == null || op.getLeverage().compareTo(ZERO) <= 0 ? ONE : op.getLeverage();
         final BigDecimal margin = usd.divide(lev, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
-        return margin.multiply(BigDecimal.ONE.add(safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT)));
+        return margin.multiply(ONE.add(safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT)));
     }
 
     private BigDecimal safeUsd(BigDecimal explicitUsd, BigDecimal qty, BigDecimal entryPrice) {
@@ -2556,22 +2572,38 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final BigDecimal entryPrice = originOperation.getPrecioEntrada();
-        if (entryPrice == null || entryPrice.compareTo(ZERO) <= 0) {
+        final BigDecimal originEntryPrice = originOperation.getPrecioEntrada();
+        if (originEntryPrice == null || originEntryPrice.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_ENTRY, originId, userId, walletId);
             throw new SkipExecutionException(
                     "entry_price_invalid",
                     "Precio de entrada inválido (<=0)",
-                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "entryPrice", entryPrice)
+                    com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "entryPrice", originEntryPrice)
             );
         }
 
         final String rawSymbol = originOperation.getParSymbol();
         final long symbolMetadataNs = System.nanoTime();
-        final String symbol = resolveCanonicalSymbol(rawSymbol, resolveCapitalAsset(userDetail));
+        final SymbolContractResolution symbolContract = resolveSymbolContract(rawSymbol, resolveCapitalAsset(userDetail));
+        final String symbol = symbolContract.canonicalSymbol();
+        final BigDecimal entryPrice = symbolContract.executionPrice(originEntryPrice);
+        if (entryPrice.compareTo(ZERO) <= 0) {
+            throw new SkipExecutionException(
+                    "contract_price_invalid",
+                    "Precio convertido a contrato Binance inválido",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "rawSymbol", rawSymbol,
+                            "canonicalSymbol", symbol,
+                            "originEntryPrice", originEntryPrice,
+                            "contractMultiplier", symbolContract.priceMultiplier(),
+                            "contractEntryPrice", entryPrice
+                    )
+            );
+        }
         final Map<String, BinanceFuturesSymbolInfoClientDto> symbolsBySymbol = getSymbolsBySymbol();
-        log.info("event=copy.job.phase action=OPEN phase=load_symbol_metadata originId={} userId={} wallet={} rawSymbol={} symbol={} elapsedMs={}",
-                originId, userId, walletId, safeLog(rawSymbol), safeLog(symbol), elapsedMsSince(symbolMetadataNs));
+        log.info("event=copy.job.phase action=OPEN phase=load_symbol_metadata originId={} userId={} wallet={} rawSymbol={} symbol={} originEntryPrice={} contractEntryPrice={} contractMultiplier={} elapsedMs={} humanMessage=ya_se_cual_contrato_de_binance_usar_y_con_que_precio_calcular_la_cantidad",
+                originId, userId, walletId, safeLog(rawSymbol), safeLog(symbol), originEntryPrice.toPlainString(), entryPrice.toPlainString(), symbolContract.priceMultiplier().toPlainString(), elapsedMsSince(symbolMetadataNs));
         if (rawSymbol == null || rawSymbol.isBlank()) {
             log.warn(LOG_PREP_INVALID_SYMBOL, originId, userId, walletId);
             throw new SkipExecutionException(
@@ -2583,8 +2615,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String normalizedRawSymbol = normalizeSymbolKey(rawSymbol);
         if (!symbol.equals(normalizedRawSymbol)) {
-            log.info("event=symbol.resolved originId={} userId={} wallet={} rawSymbol={} canonicalSymbol={}",
-                    originId, userId, walletId, rawSymbol, symbol);
+            log.info("event=symbol.resolved originId={} userId={} wallet={} rawSymbol={} canonicalSymbol={} contractMultiplier={} originBase={} canonicalBase={} humanMessage=el_simbolo_de_hyperliquid_se_mapeo_a_un_contrato_de_binance",
+                    originId, userId, walletId, rawSymbol, symbol, symbolContract.priceMultiplier(), symbolContract.rawBase(), symbolContract.canonicalBase());
         }
 
         final int leverage = Math.min(
@@ -2594,8 +2626,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final BigDecimal safety = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
         final BigDecimal usedMargin = copyOperationService.sumBufferedMarginActive(userId, walletId, safety);
-        final BigDecimal reserve = walletMarginBudget.multiply(safePct(walletReservePct, BigDecimal.ONE));
-        final BigDecimal hardCap = walletMarginBudget.multiply(BigDecimal.ONE.add(safePct(walletHardcapOverPct, BigDecimal.ONE)));
+        final BigDecimal reserve = walletMarginBudget.multiply(safePct(walletReservePct, ONE));
+        final BigDecimal hardCap = walletMarginBudget.multiply(ONE.add(safePct(walletHardcapOverPct, ONE)));
         final BigDecimal availableBufferedMargin = hardCap.subtract(reserve).subtract(usedMargin).max(ZERO);
 
         if (availableBufferedMargin.compareTo(ZERO) <= 0) {
@@ -2624,7 +2656,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final BigDecimal requestedMarginThisTrade = walletMarginBudget.multiply(fractionOfBaseUsed);
         BigDecimal allowedMarginThisTrade = availableBufferedMargin
-                .divide(BigDecimal.ONE.add(safety), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
+                .divide(ONE.add(safety), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
                 .max(ZERO);
         BigDecimal marginThisTrade = requestedMarginThisTrade.min(allowedMarginThisTrade);
 
@@ -2685,7 +2717,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
-        BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+        BigDecimal targetNotional = notionalMax.multiply(ONE.subtract(buf));
         final BigDecimal initialTargetNotional = targetNotional;
         boolean copyByMinNotional = false;
 
@@ -2776,7 +2808,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             targetNotional = rules.effectiveMinNotional;
             marginThisTrade = targetNotional.divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
             notionalMax = availableBufferedMargin
-                    .divide(BigDecimal.ONE.add(safety), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
+                    .divide(ONE.add(safety), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
                     .multiply(BigDecimal.valueOf(leverage));
             copyByMinNotional = true;
 
@@ -2859,6 +2891,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final BigDecimal notionalFinal = quantity.multiply(entryPrice);
+        if (symbolContract.usesDifferentContractUnit()) {
+            log.info("event=copy.symbol_contract.sizing originId={} userId={} wallet={} rawSymbol={} canonicalSymbol={} originEntryPrice={} contractEntryPrice={} contractMultiplier={} targetNotional={} qtyFinal={} finalNotional={} humanMessage=calcule_la_cantidad_usando_el_precio_del_contrato_para_no_copiar_de_mas",
+                    originId,
+                    userId,
+                    walletId,
+                    safeLog(rawSymbol),
+                    safeLog(symbol),
+                    originEntryPrice.toPlainString(),
+                    entryPrice.toPlainString(),
+                    symbolContract.priceMultiplier().toPlainString(),
+                    targetNotional.toPlainString(),
+                    quantity.toPlainString(),
+                    notionalFinal.toPlainString());
+        }
         if (copyByMinNotional && minNotionalPolicy.maxNotionalUsdt() != null
                 && notionalFinal.compareTo(minNotionalPolicy.maxNotionalUsdt()) > 0) {
             throw new SkipExecutionException(
@@ -2926,7 +2972,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final BigDecimal marginRequired = notionalFinal
                 .divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
-                .multiply(BigDecimal.ONE.add(safety));
+                .multiply(ONE.add(safety));
 
         if (marginRequired.compareTo(availableBufferedMargin) > 0) {
             log.warn(LOG_OPEN_SKIP_BUDGET,
@@ -3117,6 +3163,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 ? Collections.emptyMap()
                 : symbols.stream()
                 .filter(Objects::nonNull)
+                .filter(this::isCopyTradableSymbol)
                 .filter(s -> s.getSymbol() != null && !s.getSymbol().isBlank())
                 .collect(Collectors.toMap(
                         s -> normalizeSymbolKey(s.getSymbol()),
@@ -3148,16 +3195,47 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return getOrRefreshSymbolsCache().bySymbol;
     }
 
+    private boolean isCopyTradableSymbol(BinanceFuturesSymbolInfoClientDto symbolInfo) {
+        if (symbolInfo == null) {
+            return false;
+        }
+        String status = symbolInfo.getStatus();
+        if (status == null || !"TRADING".equalsIgnoreCase(status.trim())) {
+            return false;
+        }
+        String contractType = symbolInfo.getContractType();
+        if (contractType == null || !"PERPETUAL".equalsIgnoreCase(contractType.trim())) {
+            return false;
+        }
+        if (symbolInfo.getOrderTypes() == null
+                || symbolInfo.getOrderTypes().stream().noneMatch(orderType -> "MARKET".equalsIgnoreCase(String.valueOf(orderType)))) {
+            return false;
+        }
+        String symbol = normalizeSymbolKey(symbolInfo.getSymbol());
+        String quote = normalizeSymbolKey(symbolInfo.getQuoteAsset());
+        String margin = normalizeSymbolKey(symbolInfo.getMarginAsset());
+        return symbol != null && quote != null && margin != null && symbol.endsWith(quote) && quote.equals(margin);
+    }
+
     private String resolveCanonicalSymbol(String rawSymbol) {
-        return resolveCanonicalSymbol(rawSymbol, FuturesCapitalAsset.defaultAsset());
+        return resolveSymbolContract(rawSymbol, FuturesCapitalAsset.defaultAsset()).canonicalSymbol();
     }
 
     private String resolveCanonicalSymbol(String rawSymbol, FuturesCapitalAsset preferredAsset) {
+        return resolveSymbolContract(rawSymbol, preferredAsset).canonicalSymbol();
+    }
+
+    private SymbolContractResolution resolveSymbolContract(String rawSymbol, FuturesCapitalAsset preferredAsset) {
         if (rawSymbol == null || rawSymbol.isBlank()) {
-            return rawSymbol;
+            throw new SkipExecutionException(
+                    "symbol_blank",
+                    "Símbolo vacío/null",
+                    LogFmt.kv("rawSymbol", rawSymbol)
+            );
         }
 
         final SymbolsCache cache = getOrRefreshSymbolsCache();
+        final String normalizedRaw = normalizeSymbolKey(rawSymbol);
 
         for (String candidate : buildSymbolCandidates(rawSymbol, preferredAsset)) {
             if (candidate == null || candidate.isBlank()) {
@@ -3165,28 +3243,95 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             if (cache.bySymbol.containsKey(candidate)) {
-                return candidate;
+                return symbolContractResolution(rawSymbol, normalizedRaw, candidate, cache.bySymbol.get(candidate));
             }
 
             if (cache.ambiguousAliases.contains(candidate)) {
                 throw new SkipExecutionException(
                         "symbol_alias_ambiguous",
                         "Alias ambiguo, no se puede resolver de forma segura",
-                        com.apunto.engine.shared.util.LogFmt.kv("rawSymbol", rawSymbol, "candidate", candidate)
+                        LogFmt.kv("rawSymbol", rawSymbol, "candidate", candidate)
                 );
             }
 
             final String canonical = cache.aliasToCanonical.get(candidate);
-            if (canonical != null) {
-                return canonical;
+            if (canonical != null && cache.bySymbol.containsKey(canonical)) {
+                return symbolContractResolution(rawSymbol, normalizedRaw, canonical, cache.bySymbol.get(canonical));
             }
         }
 
         throw new SkipExecutionException(
                 "symbol_alias_not_found",
                 "No se pudo resolver el símbolo contra exchangeInfo",
-                com.apunto.engine.shared.util.LogFmt.kv("rawSymbol", rawSymbol)
+                LogFmt.kv("rawSymbol", rawSymbol)
         );
+    }
+
+    private SymbolContractResolution symbolContractResolution(String rawSymbol,
+                                                              String normalizedRaw,
+                                                              String canonicalSymbol,
+                                                              BinanceFuturesSymbolInfoClientDto symbolInfo) {
+        final String rawBase = baseWithoutQuote(normalizedRaw);
+        final String canonicalBase = baseWithoutQuote(canonicalSymbol);
+        final String rawAsset = stripKnownContractMultiplier(rawBase);
+        final String canonicalAsset = stripKnownContractMultiplier(canonicalBase);
+        BigDecimal rawMultiplier = leadingKnownContractMultiplier(rawBase);
+        BigDecimal canonicalMultiplier = leadingKnownContractMultiplier(canonicalBase);
+        BigDecimal priceMultiplier = ONE;
+        if (rawAsset != null && rawAsset.equals(canonicalAsset)
+                && rawMultiplier.compareTo(ZERO) > 0
+                && canonicalMultiplier.compareTo(ZERO) > 0) {
+            priceMultiplier = canonicalMultiplier.divide(rawMultiplier, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+        }
+        if (priceMultiplier.compareTo(ZERO) <= 0) {
+            priceMultiplier = ONE;
+        }
+        return new SymbolContractResolution(
+                rawSymbol,
+                canonicalSymbol,
+                rawBase,
+                canonicalBase,
+                rawMultiplier,
+                canonicalMultiplier,
+                priceMultiplier,
+                symbolInfo
+        );
+    }
+
+    private String baseWithoutQuote(String symbol) {
+        String normalized = normalizeSymbolKey(symbol);
+        if (normalized == null || normalized.isBlank()) {
+            return null;
+        }
+        String quote = extractQuote(normalized);
+        if (quote == null || normalized.length() <= quote.length()) {
+            return normalized;
+        }
+        return normalized.substring(0, normalized.length() - quote.length());
+    }
+
+    private String stripKnownContractMultiplier(String base) {
+        if (base == null || base.isBlank()) {
+            return null;
+        }
+        for (String multiplier : CONTRACT_MULTIPLIERS) {
+            if (base.startsWith(multiplier) && base.length() > multiplier.length()) {
+                return base.substring(multiplier.length());
+            }
+        }
+        return base;
+    }
+
+    private BigDecimal leadingKnownContractMultiplier(String base) {
+        if (base == null || base.isBlank()) {
+            return ONE;
+        }
+        final Matcher matcher = LEADING_MULTIPLIER_PATTERN.matcher(base);
+        if (!matcher.matches()) {
+            return ONE;
+        }
+        final String multiplier = matcher.group(1);
+        return CONTRACT_MULTIPLIERS.contains(multiplier) ? new BigDecimal(multiplier) : ONE;
     }
 
     private void registerAlias(Map<String, String> aliasToCanonical,
@@ -3272,15 +3417,15 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
             if (value.compareTo(billion) >= 0 && value.remainder(billion).compareTo(ZERO) == 0) {
                 final BigDecimal units = value.divide(billion).stripTrailingZeros();
-                return units.compareTo(BigDecimal.ONE) == 0 ? "B" : units.toPlainString() + "B";
+                return units.compareTo(ONE) == 0 ? "B" : units.toPlainString() + "B";
             }
             if (value.compareTo(million) >= 0 && value.remainder(million).compareTo(ZERO) == 0) {
                 final BigDecimal units = value.divide(million).stripTrailingZeros();
-                return units.compareTo(BigDecimal.ONE) == 0 ? "M" : units.toPlainString() + "M";
+                return units.compareTo(ONE) == 0 ? "M" : units.toPlainString() + "M";
             }
             if (value.compareTo(thousand) >= 0 && value.remainder(thousand).compareTo(ZERO) == 0) {
                 final BigDecimal units = value.divide(thousand).stripTrailingZeros();
-                return units.compareTo(BigDecimal.ONE) == 0 ? "K" : units.toPlainString() + "K";
+                return units.compareTo(ONE) == 0 ? "K" : units.toPlainString() + "K";
             }
 
             return multiplierRaw;
@@ -3352,7 +3497,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal baseMinNotional = exchangeMinNotional.max(minNotionalFloor);
         final BigDecimal safetyPct = safePct(minNotionalSafetyPct, new BigDecimal("0.20"));
         final BigDecimal effectiveMinNotional = baseMinNotional
-                .multiply(BigDecimal.ONE.add(safetyPct))
+                .multiply(ONE.add(safetyPct))
                 .setScale(DEFAULT_CALC_SCALE, RoundingMode.CEILING)
                 .stripTrailingZeros();
 
@@ -3394,7 +3539,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         if (notionalFinal.compareTo(notionalMax) > 0) {
             final BigDecimal buf = safePct(notionalBufferPct, new BigDecimal("0.30"));
-            final BigDecimal targetNotional = notionalMax.multiply(BigDecimal.ONE.subtract(buf));
+            final BigDecimal targetNotional = notionalMax.multiply(ONE.subtract(buf));
 
             BigDecimal q = targetNotional.divide(entryPrice, DEFAULT_CALC_SCALE, RoundingMode.DOWN);
 
@@ -3688,6 +3833,28 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                              OffsetDateTime sourceCreatedAt,
                              OffsetDateTime sourceUpdatedAt,
                              OffsetDateTime sourceTs) {
+    }
+
+    private record SymbolContractResolution(String rawSymbol,
+                                            String canonicalSymbol,
+                                            String rawBase,
+                                            String canonicalBase,
+                                            BigDecimal rawMultiplier,
+                                            BigDecimal canonicalMultiplier,
+                                            BigDecimal priceMultiplier,
+                                            BinanceFuturesSymbolInfoClientDto symbolInfo) {
+        BigDecimal executionPrice(BigDecimal originUnitPrice) {
+            if (originUnitPrice == null || originUnitPrice.compareTo(ZERO) <= 0) {
+                return ZERO;
+            }
+            BigDecimal multiplier = priceMultiplier == null || priceMultiplier.compareTo(ZERO) <= 0 ? ONE : priceMultiplier;
+            return originUnitPrice.multiply(multiplier).setScale(DEFAULT_CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+        }
+
+        boolean usesDifferentContractUnit() {
+            BigDecimal multiplier = priceMultiplier == null ? ONE : priceMultiplier;
+            return multiplier.compareTo(ONE) != 0;
+        }
     }
 
     private static final class SymbolRules {

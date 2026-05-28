@@ -33,7 +33,7 @@ import java.util.stream.Collectors;
 @Service
 public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolCatalog {
 
-    private static final List<String> KNOWN_QUOTES = List.of("USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH");
+    private static final List<String> KNOWN_QUOTES = List.of("USDT", "USDC", "FDUSD", "BUSD", "USD", "BTC", "ETH");
     private static final Pattern LEADING_MULTIPLIER_PATTERN = Pattern.compile("^(\\d+)([A-Z0-9]+)$");
 
     private final ProcesBinanceService procesBinanceService;
@@ -208,11 +208,27 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
         if (symbolInfo == null) {
             return false;
         }
-        if (!requireTradingStatus) {
-            return true;
+        if (requireTradingStatus) {
+            String status = symbolInfo.getStatus();
+            if (status == null || !"TRADING".equalsIgnoreCase(status.trim())) {
+                return false;
+            }
         }
-        String status = symbolInfo.getStatus();
-        return status != null && "TRADING".equalsIgnoreCase(status.trim());
+        String contractType = symbolInfo.getContractType();
+        if (contractType == null || !"PERPETUAL".equalsIgnoreCase(contractType.trim())) {
+            return false;
+        }
+        if (symbolInfo.getOrderTypes() == null
+                || symbolInfo.getOrderTypes().stream().noneMatch(orderType -> "MARKET".equalsIgnoreCase(String.valueOf(orderType)))) {
+            return false;
+        }
+        String symbol = normalize(symbolInfo.getSymbol());
+        String quote = normalize(symbolInfo.getQuoteAsset());
+        String margin = normalize(symbolInfo.getMarginAsset());
+        if (symbol == null || quote == null || margin == null || !symbol.endsWith(quote)) {
+            return false;
+        }
+        return quote.equals(margin);
     }
 
     private void registerAlias(Map<String, String> aliasToCanonical, Set<String> ambiguousAliases, String alias, String canonical) {
@@ -265,11 +281,26 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
             candidates.add(base + "USDT");
             candidates.add(base + "USDC");
         }
-        candidates.add("1000" + normalized);
-        if (normalized.startsWith("1000") && normalized.length() > 4) {
-            candidates.add(normalized.substring(4));
-        }
+        addMultiplierCandidates(candidates, normalized);
         return new ArrayList<>(candidates);
+    }
+
+
+    private void addMultiplierCandidates(LinkedHashSet<String> candidates, String normalized) {
+        String quote = extractQuote(normalized);
+        if (quote == null) {
+            for (String multiplier : List.of("1000", "1000000", "1000000000")) {
+                candidates.add(multiplier + normalized);
+            }
+            return;
+        }
+        String base = normalized.substring(0, normalized.length() - quote.length());
+        for (String multiplier : List.of("1000", "1000000", "1000000000")) {
+            candidates.add(multiplier + base + quote);
+            if (base.startsWith(multiplier) && base.length() > multiplier.length()) {
+                candidates.add(base.substring(multiplier.length()) + quote);
+            }
+        }
     }
 
     private String extractQuote(String symbol) {

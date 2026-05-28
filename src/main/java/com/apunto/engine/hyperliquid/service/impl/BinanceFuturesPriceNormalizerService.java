@@ -16,20 +16,27 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
 public class BinanceFuturesPriceNormalizerService {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
+    private static final BigDecimal ONE = BigDecimal.ONE;
+    private static final int CALC_SCALE = 18;
+    private static final Pattern LEADING_MULTIPLIER_PATTERN = Pattern.compile("^(\\d+)([A-Z0-9]+)$");
+    private static final List<String> KNOWN_QUOTES = List.of("USDT", "USDC", "FDUSD", "BUSD", "USD", "BTC", "ETH");
+    private static final List<String> CONTRACT_MULTIPLIERS = List.of("1000000000", "1000000", "1000");
 
     private final boolean enabled;
     private final long cacheTtlMs;
@@ -75,48 +82,59 @@ public class BinanceFuturesPriceNormalizerService {
                 enabled, safeLog(baseUrl), Math.max(50, timeoutMs), this.cacheTtlMs, Math.max(128L, cacheSize), Math.max(1000L, missCacheTtlMs), Math.max(128L, missCacheSize));
     }
 
+    /**
+     * Returns a unit-normalized price for the Hyperliquid/origin asset.
+     *
+     * Example:
+     * - origin symbol: PEPEUSD, Binance symbol: 1000PEPEUSDT
+     * - Binance ticker price is the price of 1000 PEPE.
+     * - This method returns price = tickerPrice / 1000, so origin_store metrics stay on PEPE unit price.
+     */
     public Optional<BinancePriceReference> resolve(String symbol) {
         if (!enabled) {
             return Optional.empty();
         }
         Optional<BinanceFuturesSymbolCatalog.SymbolResolution> symbolResolution = symbolCatalog.resolve(symbol);
         if (symbolResolution.isEmpty()) {
-            log.debug("event=hyperliquid.origin_store.binance_price.skipped symbol={} reasonCode=binance_symbol_unsupported cacheSize={}",
+            log.debug("event=hyperliquid.origin_store.binance_price.skipped symbol={} reasonCode=binance_symbol_unsupported cacheSize={} humanMessage=no_encontre_un_contrato_binance_equivalente_pero_guardare_la_posicion_original_igual",
                     safeLog(symbol), symbolCatalog.cachedSymbols());
             return Optional.empty();
         }
-        String normalized = symbolResolution.get().canonicalSymbol();
 
-        BinancePriceReference cached = cache.getIfPresent(normalized);
+        String canonical = symbolResolution.get().canonicalSymbol();
+        BigDecimal contractMultiplier = contractMultiplier(symbol, canonical);
+        String cacheKey = normalize(symbol) + "::" + canonical + "::" + contractMultiplier.stripTrailingZeros().toPlainString();
+
+        BinancePriceReference cached = cache.getIfPresent(cacheKey);
         if (cached != null) {
             return Optional.of(cached.withSource("binance_cache"));
         }
-        if (Boolean.TRUE.equals(missCache.getIfPresent(normalized))) {
+        if (Boolean.TRUE.equals(missCache.getIfPresent(cacheKey))) {
             return Optional.empty();
         }
 
-        for (String candidate : candidates(normalized)) {
-            if (Boolean.TRUE.equals(missCache.getIfPresent(candidate))) {
-                continue;
-            }
-            Optional<BinancePriceReference> fetched = fetch(candidate);
-            if (fetched.isPresent()) {
-                BinancePriceReference price = fetched.get();
-                cache.put(normalized, price);
-                cache.put(candidate, price);
-                return Optional.of(price);
-            }
+        if (Boolean.TRUE.equals(missCache.getIfPresent(canonical))) {
+            missCache.put(cacheKey, Boolean.TRUE);
+            return Optional.empty();
         }
-        missCache.put(normalized, Boolean.TRUE);
+
+        Optional<BinancePriceReference> fetched = fetch(canonical, symbol, contractMultiplier);
+        if (fetched.isPresent()) {
+            BinancePriceReference price = fetched.get();
+            cache.put(cacheKey, price);
+            return Optional.of(price);
+        }
+        missCache.put(canonical, Boolean.TRUE);
+        missCache.put(cacheKey, Boolean.TRUE);
         return Optional.empty();
     }
 
-    private Optional<BinancePriceReference> fetch(String symbol) {
+    private Optional<BinancePriceReference> fetch(String canonicalSymbol, String rawSymbol, BigDecimal contractMultiplier) {
         long startedNs = System.nanoTime();
         try {
             String body = restClient.get()
                     .uri(uriBuilder -> uriBuilder.path("/fapi/v1/ticker/price")
-                            .queryParam("symbol", symbol)
+                            .queryParam("symbol", canonicalSymbol)
                             .build())
                     .retrieve()
                     .body(String.class);
@@ -125,28 +143,42 @@ public class BinanceFuturesPriceNormalizerService {
             }
             JsonNode node = objectMapper.readTree(body);
             String rawPrice = node.path("price").asText(null);
-            BigDecimal price = rawPrice == null ? ZERO : new BigDecimal(rawPrice);
-            if (price.compareTo(ZERO) <= 0) {
+            BigDecimal contractPrice = rawPrice == null ? ZERO : new BigDecimal(rawPrice);
+            if (contractPrice.compareTo(ZERO) <= 0) {
                 return Optional.empty();
             }
+            BigDecimal safeMultiplier = contractMultiplier == null || contractMultiplier.compareTo(ZERO) <= 0 ? ONE : contractMultiplier;
+            BigDecimal unitPrice = contractPrice.divide(safeMultiplier, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
             OffsetDateTime ts = OffsetDateTime.now(ZoneOffset.UTC);
             long elapsedMs = elapsedMs(startedNs);
-            log.debug("event=hyperliquid.origin_store.binance_price.ok symbol={} price={} elapsedMs={}", symbol, price, elapsedMs);
-            return Optional.of(new BinancePriceReference(symbol, price, "binance_futures_ticker", ts, elapsedMs, 0L));
+            log.debug("event=hyperliquid.origin_store.binance_price.ok rawSymbol={} canonicalSymbol={} contractMultiplier={} contractPrice={} unitPrice={} elapsedMs={}",
+                    safeLog(rawSymbol), safeLog(canonicalSymbol), safeMultiplier.toPlainString(), contractPrice.toPlainString(), unitPrice.toPlainString(), elapsedMs);
+            return Optional.of(new BinancePriceReference(
+                    canonicalSymbol,
+                    unitPrice,
+                    "binance_futures_ticker",
+                    ts,
+                    elapsedMs,
+                    0L,
+                    contractPrice,
+                    safeMultiplier,
+                    rawSymbol,
+                    canonicalSymbol
+            ));
         } catch (RestClientResponseException ex) {
             if (isInvalidSymbol(ex)) {
-                missCache.put(symbol, Boolean.TRUE);
+                missCache.put(canonicalSymbol, Boolean.TRUE);
                 log.debug("event=hyperliquid.origin_store.binance_price.invalid_symbol symbol={} httpStatus={} elapsedMs={}",
-                        safeLog(symbol), ex.getStatusCode().value(), elapsedMs(startedNs));
+                        safeLog(canonicalSymbol), ex.getStatusCode().value(), elapsedMs(startedNs));
                 return Optional.empty();
             }
             log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=origin_metrics_only errClass={} httpStatus={} errMsg=\"{}\" elapsedMs={} {}",
-                    safeLog(symbol), ex.getClass().getSimpleName(), ex.getStatusCode().value(), safeLog(ex.getMessage()), elapsedMs(startedNs),
+                    safeLog(canonicalSymbol), ex.getClass().getSimpleName(), ex.getStatusCode().value(), safeLog(ex.getMessage()), elapsedMs(startedNs),
                     CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
             return Optional.empty();
         } catch (RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException | JsonProcessingException ex) {
             log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=origin_metrics_only errClass={} errMsg=\"{}\" elapsedMs={} {}",
-                    safeLog(symbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs),
+                    safeLog(canonicalSymbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs),
                     CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
             return Optional.empty();
         }
@@ -164,39 +196,73 @@ public class BinanceFuturesPriceNormalizerService {
         return body != null && body.contains("-1121");
     }
 
-    private List<String> candidates(String symbol) {
-        List<String> symbols = new ArrayList<>();
-        addIfMissing(symbols, symbol);
-        addIfMissing(symbols, "1000" + symbol);
-        if (symbol.startsWith("1000") && symbol.length() > 4) {
-            addIfMissing(symbols, symbol.substring(4));
+    private BigDecimal contractMultiplier(String rawSymbol, String canonicalSymbol) {
+        String rawBase = baseWithoutQuote(rawSymbol);
+        String canonicalBase = baseWithoutQuote(canonicalSymbol);
+        if (rawBase == null || canonicalBase == null) {
+            return ONE;
         }
-        return symbols;
+        String rawAsset = stripKnownContractMultiplier(rawBase);
+        String canonicalAsset = stripKnownContractMultiplier(canonicalBase);
+        if (rawAsset == null || canonicalAsset == null || !rawAsset.equals(canonicalAsset)) {
+            return ONE;
+        }
+        BigDecimal rawMultiplier = leadingKnownContractMultiplier(rawBase);
+        BigDecimal canonicalMultiplier = leadingKnownContractMultiplier(canonicalBase);
+        if (rawMultiplier.compareTo(ZERO) <= 0 || canonicalMultiplier.compareTo(ZERO) <= 0) {
+            return ONE;
+        }
+        return canonicalMultiplier.divide(rawMultiplier, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
     }
 
-    private void addIfMissing(List<String> values, String value) {
-        if (value != null && !value.isBlank() && !values.contains(value)) {
-            values.add(value);
-        }
-    }
-
-    private String toBinanceSymbol(String symbol) {
-        if (symbol == null) {
+    private String baseWithoutQuote(String symbol) {
+        String normalized = normalize(symbol);
+        if (normalized == null) {
             return null;
         }
-        String value = symbol.trim()
+        for (String quote : KNOWN_QUOTES) {
+            if (normalized.endsWith(quote) && normalized.length() > quote.length()) {
+                return normalized.substring(0, normalized.length() - quote.length());
+            }
+        }
+        return normalized;
+    }
+
+    private String stripKnownContractMultiplier(String base) {
+        if (base == null || base.isBlank()) {
+            return null;
+        }
+        for (String multiplier : CONTRACT_MULTIPLIERS) {
+            if (base.startsWith(multiplier) && base.length() > multiplier.length()) {
+                return base.substring(multiplier.length());
+            }
+        }
+        return base;
+    }
+
+    private BigDecimal leadingKnownContractMultiplier(String base) {
+        if (base == null || base.isBlank()) {
+            return ONE;
+        }
+        Matcher matcher = LEADING_MULTIPLIER_PATTERN.matcher(base);
+        if (!matcher.matches()) {
+            return ONE;
+        }
+        String multiplier = matcher.group(1);
+        return CONTRACT_MULTIPLIERS.contains(multiplier) ? new BigDecimal(multiplier) : ONE;
+    }
+
+    private String normalize(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String value = raw.trim()
                 .toUpperCase(Locale.ROOT)
                 .replace("/", "")
                 .replace("-", "")
                 .replace("_", "")
                 .replace(" ", "");
-        if (value.endsWith("USD")
-                && !value.endsWith("USDT")
-                && !value.endsWith("USDC")
-                && !value.endsWith("BUSD")) {
-            return value.substring(0, value.length() - 3) + "USDT";
-        }
-        return value;
+        return value.isBlank() ? null : value;
     }
 
     private long elapsedMs(long startedNs) {
@@ -217,10 +283,14 @@ public class BinanceFuturesPriceNormalizerService {
             String source,
             OffsetDateTime referenceTs,
             long fetchElapsedMs,
-            long referenceDiffMs
+            long referenceDiffMs,
+            BigDecimal contractPrice,
+            BigDecimal contractMultiplier,
+            String rawSymbol,
+            String canonicalSymbol
     ) {
         BinancePriceReference withSource(String newSource) {
-            return new BinancePriceReference(symbol, price, newSource, referenceTs, fetchElapsedMs, referenceDiffMs);
+            return new BinancePriceReference(symbol, price, newSource, referenceTs, fetchElapsedMs, referenceDiffMs, contractPrice, contractMultiplier, rawSymbol, canonicalSymbol);
         }
     }
 }
