@@ -14,7 +14,6 @@ import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.metric.TradingMetrics;
 import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.BinanceCopyExecutionService;
-import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
 import com.apunto.engine.service.OperacionEventIngestService;
 import com.apunto.engine.shared.exception.CopyPersistenceConflictException;
 import com.apunto.engine.shared.exception.EngineException;
@@ -48,7 +47,6 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
     private final HyperliquidCopyLifecycleGuard lifecycleGuard;
     private final HyperliquidCopyCandidateResolver candidateResolver;
     private final OperacionEventIngestService fallbackIngestService;
-    private final BinanceFuturesSymbolCatalog symbolCatalog;
     private final ThreadPoolTaskExecutor copyJobExecutor;
     private final TradingMetrics tradingMetrics;
 
@@ -61,7 +59,6 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
             HyperliquidCopyLifecycleGuard lifecycleGuard,
             HyperliquidCopyCandidateResolver candidateResolver,
             OperacionEventIngestService fallbackIngestService,
-            BinanceFuturesSymbolCatalog symbolCatalog,
             @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor copyJobExecutor,
             TradingMetrics tradingMetrics
     ) {
@@ -70,7 +67,6 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         this.lifecycleGuard = lifecycleGuard;
         this.candidateResolver = candidateResolver;
         this.fallbackIngestService = fallbackIngestService;
-        this.symbolCatalog = symbolCatalog;
         this.copyJobExecutor = copyJobExecutor;
         this.tradingMetrics = tradingMetrics;
     }
@@ -89,18 +85,6 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         CopyJobAction action = mapAction(event.getTipo());
         String actionLabel = displayAction(action, deltaType);
 
-        if (symbolCatalog.resolve(symbol).isEmpty()) {
-            long elapsedMs = Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
-            String traceId = originTraceId(originId, wallet, symbol);
-            log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=binance_symbol_unsupported friendlyReason=simbolo_no_existe_en_binance explanation=no_se_copia_porque_binance_no_soporta_el_simbolo copyImpact=no_copy_order traceId={} originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode=binance_symbol_unsupported cacheActive=false activeCacheSize={} source=binance_symbol_catalog {}",
-                    traceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, activeCopyOperationCache.activeSize(),
-                    CopyLogAdvice.fields("binance_symbol_unsupported", CopyLogAdvice.context(0, 0, 0, 1, null, false, activeCopyOperationCache.activeSize(), "binance_symbol_catalog")));
-            log.info("event=hyperliquid.direct_copy.dispatched traceId={} originId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} usersCached=0 eligibleUsers=0 eligibleUserIds= submitted=0 businessSkipped=1 fallbackJobs=0 fallbackUsed=false source=binance_symbol_catalog copySkipReasonCode=binance_symbol_unsupported elapsedMs={} humanMessage=la_operacion_no_se_copia_porque_binance_no_tiene_ese_simbolo {}",
-                    traceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, elapsedMs,
-                    CopyLogAdvice.fields("binance_symbol_unsupported", CopyLogAdvice.context(0, 0, 0, 1, null, false, activeCopyOperationCache.activeSize(), "binance_symbol_catalog")));
-            tradingMetrics.directCopyDispatch(copyIntent(action, deltaType), 0, 0, 1, 0, false, "binance_symbol_unsupported", elapsedMs);
-            return HyperliquidDirectCopyDispatchResult.ok(0, 0, 1, 0, false, "binance_symbol_unsupported");
-        }
 
         HyperliquidCopyCandidateResolver.CandidateUsers candidates = candidateResolver.resolve(mappedDelta, action);
         List<UserDetailDto> eligibleUsers = candidates.eligibleUsers();

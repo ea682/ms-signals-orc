@@ -9,7 +9,6 @@ import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 import com.apunto.engine.hyperliquid.exception.HyperliquidOriginLifecycleException;
 import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.repository.FuturesPositionRepository;
-import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
 import com.apunto.engine.shared.enums.PositionStatus;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.util.CopyTraceIdUtil;
@@ -69,7 +68,6 @@ public class HyperliquidOriginPositionStoreService {
     private final FuturesPositionRepository repository;
     private final ObjectMapper objectMapper;
     private final BinanceFuturesPriceNormalizerService priceNormalizerService;
-    private final BinanceFuturesSymbolCatalog symbolCatalog;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
     private final boolean enabled;
@@ -98,7 +96,6 @@ public class HyperliquidOriginPositionStoreService {
             FuturesPositionRepository repository,
             ObjectMapper objectMapper,
             BinanceFuturesPriceNormalizerService priceNormalizerService,
-            BinanceFuturesSymbolCatalog symbolCatalog,
             PlatformTransactionManager transactionManager,
             MeterRegistry meterRegistry,
             @Value("${hyperliquid.direct-ingest.origin-store.enabled:true}") boolean enabled,
@@ -111,7 +108,6 @@ public class HyperliquidOriginPositionStoreService {
         this.repository = repository;
         this.objectMapper = objectMapper;
         this.priceNormalizerService = priceNormalizerService;
-        this.symbolCatalog = symbolCatalog;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
         this.enabled = enabled;
@@ -340,24 +336,6 @@ public class HyperliquidOriginPositionStoreService {
         long queueDelayMs = elapsedMs(task.acceptedNs());
         recordQueueDelay(queueDelayMs);
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", originTraceId(mapped))) {
-            if (isUnsupportedBinanceSymbol(mapped)) {
-                skipped.incrementAndGet();
-                meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "binance_symbol_unsupported").increment();
-                log.info("event=hyperliquid.origin_store.skipped category=origin_position reasonCode=binance_symbol_unsupported reasonAlias=binance_symbol_unsupported friendlyReason=simbolo_no_existe_en_binance explanation=no_se_guarda_estado_original_con_precio_binance_si_el_simbolo_no_existe copyImpact=no_copy_order originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} cacheSize={} queueDelayMs={} elapsedMs={} queueDepth={} {}",
-                        originId(mapped),
-                        safeLog(mapped.idempotencyKey()),
-                        safeLog(mapped.positionKey()),
-                        safeLog(mapped.wallet()),
-                        safeLog(mapped.symbol()),
-                        safeLog(mapped.side()),
-                        safeLog(mapped.deltaType()),
-                        symbolCatalog.cachedSymbols(),
-                        queueDelayMs,
-                        elapsedMs(startedNs),
-                        queue.size(),
-                        CopyLogAdvice.fields("binance_symbol_unsupported", CopyLogAdvice.context(task.dispatchResult() == null ? null : task.dispatchResult().eligibleUsers(), task.dispatchResult() == null ? null : task.dispatchResult().eligibleUsers(), task.dispatchResult() == null ? null : task.dispatchResult().submittedTasks(), task.dispatchResult() == null ? null : task.dispatchResult().businessSkipped(), queue.size(), null, activeOriginIds.size(), "origin_store")));
-                return;
-            }
             if (shouldSkipLateAdjustment(mapped)) {
                 skipped.incrementAndGet();
                 meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "late_adjustment_without_active_origin_after_queue").increment();
@@ -479,17 +457,6 @@ public class HyperliquidOriginPositionStoreService {
             symbol = firstNonBlank(symbol, mapped.event().getOperacion().getParSymbol(), "NA");
         }
         return CopyTraceIdUtil.copyTraceId(id == null ? "NA" : id.toString(), "origin", wallet, symbol);
-    }
-
-    private boolean isUnsupportedBinanceSymbol(HyperliquidMappedDelta mapped) {
-        if (mapped == null || mapped.event() == null || mapped.event().getOperacion() == null) {
-            return true;
-        }
-        String symbol = mapped.event().getOperacion().getParSymbol();
-        if (symbol == null || symbol.isBlank()) {
-            symbol = mapped.symbol();
-        }
-        return symbolCatalog.resolve(symbol).isEmpty();
     }
 
     private BinanceFuturesPriceNormalizerService.BinancePriceReference resolvePriceReference(HyperliquidMappedDelta mapped) {
@@ -814,7 +781,7 @@ public class HyperliquidOriginPositionStoreService {
         meta.put("__exit_price_feed", operation.getPrecioCierre());
         meta.put("__price_source", priceReference == null ? "binance_missing" : priceReference.source());
         meta.put("__price_correction_pending", priceReference == null);
-        meta.put("__main_price_columns", "binance_only");
+        meta.put("__main_price_columns", "origin_unit_price_normalized");
         if (priceReference != null) {
             meta.put("__price_corrected", priceReference.price());
             meta.put("__price_corrected_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
@@ -822,6 +789,10 @@ public class HyperliquidOriginPositionStoreService {
             meta.put("__price_binance_reference_ts", priceReference.referenceTs().toString());
             meta.put("__price_binance_reference_diff_ms", priceReference.referenceDiffMs());
             meta.put("__price_binance_fetch_elapsed_ms", priceReference.fetchElapsedMs());
+            meta.put("__price_binance_contract_price", priceReference.contractPrice());
+            meta.put("__price_binance_contract_multiplier", priceReference.contractMultiplier());
+            meta.put("__price_binance_raw_symbol", priceReference.rawSymbol());
+            meta.put("__price_binance_canonical_symbol", priceReference.canonicalSymbol());
         }
         if (dispatchResult != null) {
             meta.put("__direct_copy_eligible_users", dispatchResult.eligibleUsers());
