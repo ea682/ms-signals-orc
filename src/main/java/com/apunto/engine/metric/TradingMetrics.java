@@ -99,6 +99,67 @@ public class TradingMetrics {
                 .increment();
     }
 
+
+    public void directCopyDispatch(String intent, int eligibleUsers, int submitted, int businessSkipped, int fallbackJobs, boolean fallbackUsed, String reasonCode, long elapsedMs) {
+        registry.summary("signals.hyperliquid.direct_copy.eligible_users").record(Math.max(0, eligibleUsers));
+        registry.summary("signals.hyperliquid.direct_copy.submitted.batch", "intent", safeTag(intent)).record(Math.max(0, submitted));
+        registry.summary("signals.hyperliquid.direct_copy.business_skipped.batch", "intent", safeTag(intent)).record(Math.max(0, businessSkipped));
+        registry.timer("signals.hyperliquid.direct_copy.dispatch.duration",
+                        "intent", safeTag(intent),
+                        "reason", safeTag(reasonOrNone(reasonCode)),
+                        "fallback_used", String.valueOf(fallbackUsed))
+                .record(Duration.ofMillis(Math.max(0L, elapsedMs)));
+
+        if (submitted > 0) {
+            registry.counter("signals.hyperliquid.direct_copy.submitted.total",
+                            "intent", safeTag(intent))
+                    .increment(submitted);
+        }
+        if (businessSkipped > 0) {
+            registry.counter("signals.hyperliquid.direct_copy.business_skipped.total",
+                            "intent", safeTag(intent),
+                            "reason", safeTag(reasonOrNone(reasonCode)))
+                    .increment(businessSkipped);
+        }
+        if (fallbackJobs > 0) {
+            registry.counter("signals.hyperliquid.direct_copy.fallback_jobs.total",
+                            "intent", safeTag(intent),
+                            "reason", safeTag(reasonOrNone(reasonCode)))
+                    .increment(fallbackJobs);
+        }
+    }
+
+    public void directCopyExecution(String intent, String result, String reasonCode, long elapsedMs) {
+        registry.counter("signals.hyperliquid.direct_copy.execution.total",
+                        "intent", safeTag(intent),
+                        "result", safeTag(result),
+                        "reason", safeTag(reasonOrNone(reasonCode)))
+                .increment();
+        registry.timer("signals.hyperliquid.direct_copy.execution.duration",
+                        "intent", safeTag(intent),
+                        "result", safeTag(result),
+                        "reason", safeTag(reasonOrNone(reasonCode)))
+                .record(Duration.ofMillis(Math.max(0L, elapsedMs)));
+    }
+
+    public void directCopyRejected(String intent, String reasonCode) {
+        registry.counter("signals.hyperliquid.direct_copy.rejected.total",
+                        "intent", safeTag(intent),
+                        "reason", safeTag(reasonOrNone(reasonCode)))
+                .increment();
+    }
+
+    public void directCopyFallback(String result, String reasonCode) {
+        registry.counter("signals.hyperliquid.direct_copy.fallback.total",
+                        "result", safeTag(result),
+                        "reason", safeTag(reasonOrNone(reasonCode)))
+                .increment();
+    }
+
+    private String reasonOrNone(String reason) {
+        return reason == null || reason.isBlank() ? "none" : reason;
+    }
+
     private ThreadPoolExecutor threadPool(ThreadPoolTaskExecutor executor) {
         return executor.getThreadPoolExecutor();
     }
