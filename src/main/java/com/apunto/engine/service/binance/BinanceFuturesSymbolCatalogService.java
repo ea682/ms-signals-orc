@@ -33,7 +33,7 @@ import java.util.stream.Collectors;
 @Service
 public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolCatalog {
 
-    private static final List<String> KNOWN_QUOTES = List.of("USDT", "USDC", "FDUSD", "BUSD", "USD", "BTC", "ETH");
+    private static final List<String> KNOWN_QUOTES = List.of("USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH");
     private static final Pattern LEADING_MULTIPLIER_PATTERN = Pattern.compile("^(\\d+)([A-Z0-9]+)$");
 
     private final ProcesBinanceService procesBinanceService;
@@ -215,11 +215,11 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
             }
         }
         String contractType = symbolInfo.getContractType();
-        if (contractType == null || !"PERPETUAL".equalsIgnoreCase(contractType.trim())) {
+        if (contractType != null && !"PERPETUAL".equalsIgnoreCase(contractType.trim())) {
             return false;
         }
-        if (symbolInfo.getOrderTypes() == null
-                || symbolInfo.getOrderTypes().stream().noneMatch(orderType -> "MARKET".equalsIgnoreCase(String.valueOf(orderType)))) {
+        if (symbolInfo.getOrderTypes() != null
+                && symbolInfo.getOrderTypes().stream().noneMatch(orderType -> "MARKET".equalsIgnoreCase(String.valueOf(orderType)))) {
             return false;
         }
         String symbol = normalize(symbolInfo.getSymbol());

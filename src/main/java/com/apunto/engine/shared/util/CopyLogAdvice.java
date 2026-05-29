@@ -40,6 +40,7 @@ public final class CopyLogAdvice {
     ) {
         public String fields() {
             return "diagnosticCode=" + safeToken(diagnosticCode)
+                    + " diagnosticArea=" + safeToken(diagnosticArea(diagnosticCode))
                     + " diagnosticSeverity=" + safeToken(severity)
                     + " humanMessage=" + quote(humanMessage)
                     + " cause=" + quote(cause)
@@ -78,7 +79,8 @@ public final class CopyLogAdvice {
         boolean queueBacklog = number(ctx.queueDepth()) >= 100;
         return switch (code) {
             case "resize_without_open_copy", "update_without_open_copy", "adjustment_without_open_copy" -> adjustmentWithoutCopy(code, noActiveWallet, ctx);
-            case "flip_without_open_copy" -> flipWithoutCopy(code, noActiveWallet, ctx);
+            case "flip_without_open_copy" -> flipWithoutCopy(code, noActiveWallet);
+            case "flip_without_open_copy_same_base_asset" -> flipWithoutCopySameBaseAsset(code, noActiveWallet, ctx);
             case "close_without_open_copy" -> closeWithoutCopy(code, noActiveWallet, ctx);
             case "late_adjustment_without_active_origin" -> lateAdjustmentWithoutOrigin(code, noActiveWallet, false, queueBacklog);
             case "late_adjustment_without_active_origin_after_queue" -> lateAdjustmentWithoutOrigin(code, noActiveWallet, true, queueBacklog);
@@ -491,33 +493,51 @@ public final class CopyLogAdvice {
         return new Advice(
                 code,
                 noActiveWallet ? "INFO" : "REVIEW",
-                "La wallet original ajusto una posicion, pero no existe una copia activa para modificar.",
+                "Signals recibio un ajuste de la wallet original, pero no hay una posicion copiada activa en Binance para modificar.",
                 noActiveWallet
-                        ? "No hay usuario/wallet elegible para copiar este movimiento o la wallet no esta seleccionada."
+                        ? "No hay usuarios elegibles o la wallet no esta asignada para copiar; por eso nunca se abrio una copia de usuario."
                         : cacheActive
-                        ? "Hay cache activa, pero no para este originId; puede ser lifecycle desfasado."
-                        : "El OPEN inicial no se copio, el bot inicio con la posicion ya abierta o se perdio estado.",
-                "No se envia ajuste a Binance para evitar abrir/aumentar algo que no existe como copia.",
+                        ? "Existe cache de copias, pero no para este originId; puede haber desfase de lifecycle de copia."
+                        : "El OPEN inicial no se copio, el bot empezo con la posicion ya abierta o se perdio estado de copia.",
+                "Solo se evita enviar un ajuste a Binance; esto no significa que haya fallado guardar el movimiento original de Hyperliquid.",
                 noActiveWallet
-                        ? "Ignorar mientras activeCopyUsers/eligibleUsers sea 0; revisar solo si esta wallet debia copiarse."
+                        ? "Ignorar si esta wallet no debia copiarse; revisar asignaciones solo si esperabas copiar esa wallet."
                         : "Reconciliar copy_operation/cache, validar que el OPEN fue copiado y revisar idempotencia/clientOrderId.",
                 noActiveWallet,
                 !noActiveWallet
         );
     }
 
-    private static Advice flipWithoutCopy(String code, boolean noActiveWallet, Context ctx) {
+    private static Advice flipWithoutCopy(String code, boolean noActiveWallet) {
         return new Advice(
                 code,
                 noActiveWallet ? "INFO" : "REVIEW",
-                "La wallet original hizo FLIP, pero no existe una copia activa para cerrar y dar vuelta.",
+                "Signals recibio un FLIP de la wallet original, pero no hay una posicion copiada activa para cerrar antes de darla vuelta.",
                 noActiveWallet
-                        ? "La wallet no esta seleccionada o no hay usuario elegible, por eso nunca hubo copia abierta."
+                        ? "La wallet no esta asignada o no hay usuarios elegibles; por eso nunca hubo copia abierta para ese usuario."
                         : "El sistema no encontro la copia previa; pudo faltar OPEN, haber cache desfasada o cierre anterior inconsistente.",
-                "No se envia FLIP a Binance para evitar abrir direccion contraria sin cerrar una copia real.",
+                "No se envia FLIP a Binance para evitar abrir la direccion contraria sin cerrar primero una copia real.",
                 noActiveWallet
-                        ? "Ignorar si no estas copiando esa wallet."
+                        ? "Ignorar si no estas copiando esa wallet; revisar asignacion si esperabas copiarla."
                         : "Reconciliar posicion activa en Binance vs copy_operation antes de permitir FLIP automatico.",
+                noActiveWallet,
+                !noActiveWallet
+        );
+    }
+
+
+    private static Advice flipWithoutCopySameBaseAsset(String code, boolean noActiveWallet, Context ctx) {
+        return new Advice(
+                code,
+                noActiveWallet ? "INFO" : "REVIEW",
+                "Signals recibio un FLIP y busco una copia activa del mismo activo base, pero no encontro ninguna para dar vuelta.",
+                noActiveWallet
+                        ? "No hay usuarios elegibles o no existia una copia abierta del lado anterior para esa wallet/activo."
+                        : "Habia contexto de copia, pero no calzo por activo base/lado; puede requerir reconciliacion.",
+                "No se abre la direccion contraria en Binance para evitar riesgo duplicado o una posicion sin cierre previo.",
+                noActiveWallet
+                        ? "Ignorar si esa wallet no debia copiarse; revisar asignacion si esperabas copiarla."
+                        : "Revisar copy_operation activa por wallet/baseAsset y posicion real en Binance antes de permitir FLIP automatico.",
                 noActiveWallet,
                 !noActiveWallet
         );
@@ -528,13 +548,13 @@ public final class CopyLogAdvice {
         return new Advice(
                 code,
                 noActiveWallet && !hadSubmitted ? "INFO" : "REVIEW",
-                "Llego un cierre, pero no hay una copia activa que cerrar.",
+                "Signals recibio un cierre de la wallet original, pero no hay una posicion copiada activa de usuario que cerrar en Binance.",
                 noActiveWallet
-                        ? "La wallet no esta seleccionada o el usuario no era elegible, entonces no se abrio copia previamente."
+                        ? "La wallet no esta asignada o el usuario no era elegible, entonces no se abrio copia previamente."
                         : "El OPEN no se copio, la copia ya se cerro, o el estado runtime/DB no calza.",
                 "No se envia cierre a Binance porque podria cerrar una posicion equivocada o inexistente.",
                 noActiveWallet
-                        ? "Ignorar si activeCopyUsers=0; revisar solo si esperabas copiar esa wallet."
+                        ? "Ignorar si activeCopyUsers=0; revisar asignacion solo si esperabas copiar esa wallet."
                         : "Revisar copy_operation activa, cache y posicion real en Binance; ejecutar reconciliacion si habia copia real.",
                 noActiveWallet,
                 !noActiveWallet || hadSubmitted
@@ -543,21 +563,21 @@ public final class CopyLogAdvice {
 
     private static Advice lateAdjustmentWithoutOrigin(String code, boolean noActiveWallet, boolean afterQueue, boolean queueBacklog) {
         String human = afterQueue
-                ? "El ajuste entro a cola, pero al guardar seguia sin posicion original activa."
-                : "Llego un ajuste, pero el servicio no tiene una posicion original activa para esa wallet/simbolo/lado.";
+                ? "Origin Store puso el ajuste en cola, pero al guardar seguia sin encontrar la posicion original de Hyperliquid."
+                : "Origin Store recibio un ajuste, pero no tiene registrada la posicion original abierta de Hyperliquid para esa wallet/simbolo/lado.";
         String cause = noActiveWallet
-                ? "Normalmente ocurre porque la wallet no esta seleccionada o el servicio empezo a observar una posicion ya abierta."
+                ? "Normalmente pasa cuando el servicio empieza a mirar una wallet que ya tenia posiciones abiertas, o cuando esa wallet no estaba asignada para copiar al momento del OPEN."
                 : queueBacklog
-                ? "Puede ser cola origin_store atrasada, evento fuera de orden o OPEN inicial no registrado."
-                : "Puede ser OPEN inicial no visto, evento fuera de orden, cache fria o posicion ya cerrada.";
+                ? "Puede ser cola origin_store atrasada, evento fuera de orden o OPEN original no registrado."
+                : "Puede ser OPEN original no visto, evento fuera de orden, cache fria o posicion ya cerrada.";
         return new Advice(
                 code,
                 noActiveWallet ? "INFO" : (queueBacklog ? "REVIEW" : "INFO"),
                 human,
                 cause,
-                "No se crea/actualiza posicion original para no inventar una base falsa de PnL o lifecycle.",
+                "No se crea/actualiza la posicion original para no inventar una base falsa de PnL o lifecycle; esto es distinto a la copia de usuario en Binance.",
                 noActiveWallet
-                        ? "Ignorar si no copias esa wallet; al activar una wallet, hidratar posiciones abiertas antes de copiar."
+                        ? "Si esa wallet se acaba de agregar, hidratar/sincronizar sus posiciones abiertas antes de esperar ajustes limpios."
                         : "Revisar queueDelayMs/queueDepth, hidratacion de posiciones abiertas y orden de eventos del websocket.",
                 noActiveWallet,
                 !noActiveWallet && queueBacklog
@@ -568,17 +588,32 @@ public final class CopyLogAdvice {
         return new Advice(
                 code,
                 noActiveWallet ? "INFO" : "REVIEW",
-                "Llego un cierre, pero no existe posicion original activa registrada.",
+                "Origin Store recibio un cierre, pero no tiene una posicion original abierta registrada para cerrar.",
                 noActiveWallet
-                        ? "La wallet no esta seleccionada o el sistema empezo despues de la apertura original."
+                        ? "La wallet no estaba asignada o el sistema empezo despues de la apertura original."
                         : "El OPEN original no fue visto, la cache se perdio o la DB no tenia la posicion activa.",
-                "Se usa fallback de lifecycle para no romper el flujo, pero el historial puede quedar incompleto.",
+                "El historial original puede quedar incompleto; esto es distinto a cerrar una copia de usuario en Binance.",
                 noActiveWallet
-                        ? "Ignorar si no copias esa wallet."
+                        ? "Ignorar si no copias esa wallet; si acabas de activarla, hidratar posiciones abiertas."
                         : "Revisar futures_position, hidratacion al inicio y reconciliacion de posiciones abiertas.",
                 noActiveWallet,
                 !noActiveWallet
         );
+    }
+
+
+    private static String diagnosticArea(String diagnosticCode) {
+        String code = normalize(diagnosticCode);
+        if (code.contains("active_origin") || code.contains("origin") || code.startsWith("late_adjustment")) {
+            return "origin_store_original_position";
+        }
+        if (code.contains("open_copy") || code.contains("without_copy") || code.startsWith("copy_")) {
+            return "user_copy_binance_position";
+        }
+        if (code.contains("binance") || code.contains("symbol")) {
+            return "binance_execution_or_symbol";
+        }
+        return "general";
     }
 
     private static boolean noActiveWallet(Context ctx) {
