@@ -80,6 +80,9 @@ public class CopyExecutionJobWorker {
     @Value("${operation.job.worker.max-attempts:${copy.job.worker.max-attempts:10}}")
     private int maxAttempts;
 
+    @Value("${engine.copy.allow-legacy-unknown-delta-jobs:false}")
+    private boolean allowLegacyUnknownDeltaJobs;
+
     public CopyExecutionJobWorker(
             CopyExecutionJobService jobService,
             BinanceCopyExecutionService binanceCopyExecutionService,
@@ -136,11 +139,49 @@ public class CopyExecutionJobWorker {
 
 
     private void assertBusinessLifecycleAllowed(CopyExecutionJobEntity job, OperacionEvent event) {
-        if (event == null || event.getDeltaType() == null || event.getDeltaType().isBlank()) {
-            return;
+        if (event == null) {
+            throw new SkipExecutionException(
+                    "copy_job_payload_missing",
+                    "Job de copia sin payload; se bloquea para no enviar orden insegura",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "originId", job.getOriginId(),
+                            "userId", job.getUserId(),
+                            "action", job.getAction()
+                    )
+            );
         }
-        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
         OperacionDto op = event.getOperacion();
+        String rawDeltaType = event.getDeltaType();
+        if ((rawDeltaType == null || rawDeltaType.isBlank()) && !allowLegacyUnknownDeltaJobs) {
+            throw new SkipExecutionException(
+                    "delta_type_missing_for_copy_job",
+                    "Job Kafka/legacy sin deltaType; se bloquea para evitar duplicar o copiar historico fuera de orden",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "originId", job.getOriginId(),
+                            "userId", job.getUserId(),
+                            "wallet", op == null ? null : op.getIdCuenta(),
+                            "symbol", op == null ? null : op.getParSymbol(),
+                            "action", job.getAction(),
+                            "allowLegacyUnknownDeltaJobs", Boolean.toString(allowLegacyUnknownDeltaJobs)
+                    )
+            );
+        }
+        HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(rawDeltaType);
+        if (deltaType == HyperliquidDeltaType.UNKNOWN && !allowLegacyUnknownDeltaJobs) {
+            throw new SkipExecutionException(
+                    "delta_type_unknown_for_copy_job",
+                    "Job Kafka/legacy con deltaType desconocido; se bloquea para evitar duplicar o copiar historico fuera de orden",
+                    com.apunto.engine.shared.util.LogFmt.kv(
+                            "originId", job.getOriginId(),
+                            "userId", job.getUserId(),
+                            "wallet", op == null ? null : op.getIdCuenta(),
+                            "symbol", op == null ? null : op.getParSymbol(),
+                            "rawDeltaType", rawDeltaType,
+                            "action", job.getAction(),
+                            "allowLegacyUnknownDeltaJobs", Boolean.toString(allowLegacyUnknownDeltaJobs)
+                    )
+            );
+        }
         boolean active = deltaType == HyperliquidDeltaType.FLIP
                 ? hasActiveCopyForFlip(job, op)
                 : activeCopyOperationCache.isActive(job.getOriginId(), job.getUserId());
