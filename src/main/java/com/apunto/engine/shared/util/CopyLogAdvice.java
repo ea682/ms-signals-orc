@@ -85,6 +85,17 @@ public final class CopyLogAdvice {
             case "late_adjustment_without_active_origin" -> lateAdjustmentWithoutOrigin(code, noActiveWallet, false, queueBacklog);
             case "late_adjustment_without_active_origin_after_queue" -> lateAdjustmentWithoutOrigin(code, noActiveWallet, true, queueBacklog);
             case "close_without_active_origin" -> closeWithoutActiveOrigin(code, noActiveWallet);
+            case "copy_job_payload_missing", "delta_type_missing_for_copy_job", "delta_type_unknown_for_copy_job" -> new Advice(
+                    code,
+                    "REVIEW",
+                    "Se bloqueo un job de copia antiguo porque no trae el tipo exacto de movimiento.",
+                    "El flujo Kafka/legacy no trae deltaType confiable; con flujo directo activo podria duplicar una copia o copiar historico fuera de orden.",
+                    "No se envia orden a Binance. El sistema prefiere no operar antes que abrir una posicion insegura.",
+                    "Usar el flujo directo como fuente de copia. Rehabilitar legacy solo con engine.copy.allow-legacy-unknown-delta-jobs=true si sabes que no hay doble flujo.",
+                    false,
+                    true
+            );
+
             case "binance_symbol_unsupported" -> new Advice(
                     code,
                     "INFO",
@@ -607,7 +618,7 @@ public final class CopyLogAdvice {
         if (code.contains("active_origin") || code.contains("origin") || code.startsWith("late_adjustment")) {
             return "origin_store_original_position";
         }
-        if (code.contains("open_copy") || code.contains("without_copy") || code.startsWith("copy_")) {
+        if (code.contains("open_copy") || code.contains("without_copy") || code.startsWith("copy_") || code.startsWith("delta_type_")) {
             return "user_copy_binance_position";
         }
         if (code.contains("binance") || code.contains("symbol")) {
