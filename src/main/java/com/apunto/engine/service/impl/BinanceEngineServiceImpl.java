@@ -71,6 +71,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.math.BigDecimal;
 
 import static java.math.BigDecimal.ONE;
 
@@ -143,7 +144,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final int USER_LEVERAGE_MAX = 20;
 
     private static final List<String> KNOWN_QUOTES = List.of(
-            "USDT", "USDC", "FDUSD", "BUSD", "USD", "BTC", "ETH"
+            "USDT", "USDC", "FDUSD", "BUSD", "BTC", "ETH"
     );
 
     private static final Pattern LEADING_MULTIPLIER_PATTERN =
@@ -687,10 +688,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         });
     }
 
-    private void executeDirectCloseForUser(OperacionEvent event, UserDetailDto userDetail) {
-        executeDirectCloseForUser(event, userDetail, System.nanoTime());
-    }
-
     private void executeDirectCloseForUser(OperacionEvent event, UserDetailDto userDetail, long startedNs) {
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
@@ -1204,13 +1201,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 && copySide != null
                 && operation.getTipoOperacion() != null
                 && copySide != operation.getTipoOperacion();
-    }
-
-    private boolean equalsIgnoreCase(String a, String b) {
-        if (a == null || b == null) {
-            return false;
-        }
-        return a.equalsIgnoreCase(b);
     }
 
     private Map<String, TargetLeg> buildTargetBasket(UserDetailDto userDetail,
@@ -3204,11 +3194,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return false;
         }
         String contractType = symbolInfo.getContractType();
-        if (contractType == null || !"PERPETUAL".equalsIgnoreCase(contractType.trim())) {
+        if (contractType != null && !"PERPETUAL".equalsIgnoreCase(contractType.trim())) {
             return false;
         }
-        if (symbolInfo.getOrderTypes() == null
-                || symbolInfo.getOrderTypes().stream().noneMatch(orderType -> "MARKET".equalsIgnoreCase(String.valueOf(orderType)))) {
+        if (symbolInfo.getOrderTypes() != null
+                && symbolInfo.getOrderTypes().stream().noneMatch(orderType -> "MARKET".equalsIgnoreCase(String.valueOf(orderType)))) {
             return false;
         }
         String symbol = normalizeSymbolKey(symbolInfo.getSymbol());
@@ -3217,13 +3207,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return symbol != null && quote != null && margin != null && symbol.endsWith(quote) && quote.equals(margin);
     }
 
-    private String resolveCanonicalSymbol(String rawSymbol) {
-        return resolveSymbolContract(rawSymbol, FuturesCapitalAsset.defaultAsset()).canonicalSymbol();
-    }
-
-    private String resolveCanonicalSymbol(String rawSymbol, FuturesCapitalAsset preferredAsset) {
-        return resolveSymbolContract(rawSymbol, preferredAsset).canonicalSymbol();
-    }
 
     private SymbolContractResolution resolveSymbolContract(String rawSymbol, FuturesCapitalAsset preferredAsset) {
         if (rawSymbol == null || rawSymbol.isBlank()) {
@@ -3768,32 +3751,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 && r.getUpdateTime() != null;
     }
 
-    private BigDecimal safeNotional(BinanceFuturesOrderClientResponse response, BigDecimal fallbackPrice) {
-        if (response == null) {
-            return ZERO;
-        }
-
-        BigDecimal qty = response.getExecutedQty();
-        if (qty == null || qty.compareTo(ZERO) <= 0) {
-            qty = response.getCumQty();
-        }
-        if (qty == null || qty.compareTo(ZERO) <= 0) {
-            qty = response.getOrigQty();
-        }
-        if (qty == null || qty.compareTo(ZERO) <= 0) {
-            return ZERO;
-        }
-
-        BigDecimal px = response.getAvgPrice();
-        if (px == null || px.compareTo(ZERO) <= 0) {
-            px = fallbackPrice;
-        }
-        if (px == null || px.compareTo(ZERO) <= 0) {
-            return ZERO;
-        }
-
-        return qty.multiply(px);
-    }
 
     private boolean passesWalletFilters(MetricaWalletDto walletMetric) {
         if (walletMetric == null || walletMetric.getScoring() == null) {

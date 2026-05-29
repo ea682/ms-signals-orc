@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.dao.DataAccessException;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.kafka.support.KafkaHeaders;
@@ -18,6 +19,11 @@ import org.springframework.web.client.RestClientException;
 
 @Slf4j
 @Component
+@ConditionalOnProperty(
+        name = "engine.copy.legacy-kafka-listener.enabled",
+        havingValue = "true",
+        matchIfMissing = false
+)
 @RequiredArgsConstructor
 public class OperacionEventListener {
 

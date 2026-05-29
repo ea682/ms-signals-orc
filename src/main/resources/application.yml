@@ -79,7 +79,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus
+        include: ${ACTUATOR_EXPOSED_ENDPOINTS:health,info,prometheus,metrics}
 
   endpoint:
     health:
@@ -87,6 +87,8 @@ management:
         enabled: true
 
   metrics:
+    tags:
+      application: ${spring.application.name}
     distribution:
       percentiles-histogram:
         "signals.copy.ingest.duration": true

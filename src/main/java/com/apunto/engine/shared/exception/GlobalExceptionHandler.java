@@ -28,7 +28,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Slf4j
-@RestControllerAdvice
+@RestControllerAdvice(basePackages = "com.apunto.engine")
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(EngineException.class)
