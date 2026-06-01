@@ -7,8 +7,8 @@ server:
 
 rest-client:
   timeout:
-    connect-ms: 2000
-    read-ms: 50000
+    connect-ms: ${REST_CLIENT_CONNECT_TIMEOUT_MS:2000}
+    read-ms: ${REST_CLIENT_READ_TIMEOUT_MS:50000}
   metric-wallet:
     info-base: ${URL_METRIC:http://ms-metrica-cuenta:4102/}
   binance-service:
@@ -16,11 +16,14 @@ rest-client:
 
 logging:
   pattern:
-    console: "ts=%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%level app=${spring.application.name} env=${APP_ENV:local} thread=\"%thread\" logger=\"%logger{36}\" traceId=%X{traceId:-NA} %msg%n%wEx"
+    console: "ts=%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%level app=${spring.application.name} profile=${spring.profiles.active:-NA} env=${APP_ENV:local} thread=\"%thread\" logger=\"%logger{36}\" traceId=%X{traceId:-NA} %msg%n%wEx"
 
 spring:
   application:
     name: ${SPRING_APPLICATION_NAME:ms-signals-orc}
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
 
   output:
     ansi:
@@ -51,11 +54,6 @@ spring:
       properties:
         spring.json.add.type.headers: false
 
-  datasource:
-    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=${DB_SCHEMA:futuros_operaciones}}
-    username: ${DB_USER:postgres}
-    password: ${DB_PASSWORD:5450940}
-
   jpa:
     open-in-view: ${SPRING_JPA_OPEN_IN_VIEW:false}
     show-sql: false
@@ -67,7 +65,7 @@ spring:
       hibernate:
         default_schema: ${DB_SCHEMA:futuros_operaciones}
         jdbc.time_zone: UTC
-        format_sql: true
+        format_sql: ${HIBERNATE_FORMAT_SQL:false}
 
 springdoc:
   api-docs:
@@ -111,7 +109,7 @@ binance:
     pool-size: ${BINANCE_DISPATCH_POOL_SIZE:8}
   symbols:
     cache-ttl-ms: ${BINANCE_SYMBOLS_CACHE_TTL_MS:60000}
-    api-key: ${BINANCE_SYMBOLS_API_KEY:1llJ9n3dloLfy0MoYLnQbiPxfvWmxS4CyyqUo1otzEWO56BLUW3Ij9dbcepqHAWb}
+    api-key: ${BINANCE_SYMBOLS_API_KEY:}
     warmup-on-start: ${BINANCE_SYMBOLS_WARMUP_ON_START:true}
     require-trading-status: ${BINANCE_SYMBOLS_REQUIRE_TRADING_STATUS:true}
 
@@ -172,8 +170,7 @@ engine:
 
 metric-wallet:
   distribution:
-    refresh-job: 2m
-
+    refresh-job: ${METRIC_WALLET_DISTRIBUTION_REFRESH_JOB:2m}
 
 futures:
   capital-maintenance:
@@ -185,7 +182,7 @@ futures:
     conversion-ratio: ${FUTURES_CAPITAL_MAINTENANCE_CONVERSION_RATIO:0.10}
     bnb-price-base-url: ${FUTURES_CAPITAL_MAINTENANCE_BNB_PRICE_BASE_URL:https://fapi.binance.com}
     bnb-price-timeout-ms: ${FUTURES_CAPITAL_MAINTENANCE_BNB_PRICE_TIMEOUT_MS:1000}
-    bnb-price-cache-ttl-ms: ${FUTURES_CAPITAL_MAINTENANCE_BNB_PRICE_CACHE_TTL_MS:60000}
+    bnb-price-cache-ttl-ms: ${FUTURES_CAPITAL_MAINTENANCE_BNB_CACHE_TTL_MS:60000}
 
 hyperliquid:
   direct-ingest:
@@ -195,6 +192,9 @@ hyperliquid:
     reject-when-disabled: ${HYPERLIQUID_DIRECT_INGEST_REJECT_WHEN_DISABLED:true}
     dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_ENABLED:true}
     dedupe-ttl-seconds: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_TTL_SECONDS:30}
+    distributed-dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DISTRIBUTED_DEDUPE_ENABLED:false}
+    dedupe-lease-ttl-ms: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_LEASE_TTL_MS:60000}
+    fail-open-on-dedupe-error: ${HYPERLIQUID_DIRECT_INGEST_FAIL_OPEN_ON_DEDUPE_ERROR:false}
     log-interval-ms: ${HYPERLIQUID_DIRECT_INGEST_LOG_INTERVAL_MS:10000}
     fallback-db-on-direct-failure: ${HYPERLIQUID_DIRECT_INGEST_FALLBACK_DB_ON_DIRECT_FAILURE:true}
     origin-store:

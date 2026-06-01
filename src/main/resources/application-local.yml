@@ -1,0 +1,37 @@
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  output:
+    ansi:
+      enabled: ${SPRING_OUTPUT_ANSI_ENABLED:ALWAYS}
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=futuros_operaciones}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:5450940}
+
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:false}
+    schemas: ${DB_SCHEMA:futuros_operaciones}
+    default-schema: ${DB_SCHEMA:futuros_operaciones}
+
+  kafka:
+    listener:
+      auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:false}
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:true}
+  swagger-ui:
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:true}
+
+engine:
+  copy:
+    lock:
+      provider: ${ENGINE_COPY_LOCK_PROVIDER:local}
+
+hyperliquid:
+  direct-ingest:
+    distributed-dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DISTRIBUTED_DEDUPE_ENABLED:false}
