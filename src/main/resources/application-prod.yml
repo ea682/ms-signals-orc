@@ -1,0 +1,44 @@
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  output:
+    ansi:
+      enabled: ${SPRING_OUTPUT_ANSI_ENABLED:NEVER}
+
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    schemas: ${DB_SCHEMA:futuros_operaciones}
+    default-schema: ${DB_SCHEMA:futuros_operaciones}
+    # Existing production schemas already include the pre-20260531 structures.
+    # Keep this enabled for the first Flyway-managed deploy, then it is harmless
+    # once flyway_schema_history exists.
+    baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
+    baseline-version: ${SPRING_FLYWAY_BASELINE_VERSION:20260530}
+
+  kafka:
+    listener:
+      auto-startup: ${KAFKA_LISTENER_AUTO_STARTUP:true}
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:false}
+  swagger-ui:
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:false}
+
+engine:
+  copy:
+    lock:
+      provider: ${ENGINE_COPY_LOCK_PROVIDER:postgres}
+
+hyperliquid:
+  direct-ingest:
+    distributed-dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DISTRIBUTED_DEDUPE_ENABLED:true}
+    fail-open-on-dedupe-error: ${HYPERLIQUID_DIRECT_INGEST_FAIL_OPEN_ON_DEDUPE_ERROR:false}
