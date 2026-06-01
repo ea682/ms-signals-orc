@@ -46,6 +46,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
 
     private final HyperliquidDirectIngestProperties properties;
     private final HyperliquidDirectCopyDispatchService directCopyDispatchService;
+    private final HyperliquidDirectIngestIdempotencyGuard idempotencyGuard;
     private final HyperliquidOriginPositionStoreService originPositionStoreService;
     private final OperationMovementEventService operationMovementEventService;
     private final MeterRegistry meterRegistry;
@@ -63,12 +64,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     public HyperliquidDirectDeltaIngestServiceImpl(
             HyperliquidDirectIngestProperties properties,
             HyperliquidDirectCopyDispatchService directCopyDispatchService,
+            HyperliquidDirectIngestIdempotencyGuard idempotencyGuard,
             HyperliquidOriginPositionStoreService originPositionStoreService,
             OperationMovementEventService operationMovementEventService,
             MeterRegistry meterRegistry
     ) {
         this.properties = properties;
         this.directCopyDispatchService = directCopyDispatchService;
+        this.idempotencyGuard = idempotencyGuard;
         this.originPositionStoreService = originPositionStoreService;
         this.operationMovementEventService = operationMovementEventService;
         this.meterRegistry = meterRegistry;
@@ -101,8 +104,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             final BlockingQueue<QueuedDelta> lane = lanes[i];
             workers.execute(() -> workerLoop(lane));
         }
-        log.info("event=hyperliquid.direct_ingest.started queueCapacity={} workerThreads={} dedupeEnabled={} dedupeTtlSeconds={}",
-                properties.getQueueCapacity(), properties.getWorkerThreads(), properties.isDedupeEnabled(), properties.getDedupeTtlSeconds());
+        log.info("event=hyperliquid.direct_ingest.started queueCapacity={} workerThreads={} dedupeEnabled={} dedupeTtlSeconds={} distributedDedupeEnabled={} dedupeLeaseTtlMs={} failOpenOnDedupeError={} humanMessage=direct_ingest_listo_con_idempotencia_para_varias_instancias",
+                properties.getQueueCapacity(), properties.getWorkerThreads(), properties.isDedupeEnabled(), properties.getDedupeTtlSeconds(),
+                properties.isDistributedDedupeEnabled(), properties.getDedupeLeaseTtlMs(), properties.isFailOpenOnDedupeError());
     }
 
     @PreDestroy
@@ -144,12 +148,20 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             return response(mappedDelta, true);
         }
 
+        boolean distributedAcquired = idempotencyGuard.tryAcquire(mappedDelta, dedupeKey);
+        if (!distributedAcquired) {
+            duplicates.incrementAndGet();
+            meterRegistry.counter("signals.hyperliquid.direct_ingest.duplicates.total", "deltaType", safeTag(mappedDelta.deltaType()), "scope", "distributed").increment();
+            return response(mappedDelta, true);
+        }
+
         QueuedDelta queuedDelta = new QueuedDelta(mappedDelta, dedupeKey, System.nanoTime());
         BlockingQueue<QueuedDelta> lane = lanes[laneFor(mappedDelta, dedupeKey)];
         if (!lane.offer(queuedDelta)) {
             if (properties.isDedupeEnabled()) {
                 recentKeys.invalidate(dedupeKey);
             }
+            idempotencyGuard.markRejected(mappedDelta, "queue_full", null);
             meterRegistry.counter("signals.hyperliquid.direct_ingest.rejected.total", "reason", "queue_full").increment();
             throw rejected("queue_full", mappedDelta, queueDepth());
         }
@@ -237,6 +249,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady);
             operationMovementEventService.recordAsync(copyReady, dispatchResult, dispatchResult.reasonCode());
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
+            idempotencyGuard.markProcessed(copyReady, dispatchResult.reasonCode());
             processed.incrementAndGet();
             long elapsedMs = elapsedMs(startedNs);
             long queueDelayMs = elapsedMs(task.acceptedNs());
@@ -253,6 +266,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     queueDelayMs, elapsedMs, queueDepth(), copySkipDiagnostic);
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
+            idempotencyGuard.markFailed(copyReady, "direct_ingest_processing_failed", ex);
             MDC.put("traceId", originTraceId(copyReady));
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));

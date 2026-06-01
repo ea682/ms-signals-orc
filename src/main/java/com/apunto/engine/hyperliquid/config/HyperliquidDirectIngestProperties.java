@@ -9,8 +9,15 @@ public class HyperliquidDirectIngestProperties {
     private int queueCapacity = 20000;
     private int workerThreads = 4;
     private boolean rejectWhenDisabled = true;
-    private boolean dedupeEnabled = false;
+    private boolean dedupeEnabled = true;
     private long dedupeTtlSeconds = 30;
+    /**
+     * DB-backed idempotency guard used when running more than one signals replica.
+     * This prevents duplicate copy orders before dispatch, not only after ledger persistence.
+     */
+    private boolean distributedDedupeEnabled = true;
+    private long dedupeLeaseTtlMs = 60000;
+    private boolean failOpenOnDedupeError = false;
     private long logIntervalMs = 10000;
 
     public boolean isEnabled() {
@@ -59,6 +66,30 @@ public class HyperliquidDirectIngestProperties {
 
     public void setDedupeTtlSeconds(long dedupeTtlSeconds) {
         this.dedupeTtlSeconds = dedupeTtlSeconds;
+    }
+
+    public boolean isDistributedDedupeEnabled() {
+        return distributedDedupeEnabled;
+    }
+
+    public void setDistributedDedupeEnabled(boolean distributedDedupeEnabled) {
+        this.distributedDedupeEnabled = distributedDedupeEnabled;
+    }
+
+    public long getDedupeLeaseTtlMs() {
+        return dedupeLeaseTtlMs;
+    }
+
+    public void setDedupeLeaseTtlMs(long dedupeLeaseTtlMs) {
+        this.dedupeLeaseTtlMs = dedupeLeaseTtlMs;
+    }
+
+    public boolean isFailOpenOnDedupeError() {
+        return failOpenOnDedupeError;
+    }
+
+    public void setFailOpenOnDedupeError(boolean failOpenOnDedupeError) {
+        this.failOpenOnDedupeError = failOpenOnDedupeError;
     }
 
     public long getLogIntervalMs() {
