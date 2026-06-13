@@ -9,17 +9,9 @@ public interface ActiveCopyOperationCache {
 
     boolean isActive(String originId, String userId);
 
-    boolean isActive(String originId, String userId, String strategyCode);
-
     boolean isKnown(String originId, String userId);
 
-    boolean isKnown(String originId, String userId, String strategyCode);
-
     CopyOperationDto activeOperation(String originId, String userId);
-
-    CopyOperationDto activeOperation(String originId, String userId, String strategyCode);
-
-    List<CopyOperationDto> activeOperations(String originId);
 
     List<CopyOperationDto> activeOperationsByUserAndWallet(String userId, String walletId);
 
@@ -33,11 +25,7 @@ public interface ActiveCopyOperationCache {
 
     String traceId(String originId, String userId, String walletId, String symbol);
 
-    String traceId(String originId, String userId, String walletId, String symbol, String strategyCode);
-
     void markPendingOpen(String originId, String userId, String walletId, String symbol, String typeOperation, String traceId);
-
-    void markPendingOpen(String originId, String userId, String walletId, String symbol, String typeOperation, String strategyCode, String traceId);
 
     void markOpen(CopyOperationDto operation);
 
@@ -45,11 +33,7 @@ public interface ActiveCopyOperationCache {
 
     void forgetPending(String originId, String userId, String traceId, String reasonCode);
 
-    void forgetPending(String originId, String userId, String strategyCode, String traceId, String reasonCode);
-
     void markClosed(String originId, String userId);
-
-    void markClosed(String originId, String userId, String strategyCode);
 
     int activeSize();
 }

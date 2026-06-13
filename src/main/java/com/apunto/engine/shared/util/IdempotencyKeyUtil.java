@@ -20,63 +20,33 @@ public final class IdempotencyKeyUtil {
     }
 
     public static String openClientOrderId(String originId, String userId, String walletId) {
-        return openClientOrderId(originId, userId, walletId, null);
-    }
-
-    public static String openClientOrderId(String originId, String userId, String walletId, String strategyCode) {
-        return "cpO_" + hash32Hex(originId, userId, walletId, normalizeStrategy(strategyCode));
+        return "cpO_" + hash32Hex(originId, userId, walletId);
     }
 
     public static String closeClientOrderId(String originId, String userId, String walletId) {
-        return closeClientOrderId(originId, userId, walletId, null);
-    }
-
-    public static String closeClientOrderId(String originId, String userId, String walletId, String strategyCode) {
-        return "cpC_" + hash32Hex(originId, userId, walletId, normalizeStrategy(strategyCode));
+        return "cpC_" + hash32Hex(originId, userId, walletId);
     }
 
     public static String rebalanceIncreaseClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty) {
-        return rebalanceIncreaseClientOrderId(triggerOriginId, targetOriginId, userId, walletId, targetQty, null);
-    }
-
-    public static String rebalanceIncreaseClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty, String strategyCode) {
-        return "cpI_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "inc", normalizeStrategy(strategyCode));
+        return "cpI_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "inc");
     }
 
     public static String rebalanceReduceClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty) {
-        return rebalanceReduceClientOrderId(triggerOriginId, targetOriginId, userId, walletId, targetQty, null);
-    }
-
-    public static String rebalanceReduceClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty, String strategyCode) {
-        return "cpR_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "red", normalizeStrategy(strategyCode));
+        return "cpR_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "red");
     }
 
     public static String rebalanceReopenClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty) {
-        return rebalanceReopenClientOrderId(triggerOriginId, targetOriginId, userId, walletId, targetQty, null);
+        return "cpN_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "reopen");
     }
 
-    public static String rebalanceReopenClientOrderId(String triggerOriginId, String targetOriginId, String userId, String walletId, String targetQty, String strategyCode) {
-        return "cpN_" + hash32Hex(triggerOriginId, targetOriginId, userId, walletId, targetQty, "reopen", normalizeStrategy(strategyCode));
+    private static String hash32Hex(String originId, String userId, String walletId) {
+        String input = String.valueOf(originId) + "|" + String.valueOf(userId) + "|" + String.valueOf(walletId);
+        return hash32HexRaw(input);
     }
 
-    private static String hash32Hex(String... parts) {
-        StringBuilder input = new StringBuilder();
-        if (parts != null) {
-            for (String part : parts) {
-                if (!input.isEmpty()) {
-                    input.append('|');
-                }
-                input.append(String.valueOf(part));
-            }
-        }
-        return hash32HexRaw(input.toString());
-    }
-
-    private static String normalizeStrategy(String strategyCode) {
-        if (strategyCode == null || strategyCode.isBlank()) {
-            return "MOVEMENT_ALL";
-        }
-        return strategyCode.trim().replace('-', '_').toUpperCase(java.util.Locale.ROOT);
+    private static String hash32Hex(String a, String b, String c, String d, String e, String f) {
+        String input = String.valueOf(a) + "|" + String.valueOf(b) + "|" + String.valueOf(c) + "|" + String.valueOf(d) + "|" + String.valueOf(e) + "|" + String.valueOf(f);
+        return hash32HexRaw(input);
     }
 
     private static String hash32HexRaw(String input) {

@@ -4,7 +4,6 @@ import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
-import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 import com.apunto.engine.hyperliquid.model.HyperliquidCopyLifecycleDecision;
@@ -88,7 +87,6 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
 
         HyperliquidCopyCandidateResolver.CandidateUsers candidates = candidateResolver.resolve(mappedDelta, action);
-        List<HyperliquidCopyCandidateResolver.CandidateCopyTarget> eligibleTargets = candidates.copyTargets() == null ? List.of() : candidates.copyTargets();
         List<UserDetailDto> eligibleUsers = candidates.eligibleUsers();
         AtomicBoolean fallbackSubmitted = new AtomicBoolean(false);
         AtomicInteger submitted = new AtomicInteger(0);
@@ -96,7 +94,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         AtomicInteger businessSkipped = new AtomicInteger(0);
         AtomicReference<String> firstReasonCode = new AtomicReference<>();
 
-        if (eligibleTargets.isEmpty() && action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
+        if (eligibleUsers.isEmpty() && action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
             businessSkipped.incrementAndGet();
             firstReasonCode.compareAndSet(null, adjustmentReason(deltaType));
             String traceId = originTraceId(originId, wallet, symbol);
@@ -106,7 +104,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                     CopyLogAdvice.fields(reasonCode, CopyLogAdvice.context(eligibleUsers.size(), eligibleUsers.size(), submitted.get(), businessSkipped.get(), null, false, activeCopyOperationCache.activeSize(), candidates.source())));
         }
 
-        if (eligibleTargets.isEmpty() && action == CopyJobAction.CLOSE) {
+        if (eligibleUsers.isEmpty() && action == CopyJobAction.CLOSE) {
             businessSkipped.incrementAndGet();
             firstReasonCode.compareAndSet(null, "close_without_open_copy");
             String traceId = originTraceId(originId, wallet, symbol);
@@ -115,11 +113,8 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                     CopyLogAdvice.fields("close_without_open_copy", CopyLogAdvice.context(eligibleUsers.size(), eligibleUsers.size(), submitted.get(), businessSkipped.get(), null, false, activeCopyOperationCache.activeSize(), candidates.source())));
         }
 
-        for (HyperliquidCopyCandidateResolver.CandidateCopyTarget target : eligibleTargets) {
-            UserDetailDto user = target.user();
-            UserCopyAllocationEntity allocation = target.allocation();
-            String targetStrategy = firstNonBlank(target.strategyCode(), allocation == null ? null : allocation.getCopyStrategyCode());
-            String userTraceId = activeCopyOperationCache.traceId(originId, userId(user), wallet, symbol, targetStrategy);
+        for (UserDetailDto user : eligibleUsers) {
+            String userTraceId = activeCopyOperationCache.traceId(originId, userId(user), wallet, symbol);
             HyperliquidCopyLifecycleDecision decision = businessDecision(
                     originId,
                     wallet,
@@ -127,8 +122,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                     operacion.getTipoOperacion() == null ? null : operacion.getTipoOperacion().name(),
                     action,
                     deltaType,
-                    user,
-                    targetStrategy
+                    user
             );
             if (!decision.allowed()) {
                 businessSkipped.incrementAndGet();
@@ -139,7 +133,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                 continue;
             }
             try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", userTraceId)) {
-                copyJobExecutor.execute(() -> executeCopy(event, user, allocation, targetStrategy, action, fallbackSubmitted, fallbackJobs));
+                copyJobExecutor.execute(() -> executeCopy(event, user, action, fallbackSubmitted, fallbackJobs));
                 submitted.incrementAndGet();
             } catch (RejectedExecutionException rejected) {
                 tradingMetrics.directCopyRejected(copyIntent(action, deltaType), "executor_rejected");
@@ -158,7 +152,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                 dispatchReasonCode,
                 CopyLogAdvice.context(eligibleUsers.size(), eligibleUsers.size(), submitted.get(), businessSkipped.get(), null, null, activeCopyOperationCache.activeSize(), candidates.source())
         );
-        log.info("event=hyperliquid.direct_copy.dispatched traceId={} originId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} usersCached={} eligibleUsers={} eligibleTargets={} eligibleUserIds={} targetStrategies={} submitted={} businessSkipped={} fallbackJobs={} fallbackUsed={} source={} copySkipReasonCode={} elapsedMs={} humanMessage=termine_de_decidir_a_quienes_se_debe_copiar_esta_operacion {}",
+        log.info("event=hyperliquid.direct_copy.dispatched traceId={} originId={} wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} usersCached={} eligibleUsers={} eligibleUserIds={} submitted={} businessSkipped={} fallbackJobs={} fallbackUsed={} source={} copySkipReasonCode={} elapsedMs={} humanMessage=termine_de_decidir_a_quienes_se_debe_copiar_esta_operacion {}",
                 originTraceId(originId, wallet, symbol),
                 originId,
                 safeLog(wallet),
@@ -169,9 +163,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                 deltaType,
                 candidates.usersCached().size(),
                 eligibleUsers.size(),
-                eligibleTargets.size(),
                 userIdsCsv(eligibleUsers),
-                strategyCsv(eligibleTargets),
                 submitted.get(),
                 businessSkipped.get(),
                 fallbackJobs.get(),
@@ -183,7 +175,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         tradingMetrics.directCopyDispatch(copyIntent(action, deltaType), eligibleUsers.size(), submitted.get(), businessSkipped.get(), fallbackJobs.get(), fallbackSubmitted.get(), dispatchReasonCode, elapsedMs);
 
         return HyperliquidDirectCopyDispatchResult.ok(
-                eligibleTargets.size(),
+                eligibleUsers.size(),
                 submitted.get(),
                 businessSkipped.get(),
                 fallbackJobs.get(),
@@ -203,8 +195,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
             String newSide,
             CopyJobAction action,
             HyperliquidDeltaType deltaType,
-            UserDetailDto user,
-            String strategyCode
+            UserDetailDto user
     ) {
         String uid = userId(user);
         if (uid == null || uid.isBlank() || "unknown".equals(uid)) {
@@ -212,7 +203,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         }
         boolean active = deltaType == HyperliquidDeltaType.FLIP
                 ? hasActiveCopyForFlip(uid, wallet, symbol, newSide)
-                : activeCopyOperationCache.isActive(originId, uid, strategyCode);
+                : activeCopyOperationCache.isActive(originId, uid);
         return lifecycleGuard.decide(action, deltaType, active);
     }
 
@@ -234,8 +225,6 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
     private void executeCopy(
             OperacionEvent event,
             UserDetailDto user,
-            UserCopyAllocationEntity allocation,
-            String targetStrategy,
             CopyJobAction action,
             AtomicBoolean fallbackSubmitted,
             AtomicInteger fallbackJobs
@@ -246,15 +235,15 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         String wallet = operacion.getIdCuenta();
         String symbol = operacion.getParSymbol();
         String userId = userId(user);
-        String traceId = activeCopyOperationCache.traceId(originId, userId, wallet, symbol, targetStrategy);
+        String traceId = activeCopyOperationCache.traceId(originId, userId, wallet, symbol);
         HyperliquidDeltaType eventDeltaType = HyperliquidDeltaType.from(event.getDeltaType());
         String actionLabel = displayAction(action, eventDeltaType);
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", traceId)) {
             try {
                 if (action == CopyJobAction.OPEN) {
-                    binanceCopyExecutionService.executeOpenForUser(event, user, allocation);
+                    binanceCopyExecutionService.executeOpenForUser(event, user);
                 } else {
-                    binanceCopyExecutionService.executeCloseForUser(event, user, allocation, targetStrategy);
+                    binanceCopyExecutionService.executeCloseForUser(event, user);
                 }
                 long elapsedMs = elapsedMs(startedNs);
                 tradingMetrics.directCopyExecution(copyIntent(action, eventDeltaType), "completed", "none", elapsedMs);
@@ -402,19 +391,6 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
             return "unknown";
         }
         return user.getUser().getId().toString();
-    }
-
-    private String strategyCsv(List<HyperliquidCopyCandidateResolver.CandidateCopyTarget> targets) {
-        if (targets == null || targets.isEmpty()) {
-            return "";
-        }
-        return targets.stream()
-                .map(t -> firstNonBlank(t.strategyCode(), t.allocation() == null ? null : t.allocation().getCopyStrategyCode()))
-                .filter(v -> v != null && !v.isBlank())
-                .distinct()
-                .sorted()
-                .limit(20)
-                .collect(Collectors.joining(","));
     }
 
     private String userIdsCsv(List<UserDetailDto> users) {

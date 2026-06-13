@@ -60,6 +60,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class OperationMovementEventServiceImpl implements OperationMovementEventService {
 
     private static final String SOURCE_DIRECT_INGEST = "hyperliquid_direct_ingest";
+    private static final String SOURCE_COPY_JOB_INGEST = "copy_job_ingest";
     private static final String SOURCE_OPERATION_EVENT_INGEST = "operation_event_ingest";
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final int CALC_SCALE = 18;
@@ -209,9 +210,9 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     private void persist(OperationMovementEventRecordCommand command, long acceptedNs, long startedNs) {
         if (repository.existsByMovementKeyInGuard(command.getMovementKey())) {
             skipped.incrementAndGet();
-            log.info("event=operation_movement_event.idempotent category=audit reasonCode=movement_already_recorded reasonAlias=movement_already_recorded friendlyReason=movimiento_ya_registrado explanation=movementKey_ya_existia_en_guard_y_no_se_duplica copyImpact=ledger_idempotent traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} {}",
+            log.info("event=operation_movement_event.idempotent category=audit reasonCode=movement_already_recorded reasonAlias=movement_already_recorded friendlyReason=movimiento_ya_registrado explanation=movementKey_ya_existia_en_guard_y_no_se_duplica copyImpact=ledger_idempotent traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} source={} sourceCategory={} metricEligible={} {}",
                     safe(command.getTraceId()), safe(asString(command.getIdOrderOrigin())), safe(command.getIdWalletOrigin()), safe(command.getParsymbol()),
-                    safe(command.getDeltaType()), safe(command.getMovementKey()),
+                    safe(command.getDeltaType()), safe(command.getMovementKey()), sourceForLog(command.getSource()), sourceCategory(command.getSource()), metricEligible(command.getSource()),
                     CopyLogAdvice.fields("movement_already_recorded", CopyLogAdvice.context(null, null, null, null, queue.size(), null, null, "operation_movement_event")));
             return;
         }
@@ -221,16 +222,25 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         repository.saveAndFlush(entity);
         metricMovementOutboxService.enqueue(entity);
         persisted.incrementAndGet();
-        meterRegistry.counter("signals.operation_movement_event.persisted.total", "eventType", safeTag(entity.getEventType()), "deltaType", safeTag(entity.getDeltaType())).increment();
+        String entitySource = sourceForLog(entity.getSource());
+        String entitySourceCategory = sourceCategory(entity.getSource());
+        boolean entityMetricEligible = metricEligible(entity.getSource());
+        meterRegistry.counter("signals.operation_movement_event.persisted.total",
+                "eventType", safeTag(entity.getEventType()),
+                "deltaType", safeTag(entity.getDeltaType()),
+                "sourceCategory", safeTag(entitySourceCategory),
+                "metricEligible", String.valueOf(entityMetricEligible)
+        ).increment();
         meterRegistry.timer("signals.operation_movement_event.persist.duration", "result", "ok", "eventType", safeTag(entity.getEventType()))
                 .record(Duration.ofNanos(System.nanoTime() - startedNs));
         String ledgerDiagnostic = entity.getReasonCode() == null ? "" : CopyLogAdvice.fields(
                 entity.getReasonCode(),
                 CopyLogAdvice.context(entity.getCopyEligibleUsers(), entity.getCopyEligibleUsers(), entity.getCopySubmittedTasks(), entity.getCopyBusinessSkipped(), queue.size(), null, null, "operation_movement_event")
         );
-        log.info("event=operation_movement_event.insert_ok category=audit reasonAlias=origin_movement_recorded friendlyReason=historial_de_operacion_actualizado explanation=se_guardo_el_movimiento_original_para_reconstruir_rentabilidad_y_trazabilidad copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} side={} eventType={} deltaType={} reasonCode={} previousSizeQty={} resultingSizeQty={} deltaSizeQty={} realizedPnlUsd={} copyEligibleUsers={} copySubmittedTasks={} copyBusinessSkipped={} queueDelayMs={} elapsedMs={} queueDepth={} {}",
+        log.info("event=operation_movement_event.insert_ok category=audit reasonAlias=origin_movement_recorded friendlyReason=historial_de_operacion_actualizado explanation=se_guardo_el_movimiento_para_auditoria_y_etl copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} side={} eventType={} deltaType={} source={} sourceCategory={} metricEligible={} metricDecisionUse={} reasonCode={} previousSizeQty={} resultingSizeQty={} deltaSizeQty={} realizedPnlUsd={} copyEligibleUsers={} copySubmittedTasks={} copyBusinessSkipped={} queueDelayMs={} elapsedMs={} queueDepth={} {}",
                 safe(entity.getTraceId()), safe(asString(entity.getIdOrderOrigin())), safe(entity.getIdWalletOrigin()), safe(entity.getParsymbol()), safe(entity.getTypeOperation()),
-                safe(entity.getEventType()), safe(entity.getDeltaType()), safe(entity.getReasonCode()), entity.getPreviousSizeQty(), entity.getResultingSizeQty(), entity.getDeltaSizeQty(), entity.getRealizedPnlUsd(),
+                safe(entity.getEventType()), safe(entity.getDeltaType()), entitySource, entitySourceCategory, entityMetricEligible, metricDecisionUse(entity.getSource()), safe(entity.getReasonCode()),
+                entity.getPreviousSizeQty(), entity.getResultingSizeQty(), entity.getDeltaSizeQty(), entity.getRealizedPnlUsd(),
                 entity.getCopyEligibleUsers(), entity.getCopySubmittedTasks(), entity.getCopyBusinessSkipped(), elapsedMs(acceptedNs), elapsedMs(startedNs), queue.size(), ledgerDiagnostic);
     }
 
@@ -329,7 +339,8 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         OperacionDto op = event.getOperacion();
         OffsetDateTime eventTime = firstNonNull(fromInstant(op.getFechaCierre()), fromInstant(op.getFechaCreacion()), utcNow());
         String effectiveTraceId = firstNonBlank(traceId, currentOrOriginTraceId(op.getIdOperacion(), op.getIdCuenta(), op.getParSymbol()));
-        String movementKey = compactKey(buildMovementKey(event, eventTime, source));
+        String normalizedSource = sourceForLog(firstNonBlank(source, SOURCE_OPERATION_EVENT_INGEST));
+        String movementKey = compactKey(buildMovementKey(event, eventTime, normalizedSource));
         return OperationMovementEventRecordCommand.builder()
                 .idOrderOrigin(op.getIdOperacion())
                 .movementKey(movementKey)
@@ -354,9 +365,9 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .sourceTs(eventTime)
                 .eventTime(eventTime)
                 .traceId(effectiveTraceId)
-                .source(firstNonBlank(source, SOURCE_OPERATION_EVENT_INGEST))
+                .source(normalizedSource)
                 .reasonCode(reasonCode)
-                .raw(rawFromOperacionEvent(event, source, reasonCode))
+                .raw(rawFromOperacionEvent(event, normalizedSource, reasonCode))
                 .build();
     }
 
@@ -609,6 +620,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     private JsonNode rawFromMapped(HyperliquidMappedDelta mappedDelta, HyperliquidDirectCopyDispatchResult dispatchResult, String reasonCode) {
         LinkedHashMap<String, Object> raw = new LinkedHashMap<>();
         raw.put("kind", "hyperliquid_direct_delta");
+        raw.put("source", SOURCE_DIRECT_INGEST);
+        raw.put("sourceCategory", sourceCategory(SOURCE_DIRECT_INGEST));
+        raw.put("metricEligible", metricEligible(SOURCE_DIRECT_INGEST));
+        raw.put("metricDecisionUse", metricDecisionUse(SOURCE_DIRECT_INGEST));
         raw.put("movementKeySchema", "canonical-v2-sha256");
         raw.put("idempotencyKeyAuditOnly", true);
         raw.put("idempotencyKey", mappedDelta.idempotencyKey());
@@ -642,10 +657,40 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         raw.put("kind", "operation_event");
         raw.put("movementKeySchema", "canonical-v2-sha256");
         raw.put("idempotencyKeyAuditOnly", true);
-        raw.put("source", source);
+        String normalizedSource = sourceForLog(firstNonBlank(source, SOURCE_OPERATION_EVENT_INGEST));
+        raw.put("source", normalizedSource);
+        raw.put("sourceCategory", sourceCategory(normalizedSource));
+        raw.put("metricEligible", metricEligible(normalizedSource));
+        raw.put("metricDecisionUse", metricDecisionUse(normalizedSource));
         raw.put("event", event);
         raw.put("reasonCode", reasonCode);
         return objectMapper.valueToTree(raw);
+    }
+
+    private boolean metricEligible(String source) {
+        return SOURCE_DIRECT_INGEST.equals(sourceForLog(source));
+    }
+
+    private String metricDecisionUse(String source) {
+        return metricEligible(source) ? "eligible_for_joyas_and_wallet_metrics" : "audit_only_excluded_from_joyas";
+    }
+
+    private String sourceCategory(String source) {
+        String normalized = sourceForLog(source);
+        if (SOURCE_DIRECT_INGEST.equals(normalized)) {
+            return "ORIGINAL_WALLET_DATA";
+        }
+        if (SOURCE_COPY_JOB_INGEST.equals(normalized)) {
+            return "DERIVED_COPY_TRADE";
+        }
+        return "OTHER_AUDIT_SOURCE";
+    }
+
+    private String sourceForLog(String source) {
+        if (!StringUtils.hasText(source)) {
+            return SOURCE_OPERATION_EVENT_INGEST;
+        }
+        return source.trim().toLowerCase(Locale.ROOT);
     }
 
     private String buildMovementKey(HyperliquidMappedDelta mappedDelta, OffsetDateTime eventTime) {

@@ -45,8 +45,9 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private static final String ERR_OPERACION_NULL = "La operacion no puede ser null";
     private static final String ERR_ID_NULL = "El idOperacion no puede ser null";
 
+    private static final String COPY_JOB_INGEST_SOURCE = "copy_job_ingest";
     private static final String LOG_ENQUEUED =
-            "event=copy.execution.enqueued originId={} wallet={} symbol={} tipo={} action={} engineAction={} copyIntent={} deltaType={} usersCached={} eligibleUsers={} eligibleUserIds={} enqueued={} allocationFilter={}";
+            "event=copy.execution.enqueued originId={} wallet={} symbol={} tipo={} action={} engineAction={} copyIntent={} deltaType={} source={} sourceCategory=DERIVED_COPY_TRADE metricEligible=false metricDecisionUse=audit_only_excluded_from_joyas usersCached={} eligibleUsers={} eligibleUserIds={} enqueued={} allocationFilter={}";
 
     private final UserDetailCachedService userDetailCachedService;
     private final UserCopyAllocationService userCopyAllocationService;
@@ -85,7 +86,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             final HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
             operationMovementEventService.recordAsync(
                     event,
-                    "copy_job_ingest",
+                    COPY_JOB_INGEST_SOURCE,
                     activeCopyOperationCache.traceId(originId, "origin", walletId, operacion.getParSymbol()),
                     null
             );
@@ -105,6 +106,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                     action,
                     copyIntent(action, deltaType),
                     deltaType,
+                    COPY_JOB_INGEST_SOURCE,
                     usersCached.size(),
                     eligibleUsers.size(),
                     userIdsCsv(eligibleUsers),
