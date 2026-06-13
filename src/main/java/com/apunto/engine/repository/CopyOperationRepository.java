@@ -22,6 +22,10 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndTypeOperation(String idOrderOrigin, String idUser, String typeOperation);
 
+    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndCopyStrategyCode(String idOrderOrigin, String idUser, String copyStrategyCode);
+
+    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndTypeOperationAndCopyStrategyCode(String idOrderOrigin, String idUser, String typeOperation, String copyStrategyCode);
+
     boolean existsByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
 
     Optional<CopyOperationEntity> findByIdOrden(String idOrden);
@@ -66,6 +70,29 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
     int closeActiveByOriginAndUser(
             @Param("idOrderOrigin") String idOrderOrigin,
             @Param("idUser") String idUser,
+            @Param("priceClose") BigDecimal priceClose,
+            @Param("dateClose") OffsetDateTime dateClose,
+            @Param("sizeUsd") BigDecimal sizeUsd,
+            @Param("sizePar") BigDecimal sizePar
+    );
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            UPDATE CopyOperationEntity c
+            SET c.priceClose = :priceClose,
+                c.dateClose = :dateClose,
+                c.siseUsd = :sizeUsd,
+                c.sizePar = :sizePar,
+                c.active = false
+            WHERE c.idOrderOrigin = :idOrderOrigin
+              AND c.idUser = :idUser
+              AND c.copyStrategyCode = :copyStrategyCode
+              AND c.active = true
+            """)
+    int closeActiveByOriginAndUserAndCopyStrategyCode(
+            @Param("idOrderOrigin") String idOrderOrigin,
+            @Param("idUser") String idUser,
+            @Param("copyStrategyCode") String copyStrategyCode,
             @Param("priceClose") BigDecimal priceClose,
             @Param("dateClose") OffsetDateTime dateClose,
             @Param("sizeUsd") BigDecimal sizeUsd,

@@ -32,6 +32,12 @@ public class HyperliquidCopyLifecycleGuardImpl implements HyperliquidCopyLifecyc
                     : HyperliquidCopyLifecycleDecision.allow(false);
         }
 
+        if (effectiveDelta == HyperliquidDeltaType.FLIP) {
+            // FLIP puede cerrar/revertir una copia existente o iniciar copia nueva solo si
+            // el selector de usuarios encontro una asignacion activa compatible.
+            return HyperliquidCopyLifecycleDecision.allow(activeCopy);
+        }
+
         if (effectiveDelta.canAdjustExistingCopy()) {
             return activeCopy
                     ? HyperliquidCopyLifecycleDecision.allow(true)

@@ -46,6 +46,10 @@ public interface BinanceClient {
     ApiResponse<FuturesAssetBalanceClientResponse> assetBalance(
             @RequestHeader("X-BINANCE-APIKEY") String apiKey,
             @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestHeader(value = "X-COPY-ORIGIN-ID", required = false) String originId,
+            @RequestHeader(value = "X-COPY-USER-ID", required = false) String userId,
+            @RequestHeader(value = "X-COPY-WALLET-ID", required = false) String walletId,
+            @RequestHeader(value = "X-COPY-TRACE-ID", required = false) String traceId,
             @RequestParam("asset") String asset
     );
 
@@ -53,6 +57,10 @@ public interface BinanceClient {
     ApiResponse<FuturesConvertToBnbClientResponse> convertToBnb(
             @RequestHeader("X-BINANCE-APIKEY") String apiKey,
             @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestHeader(value = "X-COPY-ORIGIN-ID", required = false) String originId,
+            @RequestHeader(value = "X-COPY-USER-ID", required = false) String userId,
+            @RequestHeader(value = "X-COPY-WALLET-ID", required = false) String walletId,
+            @RequestHeader(value = "X-COPY-TRACE-ID", required = false) String traceId,
             @RequestBody FuturesConvertToBnbClientRequest request
     );
 }

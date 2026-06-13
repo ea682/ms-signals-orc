@@ -9,6 +9,9 @@ import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.repository.OperationMovementEventRepository;
+import com.apunto.engine.outbox.service.MetricMovementOutboxService;
+import com.apunto.engine.outbox.exception.MetricOutboxHashException;
+import com.apunto.engine.outbox.exception.MetricOutboxSerializationException;
 import com.apunto.engine.service.OperationMovementEventService;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.util.CopyTraceIdUtil;
@@ -63,6 +66,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
 
     private final OperationMovementEventRepository repository;
     private final ObjectMapper objectMapper;
+    private final MetricMovementOutboxService metricMovementOutboxService;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
     private final boolean enabled;
@@ -79,6 +83,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     public OperationMovementEventServiceImpl(
             OperationMovementEventRepository repository,
             ObjectMapper objectMapper,
+            MetricMovementOutboxService metricMovementOutboxService,
             PlatformTransactionManager transactionManager,
             MeterRegistry meterRegistry,
             @Value("${operation.movement-ledger.enabled:true}") boolean enabled,
@@ -87,6 +92,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     ) {
         this.repository = repository;
         this.objectMapper = objectMapper;
+        this.metricMovementOutboxService = metricMovementOutboxService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
         this.enabled = enabled;
@@ -193,6 +199,8 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 return;
             }
             failed(command, task, ex);
+        } catch (MetricOutboxSerializationException | MetricOutboxHashException ex) {
+            failed(command, task, ex);
         } catch (DataAccessException | IllegalStateException | IllegalArgumentException ex) {
             failed(command, task, ex);
         }
@@ -211,6 +219,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         OperationMovementEventEntity previous = previousMovement(command);
         OperationMovementEventEntity entity = toEntity(command, previous);
         repository.saveAndFlush(entity);
+        metricMovementOutboxService.enqueue(entity);
         persisted.incrementAndGet();
         meterRegistry.counter("signals.operation_movement_event.persisted.total", "eventType", safeTag(entity.getEventType()), "deltaType", safeTag(entity.getDeltaType())).increment();
         meterRegistry.timer("signals.operation_movement_event.persist.duration", "result", "ok", "eventType", safeTag(entity.getEventType()))
@@ -285,6 +294,16 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .markPrice(firstNonNull(req == null ? null : req.markPrice(), op.getPrecioMercado()))
                 .exitPrice(op.getPrecioCierre())
                 .leverage(req == null ? null : req.leverage())
+                .rawNotionalUsd(firstNonNull(req == null ? null : req.rawNotionalUsd(), req == null ? null : req.notionalUsd(), op.getNotionalUsd()))
+                .positionNotionalUsd(firstNonNull(req == null ? null : req.positionNotionalUsd(), req == null ? null : req.notionalUsd(), op.getNotionalUsd()))
+                .closedNotionalUsd(req == null ? null : req.closedNotionalUsd())
+                .closedMarginUsedUsd(req == null ? null : req.closedMarginUsedUsd())
+                .effectiveCloseQty(req == null ? null : req.effectiveCloseQty())
+                .effectiveEntryPrice(req == null ? null : req.effectiveEntryPrice())
+                .effectiveExitPrice(req == null ? null : req.effectiveExitPrice())
+                .effectiveRealizedPnlUsd(req == null ? null : req.effectiveRealizedPnlUsd())
+                .normalizationStatus(req == null ? null : req.normalizationStatus())
+                .normalizationReason(req == null ? null : req.normalizationReason())
                 .walletVersion(req == null ? null : req.walletVersion())
                 .snapshotVersion(req == null ? null : req.snapshotVersion())
                 .sourceTs(sourceTs)
@@ -330,6 +349,8 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .entryPrice(op.getPrecioEntrada())
                 .markPrice(op.getPrecioMercado())
                 .exitPrice(op.getPrecioCierre())
+                .rawNotionalUsd(op.getNotionalUsd())
+                .positionNotionalUsd(op.getNotionalUsd())
                 .sourceTs(eventTime)
                 .eventTime(eventTime)
                 .traceId(effectiveTraceId)
@@ -348,7 +369,8 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
             deltaSize = resultingSize.subtract(previousSize);
         }
         String eventType = classifyEvent(command, previousSize, resultingSize, deltaSize);
-        BigDecimal realizedPnl = firstNonNull(command.getRealizedPnlUsd(), estimateRealizedPnl(command, previous, eventType, deltaSize));
+        BigDecimal realizedPnl = firstNonNull(command.getEffectiveRealizedPnlUsd(), command.getRealizedPnlUsd(), estimateRealizedPnl(command, previous, eventType, deltaSize));
+        NormalizedMovementValues normalized = normalizeMovementValues(command, previous, eventType, deltaSize, realizedPnl);
         return OperationMovementEventEntity.builder()
                 .idOrderOrigin(command.getIdOrderOrigin())
                 .movementKey(command.getMovementKey())
@@ -373,6 +395,16 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .exitPrice(firstNonNull(command.getExitPrice(), command.getMarkPrice()))
                 .realizedPnlUsd(realizedPnl)
                 .leverage(command.getLeverage())
+                .rawNotionalUsd(normalized.rawNotionalUsd())
+                .positionNotionalUsd(normalized.positionNotionalUsd())
+                .closedNotionalUsd(normalized.closedNotionalUsd())
+                .closedMarginUsedUsd(normalized.closedMarginUsedUsd())
+                .effectiveCloseQty(normalized.effectiveCloseQty())
+                .effectiveEntryPrice(normalized.effectiveEntryPrice())
+                .effectiveExitPrice(normalized.effectiveExitPrice())
+                .effectiveRealizedPnlUsd(normalized.effectiveRealizedPnlUsd())
+                .normalizationStatus(normalized.normalizationStatus())
+                .normalizationReason(normalized.normalizationReason())
                 .walletVersion(command.getWalletVersion())
                 .snapshotVersion(command.getSnapshotVersion())
                 .sourceTs(command.getSourceTs())
@@ -469,6 +501,100 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         return unitPnl.multiply(closedQty).setScale(CALC_SCALE, RoundingMode.HALF_UP);
     }
 
+
+    private NormalizedMovementValues normalizeMovementValues(
+            OperationMovementEventRecordCommand command,
+            OperationMovementEventEntity previous,
+            String eventType,
+            BigDecimal deltaSize,
+            BigDecimal realizedPnl
+    ) {
+        BigDecimal rawNotional = firstNonNull(command.getRawNotionalUsd(), command.getNotionalUsd());
+        BigDecimal positionNotional = firstNonNull(command.getPositionNotionalUsd(), command.getNotionalUsd());
+        BigDecimal closeQty = firstNonNull(command.getEffectiveCloseQty(), closedQuantity(command, previous, eventType, deltaSize));
+        BigDecimal entry = firstNonNull(command.getEffectiveEntryPrice(), previous == null ? null : previous.getEntryPrice(), command.getEntryPrice());
+        BigDecimal exit = firstNonNull(command.getEffectiveExitPrice(), command.getExitPrice(), command.getMarkPrice(), command.getEntryPrice());
+        BigDecimal closedNotional = command.getClosedNotionalUsd();
+        if ((closedNotional == null || closedNotional.compareTo(ZERO) <= 0)
+                && isClosingEvent(eventType)
+                && positive(closeQty) != null
+                && positive(exit) != null) {
+            closedNotional = positive(closeQty).multiply(positive(exit)).setScale(CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+        }
+        BigDecimal closedMargin = command.getClosedMarginUsedUsd();
+        BigDecimal leverage = positive(command.getLeverage());
+        if ((closedMargin == null || closedMargin.compareTo(ZERO) <= 0)
+                && closedNotional != null
+                && closedNotional.compareTo(ZERO) > 0
+                && leverage != null
+                && leverage.compareTo(ZERO) > 0) {
+            closedMargin = closedNotional.divide(leverage, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+        }
+        BigDecimal effectiveRealizedPnl = firstNonNull(command.getEffectiveRealizedPnlUsd(), realizedPnl);
+        String status = firstNonBlank(command.getNormalizationStatus(), derivedNormalizationStatus(eventType, closedNotional, effectiveRealizedPnl));
+        String reason = firstNonBlank(command.getNormalizationReason(), derivedNormalizationReason(eventType, closedNotional, effectiveRealizedPnl));
+        return new NormalizedMovementValues(
+                rawNotional,
+                positionNotional,
+                closedNotional,
+                closedMargin,
+                closeQty,
+                entry,
+                exit,
+                effectiveRealizedPnl,
+                status,
+                reason
+        );
+    }
+
+    private BigDecimal closedQuantity(OperationMovementEventRecordCommand command, OperationMovementEventEntity previous, String eventType, BigDecimal deltaSize) {
+        if (!isClosingEvent(eventType)) {
+            return null;
+        }
+        if (deltaSize != null && deltaSize.compareTo(ZERO) < 0) {
+            return deltaSize.abs();
+        }
+        BigDecimal previousSize = positive(previous == null ? command.getPreviousSizeQty() : previous.getResultingSizeQty());
+        BigDecimal resultingSize = resultingSize(command);
+        if ("CLOSE".equals(eventType) || "FLIP".equals(eventType)) {
+            return positive(previousSize);
+        }
+        if (previousSize != null && resultingSize != null && previousSize.compareTo(resultingSize) > 0) {
+            return previousSize.subtract(resultingSize).abs();
+        }
+        return null;
+    }
+
+    private boolean isClosingEvent(String eventType) {
+        return "REDUCE".equals(eventType) || "CLOSE".equals(eventType) || "FLIP".equals(eventType);
+    }
+
+    private String derivedNormalizationStatus(String eventType, BigDecimal closedNotional, BigDecimal effectiveRealizedPnl) {
+        if (!isClosingEvent(eventType)) {
+            return "NOT_CLOSING";
+        }
+        if (closedNotional != null && closedNotional.compareTo(ZERO) > 0 && effectiveRealizedPnl != null) {
+            return "RECOVERED";
+        }
+        if (closedNotional != null && closedNotional.compareTo(ZERO) > 0) {
+            return "PARTIAL_RECOVERY";
+        }
+        return "UNRECOVERABLE";
+    }
+
+    private String derivedNormalizationReason(String eventType, BigDecimal closedNotional, BigDecimal effectiveRealizedPnl) {
+        if (!isClosingEvent(eventType)) {
+            return "not_a_close_reduce_or_flip";
+        }
+        if (closedNotional != null && closedNotional.compareTo(ZERO) > 0 && effectiveRealizedPnl != null) {
+            return "closed_notional_and_pnl_available";
+        }
+        if (closedNotional != null && closedNotional.compareTo(ZERO) > 0) {
+            return "closed_notional_available_pnl_unavailable";
+        }
+        return "closed_notional_unavailable";
+    }
+
     private boolean isRecordable(OperationMovementEventRecordCommand command) {
         return command != null
                 && command.getIdOrderOrigin() != null
@@ -492,6 +618,20 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         raw.put("side", mappedDelta.side());
         raw.put("deltaType", mappedDelta.deltaType());
         raw.put("request", mappedDelta.request());
+        if (mappedDelta.request() != null) {
+            LinkedHashMap<String, Object> normalization = new LinkedHashMap<>();
+            normalization.put("rawNotionalUsd", mappedDelta.request().rawNotionalUsd());
+            normalization.put("positionNotionalUsd", mappedDelta.request().positionNotionalUsd());
+            normalization.put("closedNotionalUsd", mappedDelta.request().closedNotionalUsd());
+            normalization.put("closedMarginUsedUsd", mappedDelta.request().closedMarginUsedUsd());
+            normalization.put("effectiveCloseQty", mappedDelta.request().effectiveCloseQty());
+            normalization.put("effectiveEntryPrice", mappedDelta.request().effectiveEntryPrice());
+            normalization.put("effectiveExitPrice", mappedDelta.request().effectiveExitPrice());
+            normalization.put("effectiveRealizedPnlUsd", mappedDelta.request().effectiveRealizedPnlUsd());
+            normalization.put("normalizationStatus", mappedDelta.request().normalizationStatus());
+            normalization.put("normalizationReason", mappedDelta.request().normalizationReason());
+            raw.put("normalization", normalization);
+        }
         raw.put("dispatchResult", dispatchResult);
         raw.put("reasonCode", reasonCode);
         return objectMapper.valueToTree(raw);
@@ -756,6 +896,20 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
 
     private long elapsedMs(long startedNs) {
         return Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
+    }
+
+    private record NormalizedMovementValues(
+            BigDecimal rawNotionalUsd,
+            BigDecimal positionNotionalUsd,
+            BigDecimal closedNotionalUsd,
+            BigDecimal closedMarginUsedUsd,
+            BigDecimal effectiveCloseQty,
+            BigDecimal effectiveEntryPrice,
+            BigDecimal effectiveExitPrice,
+            BigDecimal effectiveRealizedPnlUsd,
+            String normalizationStatus,
+            String normalizationReason
+    ) {
     }
 
     private record QueuedMovement(OperationMovementEventRecordCommand command, long acceptedNs) {

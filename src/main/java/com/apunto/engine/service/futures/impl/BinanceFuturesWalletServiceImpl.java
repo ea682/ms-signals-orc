@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
@@ -49,6 +50,10 @@ public class BinanceFuturesWalletServiceImpl implements BinanceFuturesWalletServ
             ApiResponse<FuturesAssetBalanceClientResponse> response = binanceClient.assetBalance(
                     userDetail.getUserApiKey().getApiKey(),
                     userDetail.getUserApiKey().getApiSecret(),
+                    null,
+                    userId,
+                    null,
+                    traceId(),
                     normalizedAsset
             );
             FuturesAssetBalanceClientResponse balance = unwrap(response, "futures.wallet.balance");
@@ -100,6 +105,10 @@ public class BinanceFuturesWalletServiceImpl implements BinanceFuturesWalletServ
             ApiResponse<FuturesConvertToBnbClientResponse> response = binanceClient.convertToBnb(
                     userDetail.getUserApiKey().getApiKey(),
                     userDetail.getUserApiKey().getApiSecret(),
+                    null,
+                    userId,
+                    null,
+                    traceId(),
                     request
             );
             FuturesConvertToBnbClientResponse result = unwrap(response, "futures.wallet.convert_to_bnb");
@@ -221,6 +230,11 @@ public class BinanceFuturesWalletServiceImpl implements BinanceFuturesWalletServ
     private String userId(UserDetailDto userDetail) {
         UUID id = userDetail == null || userDetail.getUser() == null ? null : userDetail.getUser().getId();
         return id == null ? "" : id.toString();
+    }
+
+    private String traceId() {
+        String traceId = MDC.get("traceId");
+        return traceId == null || traceId.isBlank() ? null : traceId;
     }
 
     private String safeLog(String value) {

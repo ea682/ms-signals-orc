@@ -31,4 +31,10 @@ public class CopyOperationDto {
     private OffsetDateTime dateClose;
 
     private boolean active;
+
+    private Long userCopyAllocationId;
+    private String copyStrategyCode;
+    private String executionMode;
+    private boolean shadow;
+    private String shadowStatus;
 }

@@ -35,3 +35,9 @@ engine:
 hyperliquid:
   direct-ingest:
     distributed-dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DISTRIBUTED_DEDUPE_ENABLED:false}
+
+metric:
+  outbox:
+    enabled: ${METRIC_OUTBOX_ENABLED:false}
+    publisher:
+      enabled: ${METRIC_OUTBOX_PUBLISHER_ENABLED:false}

@@ -4,6 +4,7 @@ import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.hyperliquid.model.HyperliquidCopyLifecycleDecision;
 import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.hyperliquid.service.HyperliquidCopyLifecycleGuard;
@@ -13,8 +14,10 @@ import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.OperacionEventIngestService;
 import com.apunto.engine.service.OperationMovementEventService;
+import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
+import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ValidationException;
 import com.apunto.engine.shared.util.CopySymbolIdentity;
@@ -52,6 +55,8 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private final HyperliquidCopyLifecycleGuard lifecycleGuard;
     private final TradingMetrics tradingMetrics;
     private final OperationMovementEventService operationMovementEventService;
+    private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
+    private final MetricWalletService metricWalletService;
 
     @Value("${operation.job.ingest.filter-by-wallet-allocation:${copy.job.ingest.filter-by-wallet-allocation:true}}")
     private boolean filterByWalletAllocation;
@@ -124,11 +129,42 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         }
         if (action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
             if (deltaType == HyperliquidDeltaType.FLIP) {
-                return filterUsersById(usersCached, activeCopyOperationCache.activeUserIdsByWalletAndBaseSymbol(operation.getIdCuenta(), operation.getParSymbol()));
+                return mergeUsers(
+                        usersCached,
+                        filterUsersById(usersCached, activeCopyOperationCache.activeUserIdsByWalletAndBaseSymbol(operation.getIdCuenta(), operation.getParSymbol())),
+                        resolveEligibleUsers(operation, action, deltaType, usersCached)
+                );
             }
             return filterUsersById(usersCached, activeCopyOperationCache.activeUserIds(operation.getIdOperacion().toString()));
         }
-        return resolveEligibleUsers(operation.getIdCuenta(), usersCached);
+        return resolveEligibleUsers(operation, action, deltaType, usersCached);
+    }
+
+
+    private List<UserDetailDto> mergeUsers(List<UserDetailDto> usersCached, List<UserDetailDto> first, List<UserDetailDto> second) {
+        Set<UUID> ids = new java.util.LinkedHashSet<>();
+        if (first != null) {
+            first.stream()
+                    .filter(Objects::nonNull)
+                    .filter(u -> u.getUser() != null && u.getUser().getId() != null)
+                    .map(u -> u.getUser().getId())
+                    .forEach(ids::add);
+        }
+        if (second != null) {
+            second.stream()
+                    .filter(Objects::nonNull)
+                    .filter(u -> u.getUser() != null && u.getUser().getId() != null)
+                    .map(u -> u.getUser().getId())
+                    .forEach(ids::add);
+        }
+        if (ids.isEmpty()) {
+            return List.of();
+        }
+        return usersCached.stream()
+                .filter(Objects::nonNull)
+                .filter(u -> u.getUser() != null && u.getUser().getId() != null)
+                .filter(u -> ids.contains(u.getUser().getId()))
+                .toList();
     }
 
     private List<UserDetailDto> applyBusinessRules(OperacionEvent event, CopyJobAction action, List<UserDetailDto> users) {
@@ -208,7 +244,9 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         }
     }
 
-    private List<UserDetailDto> resolveEligibleUsers(String walletId, List<UserDetailDto> usersCached) {
+    private List<UserDetailDto> resolveEligibleUsers(OperacionDto operation, CopyJobAction action, HyperliquidDeltaType deltaType, List<UserDetailDto> usersCached) {
+        String walletId = operation == null ? null : operation.getIdCuenta();
+        String side = operation == null || operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
         if (!filterByWalletAllocation) {
             return usersCached;
         }
@@ -217,7 +255,15 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             return fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
         }
 
-        final Set<UUID> activeUserIds = userCopyAllocationService.getActiveUserIdsByWallet(walletId);
+        final List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWallet(walletId);
+        final Set<UUID> activeUserIds = activeAllocations.stream()
+                .filter(Objects::nonNull)
+                .filter(a -> copyStrategyRuntimeRouter.allocationAppliesToEvent(a, action, deltaType, side))
+                .filter(a -> !requiresCopyHealthGuard(action, deltaType)
+                        || metricWalletService.isCopyStrategyHealthyForCopy(a.getWalletId(), a.getCopyStrategyCode()))
+                .map(UserCopyAllocationEntity::getIdUser)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toUnmodifiableSet());
         if (activeUserIds.isEmpty()) {
             log.info("event=copy.execution.user_filter wallet={} activeAllocationUsers=0 usersCached={} eligibleUsers=0 eligibleUserIds=\"\" fallbackAllUsers={}",
                     walletId, usersCached.size(), fallbackAllUsersOnEmptyAllocation);
@@ -230,14 +276,28 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                 .filter(u -> activeUserIds.contains(u.getUser().getId()))
                 .toList();
 
-        log.info("event=copy.execution.user_filter wallet={} activeAllocationUsers={} usersCached={} eligibleUsers={} activeUserIds={} eligibleUserIds={}",
+        log.info("event=copy.execution.user_filter wallet={} side={} deltaType={} action={} activeAllocations={} matchingHealthyAllocationUsers={} usersCached={} eligibleUsers={} activeUserIds={} eligibleUserIds={}",
                 walletId,
+                side,
+                deltaType,
+                action,
+                activeAllocations.size(),
                 activeUserIds.size(),
                 usersCached.size(),
                 eligible.size(),
                 uuidSetCsv(activeUserIds),
                 userIdsCsv(eligible));
         return eligible;
+    }
+
+    private boolean requiresCopyHealthGuard(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        if (action != CopyJobAction.OPEN) {
+            return false;
+        }
+        HyperliquidDeltaType effectiveDelta = deltaType == null ? HyperliquidDeltaType.UNKNOWN : deltaType;
+        return effectiveDelta == HyperliquidDeltaType.OPEN
+                || effectiveDelta == HyperliquidDeltaType.FLIP
+                || effectiveDelta == HyperliquidDeltaType.UNKNOWN;
     }
 
     private String userIdsCsv(List<UserDetailDto> users) {

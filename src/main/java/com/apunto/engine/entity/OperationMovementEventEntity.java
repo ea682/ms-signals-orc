@@ -100,6 +100,36 @@ public class OperationMovementEventEntity {
     @Column(name = "leverage", precision = 38, scale = 18)
     private BigDecimal leverage;
 
+    @Column(name = "raw_notional_usd", precision = 38, scale = 18)
+    private BigDecimal rawNotionalUsd;
+
+    @Column(name = "position_notional_usd", precision = 38, scale = 18)
+    private BigDecimal positionNotionalUsd;
+
+    @Column(name = "closed_notional_usd", precision = 38, scale = 18)
+    private BigDecimal closedNotionalUsd;
+
+    @Column(name = "closed_margin_used_usd", precision = 38, scale = 18)
+    private BigDecimal closedMarginUsedUsd;
+
+    @Column(name = "effective_close_qty", precision = 38, scale = 18)
+    private BigDecimal effectiveCloseQty;
+
+    @Column(name = "effective_entry_price", precision = 38, scale = 18)
+    private BigDecimal effectiveEntryPrice;
+
+    @Column(name = "effective_exit_price", precision = 38, scale = 18)
+    private BigDecimal effectiveExitPrice;
+
+    @Column(name = "effective_realized_pnl_usd", precision = 38, scale = 18)
+    private BigDecimal effectiveRealizedPnlUsd;
+
+    @Column(name = "normalization_status", length = 40)
+    private String normalizationStatus;
+
+    @Column(name = "normalization_reason", length = 180)
+    private String normalizationReason;
+
     @Column(name = "wallet_version")
     private Long walletVersion;
 

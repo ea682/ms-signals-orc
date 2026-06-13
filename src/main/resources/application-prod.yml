@@ -11,15 +11,18 @@ spring:
     url: ${DB_URL}
     username: ${DB_USER}
     password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:24}
+      minimum-idle: ${DB_POOL_MIN_IDLE:4}
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:5000}
+      validation-timeout: ${DB_VALIDATION_TIMEOUT_MS:2000}
+      max-lifetime: ${DB_CONNECTION_MAX_LIFETIME_MS:1500000}
 
   flyway:
     enabled: ${SPRING_FLYWAY_ENABLED:true}
     locations: classpath:db/migration
     schemas: ${DB_SCHEMA:futuros_operaciones}
     default-schema: ${DB_SCHEMA:futuros_operaciones}
-    # Existing production schemas already include the pre-20260531 structures.
-    # Keep this enabled for the first Flyway-managed deploy, then it is harmless
-    # once flyway_schema_history exists.
     baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
     baseline-version: ${SPRING_FLYWAY_BASELINE_VERSION:20260530}
 
@@ -42,3 +45,9 @@ hyperliquid:
   direct-ingest:
     distributed-dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DISTRIBUTED_DEDUPE_ENABLED:true}
     fail-open-on-dedupe-error: ${HYPERLIQUID_DIRECT_INGEST_FAIL_OPEN_ON_DEDUPE_ERROR:false}
+
+metric:
+  outbox:
+    enabled: ${METRIC_OUTBOX_ENABLED:true}
+    publisher:
+      enabled: ${METRIC_OUTBOX_PUBLISHER_ENABLED:true}
