@@ -6,6 +6,7 @@ import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailService;
+import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
@@ -37,6 +38,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     private final UserCopyAllocationRepository repository;
     private final UserDetailService userDetailService;
+    private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     @PersistenceContext
     private EntityManager entityManager;
 
@@ -77,13 +79,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             final List<UserCopyAllocationEntity> existingActive =
                     repository.findAllByIdUserAndEndsAtIsNull(idUser);
 
-            final Set<String> blockedWallets = new HashSet<>();
+            final Set<String> blockedAllocationKeys = new HashSet<>();
             for (UserCopyAllocationEntity e : existingActive) {
                 if (e == null) continue;
                 if (!e.isActive()) {
-                    final String walletId = normalize(e.getWalletId());
-                    if (walletId != null) {
-                        blockedWallets.add(walletId);
+                    final String allocationKey = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
+                    if (allocationKey != null) {
+                        blockedAllocationKeys.add(allocationKey);
                     }
                 }
             }
@@ -92,7 +94,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     .filter(Objects::nonNull)
                     .filter(dto -> dto.getWallet() != null)
                     .filter(dto -> normalize(dto.getWallet().getIdWallet()) != null)
-                    .filter(dto -> !blockedWallets.contains(normalize(dto.getWallet().getIdWallet())))
+                    .filter(dto -> !blockedAllocationKeys.contains(allocationKey(dto)))
                     .filter(dto -> safePct(dto.getCapitalShare()).signum() > 0)
                     .sorted(
                             Comparator
@@ -124,7 +126,8 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 if (dto == null || dto.getWallet() == null) continue;
 
                 final String walletId = normalize(dto.getWallet().getIdWallet());
-                if (walletId == null) continue;
+                final String allocationKey = allocationKey(dto);
+                if (walletId == null || allocationKey == null) continue;
 
                 final BigDecimal pct = safePct(dto.getCapitalShare());
                 if (pct.signum() <= 0) continue;
@@ -156,7 +159,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                         "event=user_copy_allocation.sync_ok reason=empty_distribution user={} closed={} blocked={}",
                         idUser,
                         toClose.size(),
-                        blockedWallets.size()
+                        blockedAllocationKeys.size()
                 );
                 continue;
             }
@@ -168,6 +171,8 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             for (int i = 0; i < validTop.size(); i++) {
                 final MetricaWalletDto dto = validTop.get(i);
                 final String walletId = normalize(dto.getWallet().getIdWallet());
+                final String allocationKey = allocationKey(dto);
+                if (walletId == null || allocationKey == null) continue;
                 final BigDecimal originalPct = safePct(dto.getCapitalShare());
                 final Integer score = safeScore(dto);
 
@@ -183,29 +188,34 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
                 if (scaledPct.signum() <= 0) continue;
 
-                newDist.put(walletId, new Dist(scaledPct, score));
+                newDist.put(allocationKey, new Dist(walletId, strategyCode(dto), strategySlug(dto), strategyLabel(dto), copyMode(dto), sourceEndpoint(dto), rankWithinStrategy(dto), globalRank(dto), strategyScore(dto), scaledPct, score));
             }
 
-            final List<String> newWalletIdList = new ArrayList<>(newDist.keySet());
+            final List<String> newWalletIdList = newDist.values().stream()
+                    .map(Dist::walletId)
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .toList();
 
             final List<UserCopyAllocationEntity> existingForNewWallets =
                     repository.findAllByIdUserAndWalletIdIn(idUser, newWalletIdList);
 
-            final Map<String, UserCopyAllocationEntity> existingByWallet = new HashMap<>();
+            final Map<String, UserCopyAllocationEntity> existingByAllocationKey = new HashMap<>();
             for (UserCopyAllocationEntity e : existingForNewWallets) {
                 if (e == null) continue;
-                final String w = normalize(e.getWalletId());
-                if (w != null) existingByWallet.put(w, e);
+                final String key = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
+                if (key != null) existingByAllocationKey.put(key, e);
             }
 
             final List<UserCopyAllocationEntity> toSave =
                     new ArrayList<>(newDist.size() + existingActive.size());
 
             for (Map.Entry<String, Dist> entry : newDist.entrySet()) {
-                final String walletId = entry.getKey();
+                final String allocationKey = entry.getKey();
                 final Dist d = entry.getValue();
+                final String walletId = d.walletId();
 
-                UserCopyAllocationEntity entity = existingByWallet.get(walletId);
+                UserCopyAllocationEntity entity = existingByAllocationKey.get(allocationKey);
                 if (entity == null) {
                     entity = UserCopyAllocationEntity.builder()
                             .idUser(idUser)
@@ -219,6 +229,14 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 }
                 entity.setAllocationPct(d.pct());
                 entity.setScore(d.score());
+                entity.setCopyStrategyCode(d.strategyCode());
+                entity.setCopyStrategySlug(d.strategySlug());
+                entity.setCopyStrategyLabel(d.strategyLabel());
+                entity.setCopyMode(d.copyMode());
+                entity.setStrategySourceEndpoint(d.sourceEndpoint());
+                entity.setRankWithinStrategy(d.rankWithinStrategy());
+                entity.setGlobalRank(d.globalRank());
+                entity.setStrategyScore(d.strategyScore());
                 entity.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
                 entity.setEndsAt(null);
                 entity.setUpdatedAt(now);
@@ -226,16 +244,16 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 toSave.add(entity);
             }
 
-            final Set<String> newWalletIds = new HashSet<>(newDist.keySet());
+            final Set<String> newAllocationKeys = new HashSet<>(newDist.keySet());
             int closed = 0;
 
             for (UserCopyAllocationEntity e : existingActive) {
                 if (e == null) continue;
                 if (!e.isActive()) continue;
 
-                final String walletId = normalize(e.getWalletId());
-                if (walletId == null) continue;
-                if (newWalletIds.contains(walletId)) continue;
+                final String allocationKey = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
+                if (allocationKey == null) continue;
+                if (newAllocationKeys.contains(allocationKey)) continue;
 
                 e.setStatus(UserCopyAllocationEntity.Status.CLOSED);
                 e.setEndsAt(now);
@@ -259,7 +277,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     candidates.size(),
                     newDist.size(),
                     closed,
-                    blockedWallets.size(),
+                    blockedAllocationKeys.size(),
                     targetTotalPct,
                     persistedTotal
             );
@@ -288,13 +306,27 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     @Override
     @Transactional(readOnly = true)
+    public List<UserCopyAllocationEntity> getActiveAllocationsByWallet(String walletId) {
+        final String normalizedWallet = normalize(walletId);
+        if (normalizedWallet == null) {
+            return List.of();
+        }
+        return repository.findActiveByWalletId(normalizedWallet)
+                .stream()
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+
+    @Override
+    @Transactional(readOnly = true)
     public Set<UUID> getActiveUserIdsByWallet(String walletId) {
         final String normalizedWallet = normalize(walletId);
         if (normalizedWallet == null) {
             return Set.of();
         }
 
-        return repository.findActiveByWalletId(normalizedWallet)
+        return getActiveAllocationsByWallet(normalizedWallet)
                 .stream()
                 .filter(Objects::nonNull)
                 .map(UserCopyAllocationEntity::getIdUser)
@@ -302,6 +334,22 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId, String strategyCode) {
+        final String normalizedWallet = normalize(walletId);
+        final String normalizedStrategy = copyStrategyRuntimeRouter.strategyCodeOf(UserCopyAllocationEntity.builder().copyStrategyCode(strategyCode).build());
+        if (idUser == null || normalizedWallet == null || normalizedStrategy == null) {
+            return Optional.empty();
+        }
+        return repository.findActiveAllocationForUserWalletStrategy(
+                idUser,
+                normalizedWallet,
+                normalizedStrategy,
+                UserCopyAllocationEntity.Status.ACTIVE
+        );
+    }
 
     @Override
     @Transactional(readOnly = true)
@@ -316,6 +364,106 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 normalizedWallet,
                 UserCopyAllocationEntity.Status.ACTIVE
         );
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<UserCopyAllocationEntity> findOpenAllocation(UUID idUser, String walletId, String strategyCode) {
+        final String normalizedWallet = normalize(walletId);
+        final String normalizedStrategy = copyStrategyRuntimeRouter.strategyCodeOf(UserCopyAllocationEntity.builder().copyStrategyCode(strategyCode).build());
+        if (idUser == null || normalizedWallet == null || normalizedStrategy == null) {
+            return Optional.empty();
+        }
+        return repository.findOpenAllocationForUserWalletStrategy(idUser, normalizedWallet, normalizedStrategy);
+    }
+
+    @Override
+    @Transactional
+    public void markGuardBlocked(UUID idUser, String walletId, String strategyCode, String targetStatus, String reason, OffsetDateTime cooldownUntil) {
+        final String normalizedWallet = normalize(walletId);
+        final String normalizedStrategy = copyStrategyRuntimeRouter.strategyCodeOf(UserCopyAllocationEntity.builder().copyStrategyCode(strategyCode).build());
+        if (idUser == null || normalizedWallet == null || normalizedStrategy == null) {
+            return;
+        }
+        UserCopyAllocationEntity entity = repository.findOpenAllocationForUserWalletStrategy(idUser, normalizedWallet, normalizedStrategy).orElse(null);
+        if (entity == null || entity.getStatus() == UserCopyAllocationEntity.Status.CLOSED || entity.getStatus() == UserCopyAllocationEntity.Status.DISABLED_MANUAL) {
+            return;
+        }
+        UserCopyAllocationEntity.Status nextStatus = parseStatus(targetStatus);
+        if (nextStatus == UserCopyAllocationEntity.Status.ACTIVE || nextStatus == UserCopyAllocationEntity.Status.CLOSED) {
+            nextStatus = UserCopyAllocationEntity.Status.EXIT_ONLY;
+        }
+        final OffsetDateTime now = OffsetDateTime.now();
+        if (entity.getStatus() == nextStatus && Objects.equals(entity.getStatusReason(), reason)) {
+            return;
+        }
+        entity.setStatus(nextStatus);
+        entity.setStatusReason(safeReason(reason));
+        entity.setStatusCooldownUntil(cooldownUntil);
+        entity.setStatusUpdatedAt(now);
+        entity.setUpdatedAt(now);
+        repository.saveAndFlush(entity);
+        log.warn("event=user_copy_allocation.status_guard_blocked user={} wallet={} strategy={} status={} reason={} cooldownUntil={}",
+                idUser, normalizedWallet, normalizedStrategy, nextStatus, safeReason(reason), cooldownUntil);
+    }
+
+    private UserCopyAllocationEntity.Status parseStatus(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return UserCopyAllocationEntity.Status.EXIT_ONLY;
+        }
+        try {
+            return UserCopyAllocationEntity.Status.valueOf(raw.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            return UserCopyAllocationEntity.Status.EXIT_ONLY;
+        }
+    }
+
+    private static String safeReason(String reason) {
+        if (reason == null || reason.isBlank()) return null;
+        String clean = reason.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').trim();
+        return clean.length() > 160 ? clean.substring(0, 160) : clean;
+    }
+
+    private String allocationKey(MetricaWalletDto dto) {
+        if (dto == null || dto.getWallet() == null) return null;
+        return allocationKey(dto.getWallet().getIdWallet(), strategyCode(dto));
+    }
+
+    private String allocationKey(String walletId, String strategyCode) {
+        return copyStrategyRuntimeRouter.allocationKey(walletId, strategyCode);
+    }
+
+    private String strategyCode(MetricaWalletDto dto) {
+        return copyStrategyRuntimeRouter.strategyCodeOf(dto);
+    }
+
+    private static String strategySlug(MetricaWalletDto dto) {
+        return dto == null || dto.getStrategy() == null ? null : dto.getStrategy().getStrategySlug();
+    }
+
+    private static String strategyLabel(MetricaWalletDto dto) {
+        return dto == null || dto.getStrategy() == null ? null : dto.getStrategy().getStrategyLabel();
+    }
+
+    private static String copyMode(MetricaWalletDto dto) {
+        return dto == null || dto.getStrategy() == null ? null : dto.getStrategy().getCopyMode();
+    }
+
+    private static String sourceEndpoint(MetricaWalletDto dto) {
+        return dto == null || dto.getStrategy() == null ? null : dto.getStrategy().getSourceEndpoint();
+    }
+
+    private static Integer rankWithinStrategy(MetricaWalletDto dto) {
+        return dto == null || dto.getStrategy() == null ? null : dto.getStrategy().getRankWithinStrategy();
+    }
+
+    private static Integer globalRank(MetricaWalletDto dto) {
+        return dto == null || dto.getStrategy() == null ? null : dto.getStrategy().getGlobalRank();
+    }
+
+    private static BigDecimal strategyScore(MetricaWalletDto dto) {
+        if (dto == null || dto.getStrategy() == null || dto.getStrategy().getScore() == null) return null;
+        return BigDecimal.valueOf(dto.getStrategy().getScore()).setScale(6, RoundingMode.HALF_UP);
     }
 
     private static Integer safeScore(MetricaWalletDto dto) {
@@ -337,8 +485,22 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         return t.isEmpty() ? null : t.toLowerCase();
     }
 
-    private record Dist(BigDecimal pct, Integer score) {
+    private record Dist(
+            String walletId,
+            String strategyCode,
+            String strategySlug,
+            String strategyLabel,
+            String copyMode,
+            String sourceEndpoint,
+            Integer rankWithinStrategy,
+            Integer globalRank,
+            BigDecimal strategyScore,
+            BigDecimal pct,
+            Integer score
+    ) {
         Dist {
+            Objects.requireNonNull(walletId, "walletId");
+            Objects.requireNonNull(strategyCode, "strategyCode");
             Objects.requireNonNull(pct, "pct");
         }
     }

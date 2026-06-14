@@ -31,6 +31,27 @@ public class CopyOperationEventEntity {
     @Column(name = "id_operation", columnDefinition = "uuid")
     private UUID idOperation;
 
+    @Column(name = "user_copy_allocation_id")
+    private Long userCopyAllocationId;
+
+    @Column(name = "copy_strategy_code", length = 64)
+    private String copyStrategyCode;
+
+    @Column(name = "execution_mode", length = 16, nullable = false)
+    private String executionMode;
+
+    @Column(name = "is_shadow", nullable = false)
+    private boolean shadow;
+
+    @Column(name = "decision", length = 40)
+    private String decision;
+
+    @Column(name = "decision_reason", length = 160)
+    private String decisionReason;
+
+    @Column(name = "source_movement_key", length = 160)
+    private String sourceMovementKey;
+
     @Column(name = "id_order_origin", nullable = false)
     private String idOrderOrigin;
 

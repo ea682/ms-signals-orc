@@ -16,6 +16,32 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
     List<UserCopyAllocationEntity> findAllByStatus(UserCopyAllocationEntity.Status status);
     List<UserCopyAllocationEntity> findAllByIdUser(UUID idUser);
     List<UserCopyAllocationEntity> findAllByIdUserAndWalletIdIn(UUID idUser, List<String> walletIds);
+
+
+    @Query("""
+            select uca
+            from UserCopyAllocationEntity uca
+            where uca.idUser = :idUser
+              and lower(uca.walletId) = lower(:walletId)
+              and uca.copyStrategyCode = :strategyCode
+              and uca.endsAt is null
+              and uca.isActive = true
+              and uca.status = :status
+            """)
+    Optional<UserCopyAllocationEntity> findActiveAllocationForUserWalletStrategy(
+            @Param("idUser") UUID idUser,
+            @Param("walletId") String walletId,
+            @Param("strategyCode") String strategyCode,
+            @Param("status") UserCopyAllocationEntity.Status status
+    );
+
+    @Query("""
+            select uca
+            from UserCopyAllocationEntity uca
+            where uca.idUser = :idUser
+              and uca.endsAt is null
+            """)
+    List<UserCopyAllocationEntity> findActiveByIdUser(@Param("idUser") UUID idUser);
     List<UserCopyAllocationEntity> findAllByIdUserAndEndsAtIsNull(UUID idUser);
 
     @Query(value = """
@@ -37,10 +63,32 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and uca.isActive = true
               and uca.status = :status
             """)
-    Optional<UserCopyAllocationEntity> findActiveAllocation(
+    List<UserCopyAllocationEntity> findActiveAllocationsForUserWallet(
             @Param("idUser") UUID idUser,
             @Param("walletId") String walletId,
             @Param("status") UserCopyAllocationEntity.Status status
     );
+
+    @Query("""
+            select uca
+            from UserCopyAllocationEntity uca
+            where uca.idUser = :idUser
+              and lower(uca.walletId) = lower(:walletId)
+              and uca.copyStrategyCode = :strategyCode
+              and uca.endsAt is null
+            """)
+    Optional<UserCopyAllocationEntity> findOpenAllocationForUserWalletStrategy(
+            @Param("idUser") UUID idUser,
+            @Param("walletId") String walletId,
+            @Param("strategyCode") String strategyCode
+    );
+
+    default Optional<UserCopyAllocationEntity> findActiveAllocation(
+            UUID idUser,
+            String walletId,
+            UserCopyAllocationEntity.Status status
+    ) {
+        return findActiveAllocationsForUserWallet(idUser, walletId, status).stream().findFirst();
+    }
 
 }

@@ -31,7 +31,7 @@ public enum HyperliquidDeltaType {
     }
 
     public boolean isAdjustment() {
-        return this == RESIZE || this == UPDATE || this == FLIP;
+        return this == RESIZE || this == FLIP;
     }
 
     public boolean canStartCopyLifecycle() {
@@ -39,6 +39,6 @@ public enum HyperliquidDeltaType {
     }
 
     public boolean canAdjustExistingCopy() {
-        return this == RESIZE || this == UPDATE || this == FLIP;
+        return this == RESIZE || this == FLIP;
     }
 }

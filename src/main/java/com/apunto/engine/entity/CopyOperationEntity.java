@@ -67,4 +67,19 @@ public class CopyOperationEntity {
 
     @Column(name = "is_active", nullable = false)
     private boolean active;
+
+    @Column(name = "user_copy_allocation_id")
+    private Long userCopyAllocationId;
+
+    @Column(name = "copy_strategy_code", length = 64)
+    private String copyStrategyCode;
+
+    @Column(name = "execution_mode", length = 16, nullable = false)
+    private String executionMode;
+
+    @Column(name = "is_shadow", nullable = false)
+    private boolean shadow;
+
+    @Column(name = "shadow_status", length = 32)
+    private String shadowStatus;
 }

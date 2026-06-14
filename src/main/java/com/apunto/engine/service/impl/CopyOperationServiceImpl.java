@@ -20,6 +20,8 @@ import java.util.Optional;
 import java.util.Map;
 import java.util.LinkedHashMap;
 
+import static com.apunto.engine.entity.UserCopyAllocationEntity.normalizeExecutionMode;
+
 @Service
 @Slf4j
 @RequiredArgsConstructor
@@ -289,6 +291,11 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         entity.setDateCreation(operation.getDateCreation());
         entity.setDateClose(operation.getDateClose());
         entity.setActive(operation.isActive());
+        entity.setUserCopyAllocationId(operation.getUserCopyAllocationId());
+        entity.setCopyStrategyCode(operation.getCopyStrategyCode());
+        entity.setExecutionMode(normalizeExecutionMode(operation.getExecutionMode()));
+        entity.setShadow(operation.isShadow());
+        entity.setShadowStatus(operation.getShadowStatus());
 
         return entity;
     }
@@ -356,6 +363,11 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         entity.setDateCreation(operation.getDateCreation());
         entity.setDateClose(operation.getDateClose());
         entity.setActive(operation.isActive());
+        entity.setUserCopyAllocationId(operation.getUserCopyAllocationId());
+        entity.setCopyStrategyCode(operation.getCopyStrategyCode());
+        entity.setExecutionMode(normalizeExecutionMode(operation.getExecutionMode()));
+        entity.setShadow(operation.isShadow());
+        entity.setShadowStatus(operation.getShadowStatus());
     }
 
     private boolean isUniqueViolation(DataIntegrityViolationException ex) {

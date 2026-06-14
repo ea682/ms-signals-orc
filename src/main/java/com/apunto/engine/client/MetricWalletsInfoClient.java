@@ -12,4 +12,12 @@ public interface MetricWalletsInfoClient {
 
     @GetExchange("/operaciones/metrica")
     List<MetricaWalletDto> allPositionHistory(@RequestParam("limit") int limit, @RequestParam("dayz") int dayz);
+
+    @GetExchange("/operaciones/metrica/joyas")
+    List<MetricaWalletDto> joyas(
+            @RequestParam("limitWallet") int limitWallet,
+            @RequestParam("limit") int limit,
+            @RequestParam("dayz") int dayz,
+            @RequestParam("simulation") String simulation
+    );
 }

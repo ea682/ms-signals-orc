@@ -13,7 +13,6 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
-import jakarta.persistence.UniqueConstraint;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -31,11 +30,7 @@ import java.util.UUID;
 @AllArgsConstructor
 @Table(
         name = "user_copy_allocation",
-        schema = "futuros_operaciones",
-        uniqueConstraints = @UniqueConstraint(
-                name = "uq_user_copy_allocation_user_wallet",
-                columnNames = {"id_user", "wallet_id"}
-        )
+        schema = "futuros_operaciones"
 )
 public class UserCopyAllocationEntity {
 
@@ -49,6 +44,31 @@ public class UserCopyAllocationEntity {
     @Column(name = "wallet_id", nullable = false, length = 128)
     private String walletId;
 
+    @Builder.Default
+    @Column(name = "copy_strategy_code", nullable = false, length = 64)
+    private String copyStrategyCode = "MOVEMENT_ALL";
+
+    @Column(name = "copy_strategy_slug", length = 80)
+    private String copyStrategySlug;
+
+    @Column(name = "copy_strategy_label", length = 120)
+    private String copyStrategyLabel;
+
+    @Column(name = "copy_mode", length = 80)
+    private String copyMode;
+
+    @Column(name = "strategy_source_endpoint", length = 180)
+    private String strategySourceEndpoint;
+
+    @Column(name = "rank_within_strategy")
+    private Integer rankWithinStrategy;
+
+    @Column(name = "global_rank")
+    private Integer globalRank;
+
+    @Column(name = "strategy_score", precision = 18, scale = 6)
+    private BigDecimal strategyScore;
+
     @Column(name = "allocation_pct", precision = 9, scale = 6, nullable = false)
     private BigDecimal allocationPct;
 
@@ -56,7 +76,7 @@ public class UserCopyAllocationEntity {
     private Integer score;
 
     @Convert(converter = UserCopyAllocationStatusConverter.class)
-    @Column(name = "status", nullable = false, length = 16)
+    @Column(name = "status", nullable = false, length = 40)
     private Status status;
 
     @Column(name = "updated_at", nullable = false, columnDefinition = "timestamp with time zone")
@@ -67,6 +87,22 @@ public class UserCopyAllocationEntity {
 
     @Column(name = "is_active")
     private boolean isActive;
+
+    @Builder.Default
+    @Column(name = "execution_mode", nullable = false, length = 16)
+    private String executionMode = "LIVE";
+
+    @Column(name = "status_reason", length = 160)
+    private String statusReason;
+
+    @Column(name = "status_updated_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime statusUpdatedAt;
+
+    @Column(name = "status_cooldown_until", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime statusCooldownUntil;
+
+    @Column(name = "leverage_override", precision = 10, scale = 2)
+    private BigDecimal leverageOverride;
 
     @Builder.Default
     @Enumerated(EnumType.STRING)
@@ -87,7 +123,12 @@ public class UserCopyAllocationEntity {
 
     public enum Status {
         ACTIVE,
+        EXIT_ONLY,
         PAUSED,
+        PAUSED_BY_NEGATIVE_PNL,
+        PAUSED_BY_STALE_METRIC,
+        PAUSED_BY_RISK,
+        DISABLED_MANUAL,
         CLOSED
     }
 
@@ -98,11 +139,26 @@ public class UserCopyAllocationEntity {
         if (status == null) status = Status.ACTIVE;
         if (updatedAt == null) updatedAt = now;
         if (copyMinNotionalMode == null) copyMinNotionalMode = CopyMinNotionalMode.INHERIT;
+        executionMode = normalizeExecutionMode(executionMode);
+        statusReason = normalize(statusReason);
+        if (statusUpdatedAt == null) statusUpdatedAt = now;
 
         walletId = normalize(walletId);
+        copyStrategyCode = normalizeStrategyCode(copyStrategyCode);
+        copyStrategySlug = normalize(copyStrategySlug);
+        copyStrategyLabel = normalize(copyStrategyLabel);
+        copyMode = normalize(copyMode);
+        strategySourceEndpoint = normalize(strategySourceEndpoint);
+
+        if (strategyScore != null) {
+            strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
+        }
 
         if (allocationPct != null) {
             allocationPct = allocationPct.setScale(6, RoundingMode.HALF_UP);
+        }
+        if (leverageOverride != null) {
+            leverageOverride = leverageOverride.setScale(2, RoundingMode.HALF_UP);
         }
 
         applyEndsAtRule(now);
@@ -113,11 +169,26 @@ public class UserCopyAllocationEntity {
         final OffsetDateTime now = OffsetDateTime.now();
         updatedAt = now;
         if (copyMinNotionalMode == null) copyMinNotionalMode = CopyMinNotionalMode.INHERIT;
+        executionMode = normalizeExecutionMode(executionMode);
+        statusReason = normalize(statusReason);
+        if (statusUpdatedAt == null) statusUpdatedAt = now;
 
         walletId = normalize(walletId);
+        copyStrategyCode = normalizeStrategyCode(copyStrategyCode);
+        copyStrategySlug = normalize(copyStrategySlug);
+        copyStrategyLabel = normalize(copyStrategyLabel);
+        copyMode = normalize(copyMode);
+        strategySourceEndpoint = normalize(strategySourceEndpoint);
+
+        if (strategyScore != null) {
+            strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
+        }
 
         if (allocationPct != null) {
             allocationPct = allocationPct.setScale(6, RoundingMode.HALF_UP);
+        }
+        if (leverageOverride != null) {
+            leverageOverride = leverageOverride.setScale(2, RoundingMode.HALF_UP);
         }
 
         applyEndsAtRule(now);
@@ -135,5 +206,39 @@ public class UserCopyAllocationEntity {
         if (s == null) return null;
         String t = s.trim();
         return t.isEmpty() ? null : t;
+    }
+
+    private static String normalizeStrategyCode(String s) {
+        String t = normalize(s);
+        if (t == null) return "MOVEMENT_ALL";
+        return t.toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+    }
+
+    public boolean allowsNewEntries(OffsetDateTime now) {
+        if (!isActive || endsAt != null || status != Status.ACTIVE) {
+            return false;
+        }
+        if (statusCooldownUntil == null) {
+            return true;
+        }
+        final OffsetDateTime effectiveNow = now == null ? OffsetDateTime.now() : now;
+        return !statusCooldownUntil.isAfter(effectiveNow);
+    }
+
+    public boolean allowsExitOnly() {
+        return isActive && endsAt == null && (status == Status.ACTIVE || status == Status.EXIT_ONLY
+                || status == Status.PAUSED_BY_NEGATIVE_PNL || status == Status.PAUSED_BY_STALE_METRIC
+                || status == Status.PAUSED_BY_RISK);
+    }
+
+    public boolean isShadowMode() {
+        return "SHADOW".equalsIgnoreCase(executionMode);
+    }
+
+    public static String normalizeExecutionMode(String value) {
+        String t = normalize(value);
+        if (t == null) return "LIVE";
+        String mode = t.toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        return "SHADOW".equals(mode) ? "SHADOW" : "LIVE";
     }
 }

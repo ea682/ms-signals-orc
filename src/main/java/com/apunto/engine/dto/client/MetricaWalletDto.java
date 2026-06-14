@@ -18,6 +18,7 @@ public class MetricaWalletDto {
 
     private WalletDto wallet;
     private ActivityDto activity;
+    private StrategyDto strategy;
     private ScoringDto scoring;
     private CopySimulationDto copySimulation;
     private ExposureAndCapacityDto exposureAndCapacity;
@@ -43,6 +44,52 @@ public class MetricaWalletDto {
         private OffsetDateTime endDate;
         private Double historyDays;
         private Integer countOperation;
+        private CountOperationBreakdownDto countOperationBreakdown;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class CountOperationBreakdownDto {
+        private String strategyCode;
+        private String strategyLabel;
+        private String scopeType;
+        private String scopeValue;
+        private Integer metricOperationCount;
+        private Integer totalTradeFacts;
+        private Integer partialCloseFacts;
+        private Integer finalCloseFacts;
+        private Integer distinctPositions;
+        private Integer wins;
+        private Integer losses;
+        private Integer breakeven;
+        private Integer simulatableTradeFacts;
+        private CopySimulationCoverageDto simulationCoverage;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class StrategyDto {
+        private String strategyCode;
+        private String strategySlug;
+        private String strategyLabel;
+        private String copyMode;
+        private String countOperationMeaning;
+        private String strategySource;
+        private Integer rankWithinStrategy;
+        private Integer globalRank;
+        private String sourceEndpoint;
+        private Double score;
+        private CopyabilityDto copyability;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class CopyabilityDto {
+        private String type;
+        private Boolean canOpenPosition;
+        private Boolean requiresParentStrategy;
+        private Boolean supportedByJoyas;
+        private String warning;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
@@ -99,13 +146,28 @@ public class MetricaWalletDto {
         private Double capitalRequiredCopy;
         private Double maxExposureCopy;
 
+        /**
+         * Bucketed simulation PnL maps returned by ms-metrica-cuenta.
+         * Examples: 1d, 1w, 2w, 1mo. Net includes fees/friction and is the
+         * source of truth for runtime copy guard decisions.
+         */
+        private Map<String, Double> pnlCopy;
+        private Map<String, Double> pnlCopyGross;
+        private Map<String, Double> pnlCopyNet;
+
         private Double pnlCopyDayUSDT;
         private Double pnlCopyWeekUSDT;
         private Double pnlCopyMonthUSDT;
         private Double pnlCopyTotalUSDT;
 
+        private Double pnlCopyTotalGrossUSDT;
+        private Double pnlCopyTotalNetUSDT;
         private Double roiAnnualizedCopy;
+        private Double roiAnnualizedCopyGross;
+        private Double roiAnnualizedCopyNet;
         private CopySizingDto copySizing;
+        private CopySimulationCoverageDto copySimulationCoverage;
+        private Map<String, Object> liveExposure;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
@@ -338,6 +400,29 @@ public class MetricaWalletDto {
         private Double appliedScalePct;
         private Double realizedPeakMarginUSDT;
         private Double realizedMaxExposureUSDT;
+        private Integer sourceFacts;
+        private Integer loadedFacts;
+        private Integer excludedFacts;
+        private CopySimulationCoverageDto simulationCoverage;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class CopySimulationCoverageDto {
+        private String coverageBasis;
+        private Integer metricOperationCount;
+        private Integer loadedFacts;
+        private Integer simulatedFacts;
+        private Integer rawSimulatedFacts;
+        private Integer excludedFacts;
+        private Double coveragePct;
+        private Boolean isComplete;
+        private List<String> exclusionReasons;
+        private String reconciliationStatus;
+        private Integer reconciliationDelta;
+        private Integer reconciliationDeltaAbs;
+        private Double reconciliationPct;
+        private List<String> reconciliationReasons;
     }
 }
 
