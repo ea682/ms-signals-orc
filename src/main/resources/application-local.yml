@@ -10,7 +10,7 @@ spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=futuros_operaciones}
     username: ${DB_USER:postgres}
-    password: ${DB_PASSWORD:5450940}
+    password: ${DB_PASSWORD:postgres}
 
   flyway:
     enabled: ${SPRING_FLYWAY_ENABLED:false}
@@ -35,3 +35,9 @@ engine:
 hyperliquid:
   direct-ingest:
     distributed-dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DISTRIBUTED_DEDUPE_ENABLED:false}
+
+metric:
+  outbox:
+    enabled: ${METRIC_OUTBOX_ENABLED:false}
+    publisher:
+      enabled: ${METRIC_OUTBOX_PUBLISHER_ENABLED:false}

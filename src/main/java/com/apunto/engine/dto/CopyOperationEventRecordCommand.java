@@ -15,6 +15,13 @@ import java.util.UUID;
 @AllArgsConstructor
 public class CopyOperationEventRecordCommand {
     private UUID idOperation;
+    private Long userCopyAllocationId;
+    private String copyStrategyCode;
+    private String executionMode;
+    private Boolean shadow;
+    private String decision;
+    private String decisionReason;
+    private String sourceMovementKey;
     private String idOrderOrigin;
     private String idUser;
     private String idWalletOrigin;

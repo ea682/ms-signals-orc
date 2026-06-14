@@ -18,6 +18,7 @@ import java.util.UUID;
 public class CopyMinNotionalPolicyResolver {
 
     private final UserCopyAllocationService userCopyAllocationService;
+    private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
 
     public CopyMinNotionalPolicy resolve(UserDetailDto userDetail,
                                          String walletId,
@@ -32,7 +33,9 @@ public class CopyMinNotionalPolicyResolver {
         }
 
         final DetailUserEntity detail = userDetail.getDetail();
-        final Optional<UserCopyAllocationEntity> allocationOpt = userCopyAllocationService.findActiveAllocation(userId, walletId);
+        final String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(walletMetric);
+        final Optional<UserCopyAllocationEntity> allocationOpt = userCopyAllocationService.findActiveAllocation(userId, walletId, strategyCode)
+                .or(() -> userCopyAllocationService.findActiveAllocation(userId, walletId));
         final UserCopyAllocationEntity allocation = allocationOpt.orElse(null);
 
         final CopyMinNotionalMode detailMode = defaultMode(detail.getCopyMinNotionalMode(), CopyMinNotionalMode.SKIP);

@@ -141,7 +141,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         final String dedupeKey = buildDedupeKey(mappedDelta);
         if (properties.isDedupeEnabled() && recentKeys.asMap().putIfAbsent(dedupeKey, Boolean.TRUE) != null) {
             duplicates.incrementAndGet();
-            meterRegistry.counter("signals.hyperliquid.direct_ingest.duplicates.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
+            incrementDuplicateMetric(mappedDelta.deltaType(), "in_memory");
             log.info("event=hyperliquid.direct_ingest.duplicate dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} reasonCode=movement_already_recorded queueDepth={} {}",
                     dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queueDepth(),
                     CopyLogAdvice.fields("movement_already_recorded", CopyLogAdvice.context(null, null, null, null, queueDepth(), null, null, "direct_ingest_dedupe")));
@@ -151,7 +151,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         boolean distributedAcquired = idempotencyGuard.tryAcquire(mappedDelta, dedupeKey);
         if (!distributedAcquired) {
             duplicates.incrementAndGet();
-            meterRegistry.counter("signals.hyperliquid.direct_ingest.duplicates.total", "deltaType", safeTag(mappedDelta.deltaType()), "scope", "distributed").increment();
+            incrementDuplicateMetric(mappedDelta.deltaType(), "distributed");
             return response(mappedDelta, true);
         }
 
@@ -323,6 +323,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                         "queueCapacity", properties.getQueueCapacity()
                 )
         );
+    }
+
+    private void incrementDuplicateMetric(String deltaType, String scope) {
+        meterRegistry.counter(
+                "signals.hyperliquid.direct_ingest.duplicates.total",
+                "deltaType", safeTag(deltaType),
+                "scope", safeTag(scope)
+        ).increment();
     }
 
     private void registerMetrics() {

@@ -3,6 +3,7 @@ package com.apunto.engine.service.impl;
 import com.apunto.engine.dto.CopyOperationEventRecordCommand;
 import com.apunto.engine.entity.CopyOperationEventEntity;
 import com.apunto.engine.repository.CopyOperationEventRepository;
+import com.apunto.engine.outbox.service.MetricCopyOperationOutboxService;
 import com.apunto.engine.service.CopyOperationEventService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +24,7 @@ import java.util.Objects;
 public class CopyOperationEventServiceImpl implements CopyOperationEventService {
 
     private final CopyOperationEventRepository repository;
+    private final MetricCopyOperationOutboxService metricCopyOperationOutboxService;
 
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -50,6 +52,7 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
         CopyOperationEventEntity entity = toEntity(command);
         try {
             repository.saveAndFlush(entity);
+            metricCopyOperationOutboxService.enqueue(entity);
             log.info("event=copy_operation_event.insert_ok category=audit reasonAlias=ledger_event_recorded friendlyReason=historial_actualizado explanation=se_guardo_el_movimiento_de_la_copia_para_reconstruir_pnl copyImpact=ledger_tracked traceId={} originId={} userId={} wallet={} symbol={} eventType={} copyIntent={} orderId={} clientOrderId={} qtyExecuted={} price={} resultingQty={} realizedPnlUsd={}",
                     safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getIdWalletOrigin()), safe(command.getParsymbol()),
                     safe(command.getEventType()), safe(command.getCopyIntent()), safe(command.getBinanceOrderId()), safe(command.getClientOrderId()),
@@ -85,6 +88,13 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         return CopyOperationEventEntity.builder()
                 .idOperation(command.getIdOperation())
+                .userCopyAllocationId(command.getUserCopyAllocationId())
+                .copyStrategyCode(normalizeStrategy(command.getCopyStrategyCode()))
+                .executionMode(normalizeExecutionMode(command.getExecutionMode()))
+                .shadow(Boolean.TRUE.equals(command.getShadow()))
+                .decision(safeDecision(command.getDecision()))
+                .decisionReason(safeReason(command.getDecisionReason()))
+                .sourceMovementKey(safeReason(command.getSourceMovementKey()))
                 .idOrderOrigin(command.getIdOrderOrigin())
                 .idUser(command.getIdUser())
                 .idWalletOrigin(command.getIdWalletOrigin())
@@ -127,6 +137,29 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
             t = t.getCause();
         }
         return false;
+    }
+
+    private String normalizeExecutionMode(String mode) {
+        if (mode == null || mode.isBlank()) return "LIVE";
+        String normalized = mode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        return "SHADOW".equals(normalized) ? "SHADOW" : "LIVE";
+    }
+
+    private String normalizeStrategy(String strategy) {
+        if (strategy == null || strategy.isBlank()) return null;
+        return strategy.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+    }
+
+    private String safeDecision(String value) {
+        if (!StringUtils.hasText(value)) return null;
+        String normalized = value.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        return normalized.length() > 40 ? normalized.substring(0, 40) : normalized;
+    }
+
+    private String safeReason(String value) {
+        if (!StringUtils.hasText(value)) return null;
+        String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('\"', '\'').trim();
+        return clean.length() > 160 ? clean.substring(0, 160) : clean;
     }
 
     private String safe(String value) {

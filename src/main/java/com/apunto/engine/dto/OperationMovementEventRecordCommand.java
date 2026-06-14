@@ -38,6 +38,16 @@ public class OperationMovementEventRecordCommand {
     private BigDecimal exitPrice;
     private BigDecimal realizedPnlUsd;
     private BigDecimal leverage;
+    private BigDecimal rawNotionalUsd;
+    private BigDecimal positionNotionalUsd;
+    private BigDecimal closedNotionalUsd;
+    private BigDecimal closedMarginUsedUsd;
+    private BigDecimal effectiveCloseQty;
+    private BigDecimal effectiveEntryPrice;
+    private BigDecimal effectiveExitPrice;
+    private BigDecimal effectiveRealizedPnlUsd;
+    private String normalizationStatus;
+    private String normalizationReason;
     private Long walletVersion;
     private Long snapshotVersion;
     private OffsetDateTime sourceTs;
