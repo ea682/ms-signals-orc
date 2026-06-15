@@ -87,6 +87,10 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
                 upper(entity.getEventType()),
                 upper(entity.getDeltaType()),
                 upper(entity.getStatus()),
+                sourceForLog(entity.getSource()),
+                sourceCategory(entity.getSource()),
+                metricEligible(entity.getSource()),
+                metricDecisionUse(entity.getSource()),
                 entity.getEventTime(),
                 entity.getDateCreation(),
                 entity.getPreviousSizeQty(),
@@ -143,6 +147,36 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
         } catch (NoSuchAlgorithmException ex) {
             throw new MetricOutboxHashException("SHA-256 no disponible", ex);
         }
+    }
+
+    private static final String SOURCE_DIRECT_INGEST = "hyperliquid_direct_ingest";
+    private static final String SOURCE_COPY_JOB_INGEST = "copy_job_ingest";
+    private static final String SOURCE_OPERATION_EVENT_INGEST = "operation_event_ingest";
+
+    private boolean metricEligible(String source) {
+        return SOURCE_DIRECT_INGEST.equals(sourceForLog(source));
+    }
+
+    private String metricDecisionUse(String source) {
+        return metricEligible(source) ? "eligible_for_joyas_and_wallet_metrics" : "audit_only_excluded_from_joyas";
+    }
+
+    private String sourceCategory(String source) {
+        String normalized = sourceForLog(source);
+        if (SOURCE_DIRECT_INGEST.equals(normalized)) {
+            return "ORIGINAL_WALLET_DATA";
+        }
+        if (SOURCE_COPY_JOB_INGEST.equals(normalized)) {
+            return "DERIVED_COPY_TRADE";
+        }
+        return "OTHER_AUDIT_SOURCE";
+    }
+
+    private String sourceForLog(String source) {
+        if (!StringUtils.hasText(source)) {
+            return SOURCE_OPERATION_EVENT_INGEST;
+        }
+        return source.trim().toLowerCase(Locale.ROOT);
     }
 
     private String normalizeWallet(String wallet) {
