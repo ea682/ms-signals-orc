@@ -15,6 +15,7 @@ import com.apunto.engine.shared.util.CopyTraceIdUtil;
 import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
 import jakarta.annotation.PostConstruct;
@@ -51,6 +52,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -74,6 +76,8 @@ public class HyperliquidOriginPositionStoreService {
     private final boolean hydrateOpenPositions;
     private final boolean failCopyOnBindError;
     private final boolean skipLateAdjustments;
+    private final int workerCount;
+    private final AtomicBoolean[] workerSlots;
     private final BlockingQueue<PersistTask> queue;
     private final ExecutorService workers;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -83,6 +87,10 @@ public class HyperliquidOriginPositionStoreService {
     private final AtomicLong failed = new AtomicLong(0);
     private final AtomicLong skipped = new AtomicLong(0);
     private final AtomicLong rejected = new AtomicLong(0);
+    private final AtomicLong workerUncaughtFailures = new AtomicLong(0);
+    private final AtomicLong workerRestarts = new AtomicLong(0);
+    private final AtomicLong workerStops = new AtomicLong(0);
+    private final AtomicLong queueHighWaterMark = new AtomicLong(0);
     private final AtomicLong maxQueueDelayMs = new AtomicLong(0);
     private final AtomicInteger recentQueueDelayIndex = new AtomicInteger(0);
     private final long[] recentQueueDelaysMs = new long[1024];
@@ -114,10 +122,16 @@ public class HyperliquidOriginPositionStoreService {
         this.hydrateOpenPositions = hydrateOpenPositions;
         this.failCopyOnBindError = failCopyOnBindError;
         this.skipLateAdjustments = skipLateAdjustments;
+        this.workerCount = Math.max(1, workerThreads);
+        this.workerSlots = new AtomicBoolean[this.workerCount];
+        for (int i = 0; i < this.workerSlots.length; i++) {
+            this.workerSlots[i] = new AtomicBoolean(false);
+        }
         this.queue = new ArrayBlockingQueue<>(Math.max(1, queueCapacity));
-        this.workers = Executors.newFixedThreadPool(Math.max(1, workerThreads), new NamedThreadFactory("hl-origin-store-"));
+        this.workers = Executors.newFixedThreadPool(this.workerCount, new NamedThreadFactory("hl-origin-store-"));
+        registerMetrics();
         log.info("event=hyperliquid.origin_store.config enabled={} workerThreads={} queueCapacity={} hydrateOpenPositions={} failCopyOnBindError={} skipLateAdjustments={}",
-                enabled, Math.max(1, workerThreads), Math.max(1, queueCapacity), hydrateOpenPositions, failCopyOnBindError, skipLateAdjustments);
+                enabled, this.workerCount, Math.max(1, queueCapacity), hydrateOpenPositions, failCopyOnBindError, skipLateAdjustments);
     }
 
     @PostConstruct
@@ -128,11 +142,10 @@ public class HyperliquidOriginPositionStoreService {
         }
         hydrateActivePositionCache();
         running.set(true);
-        int workerCount = Math.max(1, ((java.util.concurrent.ThreadPoolExecutor) workers).getCorePoolSize());
         for (int i = 0; i < workerCount; i++) {
-            workers.execute(this::workerLoop);
+            startWorker(i, "startup");
         }
-        log.info("event=hyperliquid.origin_store.started queueCapacity={} activeCacheSize={}", queue.remainingCapacity() + queue.size(), activeOriginIds.size());
+        log.info("event=hyperliquid.origin_store.started queueCapacity={} expectedWorkers={} activeCacheSize={}", queue.remainingCapacity() + queue.size(), workerCount, activeOriginIds.size());
     }
 
     @Scheduled(fixedDelayString = "${hyperliquid.direct-ingest.origin-store.log-interval-ms:${hyperliquid.direct-ingest.log-interval-ms:10000}}")
@@ -140,10 +153,18 @@ public class HyperliquidOriginPositionStoreService {
         if (!enabled) {
             return;
         }
+        ensureWorkersHealthy("metrics");
         long p95QueueDelayMs = p95RecentQueueDelayMs();
         long maxDelay = maxQueueDelayMs.get();
-        log.info("event=hyperliquid.origin_store.metrics queueDepth={} queueCapacity={} activeWorkers={} submitted={} persisted={} skipped={} failed={} rejected={} activeCacheSize={} p95QueueDelayMs={} maxQueueDelayMs={}",
-                queue.size(), queue.remainingCapacity() + queue.size(), activeWorkers.get(), submitted.get(), persisted.get(), skipped.get(), failed.get(), rejected.get(), activeOriginIds.size(), p95QueueDelayMs, maxDelay);
+        int queueDepth = queue.size();
+        int queueCapacity = queue.remainingCapacity() + queueDepth;
+        long highWaterMark = queueHighWaterMark.get();
+        log.info("event=hyperliquid.origin_store.metrics queueDepth={} queueCapacity={} activeWorkers={} expectedWorkers={} workerRestarts={} workerStops={} workerUncaughtFailures={} submitted={} persisted={} skipped={} failed={} rejected={} activeCacheSize={} p95QueueDelayMs={} maxQueueDelayMs={} queueHighWaterMark={}",
+                queueDepth, queueCapacity, activeWorkers.get(), workerCount, workerRestarts.get(), workerStops.get(), workerUncaughtFailures.get(), submitted.get(), persisted.get(), skipped.get(), failed.get(), rejected.get(), activeOriginIds.size(), p95QueueDelayMs, maxDelay, highWaterMark);
+        if (queueCapacity > 0 && queueDepth >= Math.max(1, (int) (queueCapacity * 0.80d))) {
+            log.warn("event=hyperliquid.origin_store.queue_pressure reasonCode=origin_store_queue_pressure queueDepth={} queueCapacity={} activeWorkers={} expectedWorkers={} p95QueueDelayMs={} maxQueueDelayMs={} rejected={} action=scale_workers_or_reduce_blocking_io",
+                    queueDepth, queueCapacity, activeWorkers.get(), workerCount, p95QueueDelayMs, maxDelay, rejected.get());
+        }
     }
 
     @PreDestroy
@@ -202,6 +223,8 @@ public class HyperliquidOriginPositionStoreService {
             return;
         }
         submitted.incrementAndGet();
+        recordQueueHighWater(queue.size());
+        ensureWorkersHealthy("submit_after_copy");
         meterRegistry.counter("signals.hyperliquid.origin_store.submitted.total", "deltaType", safeTag(mapped.deltaType())).increment();
     }
 
@@ -316,17 +339,96 @@ public class HyperliquidOriginPositionStoreService {
         return true;
     }
 
-    private void workerLoop() {
+    private void startWorker(int workerIndex, String reason) {
+        if (!enabled || !running.get()) {
+            return;
+        }
+        if (workerIndex < 0 || workerIndex >= workerSlots.length) {
+            return;
+        }
+        AtomicBoolean slot = workerSlots[workerIndex];
+        if (!slot.compareAndSet(false, true)) {
+            return;
+        }
+        if (!"startup".equals(reason)) {
+            workerRestarts.incrementAndGet();
+        }
+        try {
+            workers.execute(() -> workerLoop(workerIndex, reason));
+        } catch (RuntimeException ex) {
+            slot.set(false);
+            log.error("event=hyperliquid.origin_store.worker_start_failed reasonCode=origin_store_worker_start_failed workerIndex={} reason={} errClass={} errMsg=\"{}\" queueDepth={} activeWorkers={}",
+                    workerIndex, safeLog(reason), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), queue.size(), activeWorkers.get(), ex);
+        }
+    }
+
+    private void ensureWorkersHealthy(String reason) {
+        if (!enabled || !running.get()) {
+            return;
+        }
+        for (int i = 0; i < workerSlots.length; i++) {
+            if (!workerSlots[i].get()) {
+                log.warn("event=hyperliquid.origin_store.worker_missing reasonCode=origin_store_worker_missing workerIndex={} reason={} queueDepth={} activeWorkers={} expectedWorkers={} action=restart_worker",
+                        i, safeLog(reason), queue.size(), activeWorkers.get(), workerCount);
+                startWorker(i, reason);
+            }
+        }
+    }
+
+    private void workerLoop(int workerIndex, String startReason) {
         activeWorkers.incrementAndGet();
+        log.info("event=hyperliquid.origin_store.worker_started workerIndex={} startReason={} queueDepth={} activeWorkers={} expectedWorkers={}",
+                workerIndex, safeLog(startReason), queue.size(), activeWorkers.get(), workerCount);
         try {
             while (running.get() || !queue.isEmpty()) {
-                PersistTask task = queue.take();
-                process(task);
+                PersistTask task = queue.poll(250, TimeUnit.MILLISECONDS);
+                if (task != null) {
+                    processSafely(task, workerIndex);
+                }
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
+            log.info("event=hyperliquid.origin_store.worker_interrupted workerIndex={} queueDepth={} activeWorkers={}",
+                    workerIndex, queue.size(), activeWorkers.get());
         } finally {
-            activeWorkers.decrementAndGet();
+            workerStops.incrementAndGet();
+            int remainingWorkers = activeWorkers.decrementAndGet();
+            workerSlots[workerIndex].set(false);
+            log.warn("event=hyperliquid.origin_store.worker_stopped workerIndex={} queueDepth={} activeWorkers={} expectedWorkers={} running={}",
+                    workerIndex, queue.size(), remainingWorkers, workerCount, running.get());
+        }
+    }
+
+    private void processSafely(PersistTask task, int workerIndex) {
+        try {
+            process(task);
+        } catch (Throwable ex) {
+            failed.incrementAndGet();
+            workerUncaughtFailures.incrementAndGet();
+            HyperliquidMappedDelta mapped = task == null ? null : task.mappedDelta();
+            String deltaType = mapped == null ? null : mapped.deltaType();
+            meterRegistry.counter("signals.hyperliquid.origin_store.worker_uncaught.total", "deltaType", safeTag(deltaType)).increment();
+            log.error("event=hyperliquid.origin_store.worker_uncaught reasonCode=origin_store_worker_uncaught workerIndex={} originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDepth={} activeWorkers={} expectedWorkers={} action=keep_worker_alive",
+                    workerIndex,
+                    originId(mapped),
+                    mapped == null ? "NA" : safeLog(mapped.idempotencyKey()),
+                    mapped == null ? "NA" : safeLog(mapped.positionKey()),
+                    mapped == null ? "NA" : safeLog(mapped.wallet()),
+                    mapped == null ? "NA" : safeLog(mapped.symbol()),
+                    mapped == null ? "NA" : safeLog(mapped.side()),
+                    mapped == null ? "NA" : safeLog(mapped.deltaType()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()),
+                    queue.size(),
+                    activeWorkers.get(),
+                    workerCount,
+                    ex);
+            if (ex instanceof VirtualMachineError) {
+                throw (VirtualMachineError) ex;
+            }
+            if (ex instanceof ThreadDeath) {
+                throw (ThreadDeath) ex;
+            }
         }
     }
 
@@ -415,6 +517,45 @@ public class HyperliquidOriginPositionStoreService {
         }
     }
 
+
+    private void registerMetrics() {
+        Gauge.builder("signals.hyperliquid.origin_store.queue.depth", queue, BlockingQueue::size)
+                .description("Hyperliquid origin store queue depth")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.queue.high_water_mark", queueHighWaterMark, AtomicLong::get)
+                .description("Hyperliquid origin store queue high-water mark")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.workers.active", activeWorkers, AtomicInteger::get)
+                .description("Hyperliquid origin store active worker loops")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.workers.expected", this, svc -> svc.workerCount)
+                .description("Hyperliquid origin store expected worker loops")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.workers.uncaught_failures", workerUncaughtFailures, AtomicLong::get)
+                .description("Hyperliquid origin store uncaught worker failures")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.workers.restarts", workerRestarts, AtomicLong::get)
+                .description("Hyperliquid origin store self-healed worker restarts")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.submitted.total.gauge", submitted, AtomicLong::get)
+                .description("Hyperliquid origin store submitted counter gauge")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.persisted.total.gauge", persisted, AtomicLong::get)
+                .description("Hyperliquid origin store persisted counter gauge")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.failed.total.gauge", failed, AtomicLong::get)
+                .description("Hyperliquid origin store failed counter gauge")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.origin_store.rejected.total.gauge", rejected, AtomicLong::get)
+                .description("Hyperliquid origin store rejected counter gauge")
+                .register(meterRegistry);
+    }
+
+    private void recordQueueHighWater(int depth) {
+        if (depth > 0) {
+            queueHighWaterMark.accumulateAndGet(depth, Math::max);
+        }
+    }
 
     private void recordQueueDelay(long queueDelayMs) {
         if (queueDelayMs < 0) {
