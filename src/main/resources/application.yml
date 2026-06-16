@@ -119,8 +119,8 @@ copy:
       filter-by-wallet-allocation: ${COPY_JOB_INGEST_FILTER_BY_WALLET_ALLOCATION:true}
       fallback-all-users-on-empty-allocation: ${COPY_JOB_INGEST_FALLBACK_ALL_USERS_ON_EMPTY_ALLOCATION:false}
     worker:
-      pool-size: ${COPY_JOB_WORKER_POOL_SIZE:24}
-      queue: ${COPY_JOB_WORKER_QUEUE:5000}
+      pool-size: ${COPY_JOB_WORKER_POOL_SIZE:32}
+      queue: ${COPY_JOB_WORKER_QUEUE:50000}
       max-batch: ${COPY_JOB_WORKER_MAX_BATCH:500}
       poll-ms: ${COPY_JOB_WORKER_POLL_MS:50}
       max-attempts: ${COPY_JOB_WORKER_MAX_ATTEMPTS:12}
@@ -132,15 +132,15 @@ copy:
 operation:
   movement-ledger:
     enabled: ${OPERATION_MOVEMENT_LEDGER_ENABLED:true}
-    worker-threads: ${OPERATION_MOVEMENT_LEDGER_WORKER_THREADS:2}
-    queue-capacity: ${OPERATION_MOVEMENT_LEDGER_QUEUE_CAPACITY:20000}
+    worker-threads: ${OPERATION_MOVEMENT_LEDGER_WORKER_THREADS:8}
+    queue-capacity: ${OPERATION_MOVEMENT_LEDGER_QUEUE_CAPACITY:100000}
   job:
     ingest:
       filter-by-wallet-allocation: ${COPY_JOB_INGEST_FILTER_BY_WALLET_ALLOCATION:true}
       fallback-all-users-on-empty-allocation: ${COPY_JOB_INGEST_FALLBACK_ALL_USERS_ON_EMPTY_ALLOCATION:false}
     worker:
-      pool-size: ${COPY_JOB_WORKER_POOL_SIZE:24}
-      queue: ${COPY_JOB_WORKER_QUEUE:5000}
+      pool-size: ${COPY_JOB_WORKER_POOL_SIZE:32}
+      queue: ${COPY_JOB_WORKER_QUEUE:50000}
       max-batch: ${COPY_JOB_WORKER_MAX_BATCH:500}
       poll-ms: ${COPY_JOB_WORKER_POLL_MS:50}
       max-attempts: ${COPY_JOB_WORKER_MAX_ATTEMPTS:12}
@@ -211,8 +211,8 @@ futures:
 hyperliquid:
   direct-ingest:
     enabled: ${HYPERLIQUID_DIRECT_INGEST_ENABLED:true}
-    queue-capacity: ${HYPERLIQUID_DIRECT_INGEST_QUEUE_CAPACITY:20000}
-    worker-threads: ${HYPERLIQUID_DIRECT_INGEST_WORKER_THREADS:4}
+    queue-capacity: ${HYPERLIQUID_DIRECT_INGEST_QUEUE_CAPACITY:100000}
+    worker-threads: ${HYPERLIQUID_DIRECT_INGEST_WORKER_THREADS:8}
     reject-when-disabled: ${HYPERLIQUID_DIRECT_INGEST_REJECT_WHEN_DISABLED:true}
     dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_ENABLED:true}
     dedupe-ttl-seconds: ${HYPERLIQUID_DIRECT_INGEST_DEDUPE_TTL_SECONDS:30}
@@ -223,16 +223,16 @@ hyperliquid:
     fallback-db-on-direct-failure: ${HYPERLIQUID_DIRECT_INGEST_FALLBACK_DB_ON_DIRECT_FAILURE:true}
     origin-store:
       enabled: ${HYPERLIQUID_ORIGIN_STORE_ENABLED:true}
-      worker-threads: ${HYPERLIQUID_ORIGIN_STORE_WORKER_THREADS:2}
-      queue-capacity: ${HYPERLIQUID_ORIGIN_STORE_QUEUE_CAPACITY:20000}
+      worker-threads: ${HYPERLIQUID_ORIGIN_STORE_WORKER_THREADS:8}
+      queue-capacity: ${HYPERLIQUID_ORIGIN_STORE_QUEUE_CAPACITY:100000}
       hydrate-open-positions: ${HYPERLIQUID_ORIGIN_STORE_HYDRATE_OPEN_POSITIONS:true}
       fail-copy-on-bind-error: ${HYPERLIQUID_ORIGIN_STORE_FAIL_COPY_ON_BIND_ERROR:false}
       skip-late-adjustments: ${HYPERLIQUID_ORIGIN_STORE_SKIP_LATE_ADJUSTMENTS:true}
       binance-price-enabled: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_ENABLED:true}
       binance-price-base-url: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_BASE_URL:https://fapi.binance.com}
-      binance-price-timeout-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_TIMEOUT_MS:1000}
-      binance-price-cache-ttl-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_TTL_MS:750}
-      binance-price-cache-size: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_SIZE:2048}
+      binance-price-timeout-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_TIMEOUT_MS:300}
+      binance-price-cache-ttl-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_TTL_MS:5000}
+      binance-price-cache-size: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_SIZE:8192}
       binance-price-miss-cache-ttl-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_MISS_CACHE_TTL_MS:60000}
       binance-price-miss-cache-size: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_MISS_CACHE_SIZE:4096}
 
@@ -247,8 +247,8 @@ metric:
       enabled: ${METRIC_COPY_EVENT_OUTBOX_ENABLED:${METRIC_OUTBOX_ENABLED:false}}
     publisher:
       enabled: ${METRIC_OUTBOX_PUBLISHER_ENABLED:false}
-      poll-ms: ${METRIC_OUTBOX_PUBLISHER_POLL_MS:1000}
-      batch-size: ${METRIC_OUTBOX_PUBLISHER_BATCH_SIZE:200}
+      poll-ms: ${METRIC_OUTBOX_PUBLISHER_POLL_MS:500}
+      batch-size: ${METRIC_OUTBOX_PUBLISHER_BATCH_SIZE:500}
       publish-timeout-ms: ${METRIC_OUTBOX_PUBLISH_TIMEOUT_MS:5000}
       lock-timeout-ms: ${METRIC_OUTBOX_LOCK_TIMEOUT_MS:60000}
       instance-id: ${METRIC_OUTBOX_INSTANCE_ID:${spring.application.name}}

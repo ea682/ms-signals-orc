@@ -94,10 +94,17 @@ public class BinanceFuturesPriceNormalizerService {
         if (!enabled) {
             return Optional.empty();
         }
-        Optional<BinanceFuturesSymbolCatalog.SymbolResolution> symbolResolution = symbolCatalog.resolve(symbol);
+        Optional<BinanceFuturesSymbolCatalog.SymbolResolution> symbolResolution;
+        try {
+            symbolResolution = symbolCatalog.resolve(symbol);
+        } catch (RuntimeException ex) {
+            log.warn("event=hyperliquid.origin_store.binance_price.skipped symbol={} reasonCode=binance_symbol_catalog_unavailable cacheSize={} copyImpact=origin_metrics_only action=continue_without_binance_price errClass={} errMsg=\"{}\"",
+                    safeLog(symbol), safeCachedSymbols(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            return Optional.empty();
+        }
         if (symbolResolution.isEmpty()) {
             log.debug("event=hyperliquid.origin_store.binance_price.skipped symbol={} reasonCode=binance_symbol_unsupported cacheSize={} humanMessage=no_encontre_un_contrato_binance_equivalente_pero_guardare_la_posicion_original_igual",
-                    safeLog(symbol), symbolCatalog.cachedSymbols());
+                    safeLog(symbol), safeCachedSymbols());
             return Optional.empty();
         }
 
@@ -127,6 +134,14 @@ public class BinanceFuturesPriceNormalizerService {
         missCache.put(canonical, Boolean.TRUE);
         missCache.put(cacheKey, Boolean.TRUE);
         return Optional.empty();
+    }
+
+    private int safeCachedSymbols() {
+        try {
+            return symbolCatalog.cachedSymbols();
+        } catch (RuntimeException ex) {
+            return -1;
+        }
     }
 
     private Optional<BinancePriceReference> fetch(String canonicalSymbol, String rawSymbol, BigDecimal contractMultiplier) {

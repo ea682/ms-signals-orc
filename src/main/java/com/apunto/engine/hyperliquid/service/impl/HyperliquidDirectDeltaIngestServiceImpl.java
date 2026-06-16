@@ -52,6 +52,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final MeterRegistry meterRegistry;
     private final int laneCount;
     private final BlockingQueue<QueuedDelta>[] lanes;
+    private final AtomicBoolean[] laneWorkerSlots;
     private final ExecutorService workers;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicInteger activeWorkers = new AtomicInteger(0);
@@ -59,6 +60,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final AtomicLong processed = new AtomicLong(0);
     private final AtomicLong failed = new AtomicLong(0);
     private final AtomicLong duplicates = new AtomicLong(0);
+    private final AtomicLong workerUncaughtFailures = new AtomicLong(0);
+    private final AtomicLong workerRestarts = new AtomicLong(0);
+    private final AtomicLong workerStops = new AtomicLong(0);
+    private final AtomicLong queueHighWaterMark = new AtomicLong(0);
     private final Cache<String, Boolean> recentKeys;
 
     public HyperliquidDirectDeltaIngestServiceImpl(
@@ -78,8 +83,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         this.laneCount = Math.max(1, properties.getWorkerThreads());
         int perLaneCapacity = Math.max(1, (Math.max(1, properties.getQueueCapacity()) + laneCount - 1) / laneCount);
         this.lanes = new BlockingQueue[laneCount];
+        this.laneWorkerSlots = new AtomicBoolean[laneCount];
         for (int i = 0; i < laneCount; i++) {
             this.lanes[i] = new ArrayBlockingQueue<>(perLaneCapacity);
+            this.laneWorkerSlots[i] = new AtomicBoolean(false);
         }
         this.workers = Executors.newFixedThreadPool(
                 laneCount,
@@ -101,8 +108,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         }
         running.set(true);
         for (int i = 0; i < laneCount; i++) {
-            final BlockingQueue<QueuedDelta> lane = lanes[i];
-            workers.execute(() -> workerLoop(lane));
+            startWorker(i, "startup");
         }
         log.info("event=hyperliquid.direct_ingest.started queueCapacity={} workerThreads={} dedupeEnabled={} dedupeTtlSeconds={} distributedDedupeEnabled={} dedupeLeaseTtlMs={} failOpenOnDedupeError={} humanMessage=direct_ingest_listo_con_idempotencia_para_varias_instancias",
                 properties.getQueueCapacity(), properties.getWorkerThreads(), properties.isDedupeEnabled(), properties.getDedupeTtlSeconds(),
@@ -122,8 +128,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         if (!properties.isEnabled()) {
             return;
         }
-        log.info("event=hyperliquid.direct_ingest.metrics queueDepth={} queueCapacity={} activeWorkers={} accepted={} processed={} failed={} duplicates={}",
-                queueDepth(), properties.getQueueCapacity(), activeWorkers.get(), accepted.get(), processed.get(), failed.get(), duplicates.get());
+        ensureWorkersHealthy("metrics");
+        int queueDepth = queueDepth();
+        log.info("event=hyperliquid.direct_ingest.metrics queueDepth={} queueCapacity={} activeWorkers={} expectedWorkers={} workerRestarts={} workerStops={} workerUncaughtFailures={} accepted={} processed={} failed={} duplicates={} queueHighWaterMark={}",
+                queueDepth, properties.getQueueCapacity(), activeWorkers.get(), laneCount, workerRestarts.get(), workerStops.get(), workerUncaughtFailures.get(), accepted.get(), processed.get(), failed.get(), duplicates.get(), queueHighWaterMark.get());
+        if (properties.getQueueCapacity() > 0 && queueDepth >= Math.max(1, (int) (properties.getQueueCapacity() * 0.80d))) {
+            log.warn("event=hyperliquid.direct_ingest.queue_pressure reasonCode=direct_ingest_queue_pressure queueDepth={} queueCapacity={} activeWorkers={} expectedWorkers={} failed={} duplicates={} action=scale_workers_or_check_downstream",
+                    queueDepth, properties.getQueueCapacity(), activeWorkers.get(), laneCount, failed.get(), duplicates.get());
+        }
     }
 
     @Override
@@ -167,6 +179,8 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         }
 
         accepted.incrementAndGet();
+        recordQueueHighWater(queueDepth());
+        ensureWorkersHealthy("accept");
         meterRegistry.counter("signals.hyperliquid.direct_ingest.accepted.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
         log.debug("event=hyperliquid.direct_ingest.accepted dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} queueDepth={}",
                 dedupeKey, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), queueDepth());
@@ -223,19 +237,104 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         return value.stripTrailingZeros().toPlainString();
     }
 
-    private void workerLoop(BlockingQueue<QueuedDelta> lane) {
+    private void startWorker(int laneIndex, String reason) {
+        if (!properties.isEnabled() || !running.get()) {
+            return;
+        }
+        if (laneIndex < 0 || laneIndex >= laneWorkerSlots.length) {
+            return;
+        }
+        AtomicBoolean slot = laneWorkerSlots[laneIndex];
+        if (!slot.compareAndSet(false, true)) {
+            return;
+        }
+        if (!"startup".equals(reason)) {
+            workerRestarts.incrementAndGet();
+        }
+        try {
+            BlockingQueue<QueuedDelta> lane = lanes[laneIndex];
+            workers.execute(() -> workerLoop(laneIndex, lane, reason));
+        } catch (RuntimeException ex) {
+            slot.set(false);
+            log.error("event=hyperliquid.direct_ingest.worker_start_failed reasonCode=direct_ingest_worker_start_failed laneIndex={} reason={} errClass={} errMsg=\"{}\" queueDepth={} activeWorkers={}",
+                    laneIndex, safeLog(reason), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), queueDepth(), activeWorkers.get(), ex);
+        }
+    }
+
+    private void ensureWorkersHealthy(String reason) {
+        if (!properties.isEnabled() || !running.get()) {
+            return;
+        }
+        for (int i = 0; i < laneWorkerSlots.length; i++) {
+            if (!laneWorkerSlots[i].get()) {
+                log.warn("event=hyperliquid.direct_ingest.worker_missing reasonCode=direct_ingest_worker_missing laneIndex={} reason={} queueDepth={} activeWorkers={} expectedWorkers={} action=restart_worker",
+                        i, safeLog(reason), queueDepth(), activeWorkers.get(), laneCount);
+                startWorker(i, reason);
+            }
+        }
+    }
+
+    private void workerLoop(int laneIndex, BlockingQueue<QueuedDelta> lane, String startReason) {
         activeWorkers.incrementAndGet();
+        log.info("event=hyperliquid.direct_ingest.worker_started laneIndex={} startReason={} queueDepth={} activeWorkers={} expectedWorkers={}",
+                laneIndex, safeLog(startReason), queueDepth(), activeWorkers.get(), laneCount);
         try {
             while (running.get() || !lane.isEmpty()) {
                 QueuedDelta task = lane.poll(250, TimeUnit.MILLISECONDS);
                 if (task != null) {
-                    process(task);
+                    processSafely(task, laneIndex);
                 }
             }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
+            log.info("event=hyperliquid.direct_ingest.worker_interrupted laneIndex={} queueDepth={} activeWorkers={}",
+                    laneIndex, queueDepth(), activeWorkers.get());
         } finally {
-            activeWorkers.decrementAndGet();
+            workerStops.incrementAndGet();
+            int remainingWorkers = activeWorkers.decrementAndGet();
+            laneWorkerSlots[laneIndex].set(false);
+            log.warn("event=hyperliquid.direct_ingest.worker_stopped laneIndex={} queueDepth={} activeWorkers={} expectedWorkers={} running={}",
+                    laneIndex, queueDepth(), remainingWorkers, laneCount, running.get());
+        }
+    }
+
+    private void processSafely(QueuedDelta task, int laneIndex) {
+        try {
+            process(task);
+        } catch (Throwable ex) {
+            failed.incrementAndGet();
+            workerUncaughtFailures.incrementAndGet();
+            HyperliquidMappedDelta mapped = task == null ? null : task.mappedDelta();
+            try {
+                if (mapped != null) {
+                    idempotencyGuard.markFailed(mapped, "direct_ingest_worker_uncaught", ex);
+                }
+            } catch (RuntimeException markFailedEx) {
+                log.warn("event=hyperliquid.direct_ingest.mark_failed_after_uncaught_failed laneIndex={} errClass={} errMsg=\"{}\"",
+                        laneIndex, markFailedEx.getClass().getSimpleName(), safeLog(markFailedEx.getMessage()));
+            }
+            meterRegistry.counter("signals.hyperliquid.direct_ingest.worker_uncaught.total", "deltaType", safeTag(mapped == null ? null : mapped.deltaType())).increment();
+            log.error("event=hyperliquid.direct_ingest.worker_uncaught reasonCode=direct_ingest_worker_uncaught laneIndex={} dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDepth={} activeWorkers={} expectedWorkers={} action=keep_worker_alive",
+                    laneIndex,
+                    task == null ? "NA" : safeLog(task.dedupeKey()),
+                    mapped == null ? "NA" : safeLog(mapped.idempotencyKey()),
+                    mapped == null ? "NA" : safeLog(mapped.positionKey()),
+                    mapped == null ? "NA" : safeLog(mapped.wallet()),
+                    mapped == null ? "NA" : safeLog(mapped.symbol()),
+                    mapped == null ? "NA" : safeLog(mapped.side()),
+                    mapped == null ? "NA" : safeLog(mapped.deltaType()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()),
+                    queueDepth(),
+                    activeWorkers.get(),
+                    laneCount,
+                    ex);
+            if (ex instanceof VirtualMachineError) {
+                throw (VirtualMachineError) ex;
+            }
+            if (ex instanceof ThreadDeath) {
+                throw (ThreadDeath) ex;
+            }
         }
     }
 
@@ -349,6 +448,21 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         Gauge.builder("signals.hyperliquid.direct_ingest.failed.total.gauge", failed, a -> a.get())
                 .description("Hyperliquid direct ingest failed counter gauge")
                 .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.direct_ingest.queue.high_water_mark", queueHighWaterMark, AtomicLong::get)
+                .description("Hyperliquid direct ingest queue high-water mark")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.direct_ingest.workers.uncaught_failures", workerUncaughtFailures, AtomicLong::get)
+                .description("Hyperliquid direct ingest uncaught worker failures")
+                .register(meterRegistry);
+        Gauge.builder("signals.hyperliquid.direct_ingest.workers.restarts", workerRestarts, AtomicLong::get)
+                .description("Hyperliquid direct ingest self-healed worker restarts")
+                .register(meterRegistry);
+    }
+
+    private void recordQueueHighWater(int depth) {
+        if (depth > 0) {
+            queueHighWaterMark.accumulateAndGet(depth, Math::max);
+        }
     }
 
 
