@@ -147,6 +147,7 @@ operation:
 
 engine:
   copy:
+    allocation-scoped-runtime: ${ENGINE_COPY_ALLOCATION_SCOPED_RUNTIME:true}
     lock:
       provider: ${ENGINE_COPY_LOCK_PROVIDER:local}
     execution-job-worker:

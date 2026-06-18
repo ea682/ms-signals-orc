@@ -22,6 +22,10 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndTypeOperation(String idOrderOrigin, String idUser, String typeOperation);
 
+    Optional<CopyOperationEntity> findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(Long userCopyAllocationId, String idOrderOrigin, String typeOperation);
+
+    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperation(String idOrderOrigin, String idUser, String copyStrategyCode, String typeOperation);
+
     boolean existsByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
 
     Optional<CopyOperationEntity> findByIdOrden(String idOrden);
@@ -29,6 +33,8 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
     List<CopyOperationEntity> findAllByIdOrden(String idOrden);
 
     List<CopyOperationEntity> findAllByIdUserAndIdWalletOriginAndActiveTrue(String idUser, String walletId);
+
+    List<CopyOperationEntity> findAllByIdOrderOriginAndIdUserAndActiveTrue(String idOrderOrigin, String idUser);
 
     List<CopyOperationEntity> findAllByActiveTrue();
 
@@ -72,6 +78,29 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
             @Param("sizePar") BigDecimal sizePar
     );
 
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            UPDATE CopyOperationEntity c
+            SET c.priceClose = :priceClose,
+                c.dateClose = :dateClose,
+                c.siseUsd = :sizeUsd,
+                c.sizePar = :sizePar,
+                c.active = false
+            WHERE c.idOrderOrigin = :idOrderOrigin
+              AND c.idUser = :idUser
+              AND c.userCopyAllocationId = :allocationId
+              AND c.active = true
+            """)
+    int closeActiveByOriginUserAndAllocation(
+            @Param("idOrderOrigin") String idOrderOrigin,
+            @Param("idUser") String idUser,
+            @Param("allocationId") Long allocationId,
+            @Param("priceClose") BigDecimal priceClose,
+            @Param("dateClose") OffsetDateTime dateClose,
+            @Param("sizeUsd") BigDecimal sizeUsd,
+            @Param("sizePar") BigDecimal sizePar
+    );
+
     @Query(value = """
             SELECT COALESCE(SUM((size_usd / NULLIF(leverage, 0)) * (1 + :safety)), 0)
             FROM futuros_operaciones.copy_operation
@@ -83,4 +112,3 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
                                                  @Param("walletId") String walletId,
                                                  @Param("safety") java.math.BigDecimal safety);
 }
-

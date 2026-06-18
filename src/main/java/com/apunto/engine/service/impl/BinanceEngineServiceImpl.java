@@ -214,6 +214,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     @Value("${engine.copy.flip.close-previous-when-new-open-blocked:true}")
     private boolean closePreviousSideWhenFlipOpenBlocked;
 
+    @Value("${engine.copy.allocation-scoped-runtime:true}")
+    private boolean allocationScopedRuntime;
+
     @Value("${engine.copy.rebalance.skip-small-increase:true}")
     private boolean skipSmallRebalanceIncrease;
 
@@ -276,8 +279,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         for (UserDetailDto userDetail : usersDetail) {
             final String userId = userDetail.getUser().getId().toString();
             if (alreadyCopiedUsers.contains(userId) && !reconcileOnOpen) {
-                log.info(LOG_OPEN_SKIP_ALREADY, originId, userId);
-                continue;
+                log.info("event=operation.open.already_processed action=allocation_dedupe_required originId={} userId={}", originId, userId);
             }
             if (alreadyCopiedUsers.contains(userId)) {
                 log.info("event=operation.open.already_processed action=reconcile_allowed originId={} userId={}", originId, userId);
@@ -393,12 +395,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             reconcileWalletBasketForUser(event, userDetail);
         } else if (reconcileOnOpen) {
             final long existingNs = System.nanoTime();
-            final CopyOperationDto existingCopy = copyOperationService.findOperationForUser(originId, userId.toString());
+            final List<CopyOperationDto> existingCopies = copyOperationService.findActiveOperationsForUserOrigin(originId, userId.toString());
             log.info("event=copy.job.phase action=OPEN phase=load_existing_copy originId={} userId={} elapsedMs={}",
                     originId, userId, elapsedMsSince(existingNs));
-            if (existingCopy != null && existingCopy.isActive()) {
-                log.info("event=copy.open.trigger_scoped action=reconcile_existing_copy originId={} userId={} symbol={} copyId={}",
-                        originId, userId, originOperation.getParSymbol(), existingCopy.getIdOperation());
+            if (!existingCopies.isEmpty()) {
+                log.info("event=copy.open.trigger_scoped action=reconcile_existing_copy originId={} userId={} symbol={} copies={}",
+                        originId, userId, originOperation.getParSymbol(), existingCopies.size());
                 reconcileWalletBasketForUser(event, userDetail);
             } else {
                 executeDirectOpenForUser(event, userDetail);
@@ -449,7 +451,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final String lockKey = distLockKey(userId, walletId);
+        final String lockKey = distLockKey(userId, walletId, originOperation.getParSymbol());
 
         log.info(
                 "event=copy_open_lock_wait traceId={} originId={} userId={} wallet={} symbol={} lockKey=\"{}\"",
@@ -471,6 +473,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     symbol,
                     lockKey
             );
+
+            if (allocationScopedCopyRuntimeEnabled()) {
+                return executeDirectOpenForUserByAllocation(event, userDetail, originOperation, originId, userId, walletId, symbol, traceId);
+            }
 
             if (activeCopyOperationCache.isKnown(originId, userId)) {
                 CopyOperationDto runtimeCopy = activeCopyOperationCache.activeOperation(originId, userId);
@@ -703,6 +709,189 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         });
     }
 
+    private Void executeDirectOpenForUserByAllocation(OperacionEvent event,
+                                                       UserDetailDto userDetail,
+                                                       OperacionDto originOperation,
+                                                       String originId,
+                                                       String userId,
+                                                       String walletId,
+                                                       String symbol,
+                                                       String traceId) {
+        final List<AllocationCopyContext> contexts = resolveAllocationContexts(event, userDetail, CopyJobAction.OPEN);
+        if (contexts.isEmpty()) {
+            log.info("event=copy_open_skipped reasonCode=strategy_not_applicable traceId={} originId={} userId={} wallet={} symbol={} reason=no_applicable_allocation",
+                    traceId, originId, userId, walletId, symbol);
+            return null;
+        }
+
+        int created = 0;
+        int skipped = 0;
+        final String typeOperation = originOperation.getTipoOperacion() == null ? null : originOperation.getTipoOperacion().name();
+
+        for (AllocationCopyContext context : contexts) {
+            final UserCopyAllocationEntity allocation = context.allocation();
+            final MetricaWalletDto walletMetric = context.metric();
+            final Long allocationId = allocation == null ? null : allocation.getId();
+            final String strategyCode = allocation == null ? copyStrategyRuntimeRouter.strategyCodeOf(walletMetric) : allocation.getCopyStrategyCode();
+            final String allocationTraceId = activeCopyOperationCache.traceId(originId, userId, walletId, originOperation.getParSymbol(), allocationId, strategyCode);
+
+            if (activeCopyOperationCache.isKnown(originId, userId, allocationId, strategyCode, originOperation.getParSymbol(), typeOperation)) {
+                CopyOperationDto runtimeCopy = activeCopyOperationCache.activeOperation(originId, userId, allocationId, strategyCode, originOperation.getParSymbol(), typeOperation);
+                skipped++;
+                log.info("event=copy_open_skipped category=runtime_state reasonCode=duplicate_blocked_same_allocation reasonAlias=copy_known_in_ram friendlyReason=copia_ya_conocida_en_ram explanation=no_se_abre_otra_orden_para_la_misma_allocation copyImpact=no_copy_order traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} active={} copyId={} copyOrderId={}",
+                        allocationTraceId, originId, userId, allocationId, strategyCode, walletId, symbol,
+                        runtimeCopy != null && runtimeCopy.isActive(),
+                        runtimeCopy == null ? null : runtimeCopy.getIdOperation(),
+                        runtimeCopy == null ? null : runtimeCopy.getIdOrden());
+                continue;
+            }
+
+            CopyOperationDto existingCopy = copyOperationService.findOperationForAllocation(
+                    originId,
+                    userId,
+                    allocationId,
+                    strategyCode,
+                    typeOperation
+            );
+            if (existingCopy != null) {
+                if (existingCopy.isActive()) {
+                    activeCopyOperationCache.markOpen(existingCopy);
+                }
+                skipped++;
+                log.info("event=copy_open_skipped reasonCode=allocation_copy_already_exists traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} active={} copyId={} copyOrderId={}",
+                        allocationTraceId, originId, userId, allocationId, strategyCode, walletId, symbol,
+                        existingCopy.isActive(), existingCopy.getIdOperation(), existingCopy.getIdOrden());
+                continue;
+            }
+
+            if (allocation == null || !allocation.allowsNewEntries(OffsetDateTime.now())) {
+                skipped++;
+                log.info("event=copy_open_skipped reasonCode=allocation_not_openable originId={} userId={} allocationId={} wallet={} symbol={} strategy={} status={} executionMode={}",
+                        originId, userId, allocationId, walletId, symbol, strategyCode,
+                        allocation == null ? null : allocation.getStatus(),
+                        allocation == null ? null : allocation.getExecutionMode());
+                continue;
+            }
+
+            if (!passesWalletFilters(walletMetric)) {
+                skipped++;
+                final boolean hasScoring = walletMetric != null && walletMetric.getScoring() != null;
+                log.info("event=copy_open_skipped reasonCode=wallet_filtered reason=wallet_filtered originId={} userId={} allocationId={} strategy={} wallet={} symbol={} hasScoring={} decisionMetricConservative={} passesFilter={} preCopiable={} capitalShare={}",
+                        originId,
+                        userId,
+                        allocationId,
+                        strategyCode,
+                        walletId,
+                        symbol,
+                        hasScoring,
+                        hasScoring ? walletMetric.getScoring().getDecisionMetricConservative() : null,
+                        hasScoring ? walletMetric.getScoring().getPassesFilter() : null,
+                        hasScoring ? walletMetric.getScoring().getPreCopiable() : null,
+                        formatCapitalShare(walletMetric));
+                continue;
+            }
+
+            PreparedOpen prepared = null;
+            BinanceFuturesOrderClientResponse order = null;
+            try {
+                final long calcNs = System.nanoTime();
+                prepared = prepareOpenOperation(event, userDetail, walletMetric, allocation);
+                log.info("event=copy.job.phase action=OPEN phase=calculate_target originId={} userId={} allocationId={} strategy={} wallet={} symbol={} elapsedMs={}",
+                        originId, userId, allocationId, strategyCode, walletId, prepared.symbol, elapsedMsSince(calcNs));
+
+                final long sendNs = System.nanoTime();
+                activeCopyOperationCache.markPendingOpen(
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.symbol,
+                        prepared.dto.getPositionSide() == null ? null : prepared.dto.getPositionSide().name(),
+                        allocationId,
+                        strategyCode,
+                        allocationTraceId
+                );
+                log.info("event=copy.open.order.send traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} qty={} positionSide={} reduceOnly={} clientOrderId={}",
+                        allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol,
+                        prepared.dto.getQuantity(), prepared.dto.getPositionSide(), prepared.dto.isReduceOnly(), prepared.dto.getClientOrderId());
+
+                order = executeOrShadow(prepared.dto, prepared.entryPrice, allocation, allocationTraceId);
+                if (!isValidOrderResponse(order)) {
+                    throw new CopyBinanceClientException(
+                            "Respuesta invÃ¡lida de ms-binance: orderId/campos de ejecuciÃ³n null",
+                            orderResponseDetails(originId, userId, walletId, prepared.symbol, order)
+                    );
+                }
+
+                log.info("event=copy.open.order.ok traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} orderId={} elapsedMs={}",
+                        allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol, order.getOrderId(), elapsedMsSince(sendNs));
+                recordCopyOperationEvent(
+                        "OPEN",
+                        "OPEN",
+                        originId,
+                        userId,
+                        walletId,
+                        prepared.symbol,
+                        prepared.dto.getPositionSide(),
+                        prepared.dto.getSide(),
+                        prepared.dto.getClientOrderId(),
+                        order,
+                        parseQuantity(prepared.dto.getQuantity()),
+                        ZERO,
+                        safeQty(copyTradingMapper.resolveFilledQty(order)),
+                        null,
+                        allocationTraceId,
+                        "direct_open",
+                        isShadowMode(allocation) ? "allocation_shadow_open_created" : "allocation_open_created",
+                        allocation
+                );
+                final long saveNs = System.nanoTime();
+                createNewOperation(order, walletId, originOperation.getIdOperacion(), userId, prepared.leverage, allocation);
+                created++;
+                log.info("event=copy.job.phase action=OPEN phase=save_copy_operation traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} elapsedMs={}",
+                        allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol, elapsedMsSince(saveNs));
+                log.info("event=copy_open_completed traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} orderId={} qty={} notional={}",
+                        allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol,
+                        order.getOrderId(), safeQty(copyTradingMapper.resolveFilledQty(order)).toPlainString(), prepared.notional.toPlainString());
+            } catch (SkipExecutionException skip) {
+                skipped++;
+                activeCopyOperationCache.forgetPending(originId, userId, allocationTraceId, skip.getReasonCode());
+                log.info("event=copy_open_skipped reasonCode={} traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} reason=\"{}\" details=\"{}\"",
+                        safeLog(skip.getReasonCode()), allocationTraceId, originId, userId, allocationId, strategyCode, walletId, symbol,
+                        safeLog(skip.getReason()), safeLog(skip.getDetails()));
+            } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
+                if (prepared != null && order != null && isValidOrderResponse(order)) {
+                    CopyOperationDto uncertain = copyTradingMapper.buildCopyNewOperationDto(
+                            order,
+                            walletId,
+                            originOperation.getIdOperacion(),
+                            userId,
+                            prepared.leverage
+                    );
+                    applyCopyMetadata(uncertain, allocation);
+                    activeCopyOperationCache.markUncertain(uncertain, allocationTraceId, "persist_failed_after_order");
+                    try {
+                        tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, order, userDetail, allocation);
+                    } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException | ArithmeticException panicEx) {
+                        log.error("event=copy_open_panic_close_failed traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} panicErrClass={} panicErr=\"{}\"",
+                                allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol,
+                                panicEx.getClass().getSimpleName(), safeLog(panicEx.getMessage()), panicEx);
+                    }
+                } else {
+                    activeCopyOperationCache.forgetPending(originId, userId, allocationTraceId, "order_not_sent_or_failed_before_response");
+                }
+                throw ex;
+            }
+        }
+
+        log.info("event=copy_open_allocations_done traceId={} originId={} userId={} wallet={} symbol={} applicableAllocations={} created={} skipped={}",
+                traceId, originId, userId, walletId, symbol, contexts.size(), created, skipped);
+        return null;
+    }
+
+    private boolean allocationScopedCopyRuntimeEnabled() {
+        return allocationScopedRuntime;
+    }
+
     private void executeDirectCloseForUser(OperacionEvent event, UserDetailDto userDetail, long startedNs) {
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
@@ -718,14 +907,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        distributedLockService.withLock(distLockKey(userId, walletId), Duration.ofSeconds(120), () -> {
+        distributedLockService.withLock(distLockKey(userId, walletId, originOperation.getParSymbol()), Duration.ofSeconds(120), () -> {
             final long loadCopyNs = System.nanoTime();
-            final CopyOperationDto currentCopy = activeCopyOperationCache.activeOperation(originId, userId);
+            List<CopyOperationDto> copies = new ArrayList<>(activeCopyOperationCache.activeOperations(originId, userId));
+            if (copies.isEmpty()) {
+                copies = new ArrayList<>(copyOperationService.findActiveOperationsForUserOrigin(originId, userId));
+                copies.forEach(activeCopyOperationCache::markOpen);
+            }
             final String symbol = safeLog(originOperation.getParSymbol());
-            log.info("event=copy.job.phase action=CLOSE phase=load_copy_from_ram traceId={} originId={} userId={} wallet={} symbol={} elapsedMs={}",
-                    traceId, originId, userId, walletId, symbol, elapsedMsSince(loadCopyNs));
-            if (currentCopy == null) {
-                log.info("event=copy_close_skipped reasonCode=copy_missing reason=copy_missing traceId={} originId={} userId={} wallet={} symbol={}",
+            log.info("event=copy.job.phase action=CLOSE phase=load_copies traceId={} originId={} userId={} wallet={} symbol={} copies={} elapsedMs={}",
+                    traceId, originId, userId, walletId, symbol, copies.size(), elapsedMsSince(loadCopyNs));
+            if (copies.isEmpty()) {
+                log.info("event=copy_close_skipped reasonCode=close_without_open_copy_for_allocation reason=copy_missing traceId={} originId={} userId={} wallet={} symbol={}",
                         traceId,
                         originId,
                         userId,
@@ -734,24 +927,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 return null;
             }
 
-            if (!currentCopy.isActive()) {
-                log.info("event=copy_close_skipped reasonCode=copy_already_inactive reason=copy_already_inactive traceId={} originId={} userId={} wallet={} symbol={}",
-                        traceId,
-                        originId,
-                        userId,
-                        walletId,
-                        symbol);
-                return null;
+            int closed = 0;
+            for (CopyOperationDto currentCopy : copies) {
+                if (currentCopy == null || !currentCopy.isActive()) {
+                    continue;
+                }
+                executeCloseOperation(currentCopy, userDetail, "CLOSE", "direct_close", null, originClosePriceRef(originOperation));
+                closed++;
             }
-
-            executeCloseOperation(currentCopy, userDetail, "CLOSE", "direct_close", null, originClosePriceRef(originOperation));
-            log.info("event=copy.close.fast_path.done traceId={} originId={} userId={} wallet={} symbol={} qty={} elapsedMs={}",
+            log.info("event=copy.close.fast_path.done traceId={} originId={} userId={} wallet={} symbol={} copies={} closed={} elapsedMs={}",
                     traceId,
                     originId,
                     userId,
                     walletId,
-                    currentCopy.getParsymbol(),
-                    safeQty(currentCopy.getSizePar()).toPlainString(),
+                    symbol,
+                    copies.size(),
+                    closed,
                     elapsedMsSince(startedNs));
             return null;
         });
@@ -772,6 +963,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private void reconcileWalletBasketForUser(OperacionEvent event, UserDetailDto userDetail) {
+        if (allocationScopedCopyRuntimeEnabled()) {
+            reconcileWalletBasketForUserByAllocation(event, userDetail);
+            return;
+        }
+
         final OperacionDto originOperation = requireOperacion(event);
         final String triggerOriginId = originOperation.getIdOperacion().toString();
         final String walletId = originOperation.getIdCuenta();
@@ -787,7 +983,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        distributedLockService.withLock(distLockKey(userId, walletId), Duration.ofSeconds(120), () -> {
+        distributedLockService.withLock(distLockKey(userId, walletId, originOperation.getParSymbol()), Duration.ofSeconds(120), () -> {
             log.info(LOG_RECONCILE_START, triggerOriginId, userId, walletId, originOperation.isOperacionActiva() ? "OPEN" : "CLOSE");
 
             final MetricaWalletDto walletMetric = resolveWalletMetric(event, triggerOriginId, walletId, userDetail);
@@ -976,6 +1172,215 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         });
     }
 
+    private void reconcileWalletBasketForUserByAllocation(OperacionEvent event, UserDetailDto userDetail) {
+        final OperacionDto originOperation = requireOperacion(event);
+        final String triggerOriginId = originOperation.getIdOperacion().toString();
+        final String walletId = originOperation.getIdCuenta();
+        final String userId = userDetail.getUser().getId().toString();
+        final HyperliquidDeltaType triggerDeltaType = HyperliquidDeltaType.from(event.getDeltaType());
+        final boolean flipTrigger = triggerDeltaType == HyperliquidDeltaType.FLIP;
+
+        if (walletId == null || walletId.isBlank()) {
+            throw new SkipExecutionException(
+                    "wallet_missing",
+                    "La operaciÃ³n origen no trae idCuenta/wallet",
+                    LogFmt.kv("originId", triggerOriginId, "userId", userId, "symbol", safeLog(originOperation.getParSymbol()))
+            );
+        }
+
+        distributedLockService.withLock(distLockKey(userId, walletId, originOperation.getParSymbol()), Duration.ofSeconds(120), () -> {
+            final List<AllocationCopyContext> contexts = resolveAllocationContexts(event, userDetail, CopyJobAction.OPEN);
+            if (contexts.isEmpty()) {
+                log.info("event=copy_reconcile_skipped reasonCode=strategy_not_applicable triggerOriginId={} userId={} wallet={} symbol={}",
+                        triggerOriginId, userId, walletId, safeLog(originOperation.getParSymbol()));
+                return null;
+            }
+
+            final List<OriginBasketPositionDto> sourceBasket = patchSourceBasket(
+                    futuresPositionService.getOpenBasketByWallet(walletId),
+                    originOperation,
+                    triggerDeltaType
+            );
+            final Set<String> sourceOriginIds = sourceBasket.stream()
+                    .map(OriginBasketPositionDto::getOriginId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toSet());
+
+            int totalTargets = 0;
+            int totalActiveCopies = 0;
+
+            for (AllocationCopyContext context : contexts) {
+                final MetricaWalletDto walletMetric = context.metric();
+                final UserCopyAllocationEntity walletAllocation = context.allocation();
+                final Long allocationId = walletAllocation == null ? null : walletAllocation.getId();
+                final String strategyCode = walletAllocation == null ? copyStrategyRuntimeRouter.strategyCodeOf(walletMetric) : walletAllocation.getCopyStrategyCode();
+                final String traceId = activeCopyOperationCache.traceId(triggerOriginId, userId, walletId, originOperation.getParSymbol(), allocationId, strategyCode);
+
+                log.info("event=copy_reconcile_start triggerOriginId={} userId={} allocationId={} strategy={} wallet={} triggerType={}",
+                        triggerOriginId, userId, allocationId, strategyCode, walletId, originOperation.isOperacionActiva() ? "OPEN" : "CLOSE");
+
+                final boolean canOpenOrResize = passesWalletFilters(walletMetric);
+                if (!canOpenOrResize) {
+                    log.info("event=copy_reconcile_metric_not_eligible triggerOriginId={} userId={} allocationId={} strategy={} wallet={} metricPresent={} note=will_only_close_stale_copies",
+                            triggerOriginId, userId, allocationId, strategyCode, walletId, walletMetric != null);
+                }
+                final BigDecimal walletBudget = canOpenOrResize ? resolveWalletBudget(userDetail, walletMetric) : ZERO;
+                final int leverage = resolveUserLeverage(userDetail, walletAllocation);
+                final Map<String, TargetLeg> targets = buildTargetBasket(userDetail, sourceBasket, walletBudget, walletMetric, leverage, triggerDeltaType, triggerOriginId);
+                totalTargets += targets.size();
+
+                final List<CopyOperationDto> runtimeActiveCopies = activeCopyOperationCache.activeOperationsByUserAndWallet(userId, walletId)
+                        .stream()
+                        .filter(copy -> sameAllocation(copy, walletAllocation))
+                        .toList();
+                final Map<String, CopyOperationDto> current = runtimeActiveCopies
+                        .stream()
+                        .filter(Objects::nonNull)
+                        .collect(Collectors.toMap(CopyOperationDto::getIdOrderOrigin, java.util.function.Function.identity(), (a, b) -> a, HashMap::new));
+                totalActiveCopies += current.size();
+
+                final BigDecimal hardCap = walletBudget.multiply(ONE.add(walletHardcapOverPct == null ? ZERO : walletHardcapOverPct));
+                final BigDecimal reserve = walletBudget.multiply(walletReservePct == null ? ZERO : walletReservePct);
+                final TargetLeg flipTarget = flipTrigger ? targets.get(triggerOriginId) : null;
+                final boolean flipOpenAllowed = !flipTrigger || isFlipOpenPreflightAllowed(
+                        flipTarget, triggerOriginId, userId, walletId, canOpenOrResize, walletBudget, hardCap, reserve);
+                if (flipTrigger && !flipOpenAllowed && !closePreviousSideWhenFlipOpenBlocked) {
+                    log.warn("event=rebalance.copy.flip_blocked category=rebalance reasonCode=flip_preflight_blocked traceId={} triggerOriginId={} userId={} allocationId={} strategy={} wallet={} symbol={}",
+                            traceId, triggerOriginId, userId, allocationId, strategyCode, walletId, safeLog(originOperation.getParSymbol()));
+                    continue;
+                }
+
+                for (CopyOperationDto copy : new ArrayList<>(current.values())) {
+                    if (copy == null) continue;
+                    final String copyOriginId = copy.getIdOrderOrigin();
+                    if (copyOriginId == null) continue;
+
+                    if (!sourceOriginIds.contains(copyOriginId)) {
+                        boolean closeFromFlip = flipTrigger && sameWalletSymbolDifferentSide(copy, originOperation);
+                        executeFullClose(
+                                copy,
+                                userDetail,
+                                closeFromFlip ? "FLIP" : "CLOSE",
+                                closeFromFlip ? "flip_close_previous_side" : "rebalance_full_close",
+                                closeFromFlip ? "flip_close_previous_side" : null
+                        );
+                        current.remove(copyOriginId);
+                        continue;
+                    }
+
+                    final TargetLeg target = targets.get(copyOriginId);
+                    if (target == null) {
+                        if (canOpenOrResize) {
+                            log.info("event=rebalance.copy.close_no_target originId={} userId={} allocationId={} strategy={} wallet={} symbol={} reason=target_not_copiable",
+                                    copyOriginId, userId, allocationId, strategyCode, walletId, copy.getParsymbol());
+                            executeFullClose(copy, userDetail);
+                            current.remove(copyOriginId);
+                        }
+                        continue;
+                    }
+
+                    final BigDecimal currentQty = safeQty(copy.getSizePar());
+                    final BigDecimal targetQty = safeQty(target.targetQty());
+                    if (shouldReduce(currentQty, targetQty)) {
+                        if (targetQty.compareTo(ZERO) <= 0) {
+                            executeFullClose(copy, userDetail);
+                            current.remove(copyOriginId);
+                        } else {
+                            CopyOperationDto updated = executePartialReduce(copy, target, triggerOriginId, userDetail, walletAllocation);
+                            if (updated == null || !updated.isActive()) {
+                                current.remove(copyOriginId);
+                            } else {
+                                current.put(copyOriginId, updated);
+                            }
+                        }
+                    }
+                }
+
+                BigDecimal usedMargin = sumBufferedMargin(current.values());
+                for (TargetLeg target : targets.values()) {
+                    if (target == null || safeQty(target.targetQty()).compareTo(ZERO) <= 0) {
+                        continue;
+                    }
+
+                    CopyOperationDto currentCopy = current.get(target.originId());
+                    if (currentCopy == null) {
+                        currentCopy = findKnownCopyForTarget(target, userId, walletAllocation);
+                        if (currentCopy != null && currentCopy.isActive()) {
+                            current.put(target.originId(), currentCopy);
+                            usedMargin = sumBufferedMargin(current.values());
+                        } else if (activeCopyOperationCache.isKnown(target.originId(), userId, allocationId, strategyCode, target.symbol(), target.side() == null ? null : target.side().name())) {
+                            log.info("event=rebalance.copy.open_skip category=rebalance reasonCode=copy_state_pending_or_uncertain traceId={} originId={} triggerOriginId={} userId={} allocationId={} strategy={} wallet={} symbol={}",
+                                    activeCopyOperationCache.traceId(target.originId(), userId, walletId, target.symbol(), allocationId, strategyCode),
+                                    target.originId(), triggerOriginId, userId, allocationId, strategyCode, walletId, target.symbol());
+                            continue;
+                        }
+                    }
+
+                    if (currentCopy == null || !currentCopy.isActive()) {
+                        final boolean targetIsFlipOpen = flipTrigger && Objects.equals(target.originId(), triggerOriginId);
+                        if (targetIsFlipOpen && !flipOpenAllowed) {
+                            log.warn("event=rebalance.copy.open_skip category=rebalance reasonCode=flip_open_blocked_after_close traceId={} originId={} triggerOriginId={} userId={} allocationId={} strategy={} wallet={} symbol={}",
+                                    activeCopyOperationCache.traceId(target.originId(), userId, walletId, target.symbol(), allocationId, strategyCode),
+                                    target.originId(), triggerOriginId, userId, allocationId, strategyCode, walletId, target.symbol());
+                            continue;
+                        }
+                        if (shouldSkipMissingReconcileOpen(target, triggerOriginId, userId, walletId, originOperation.isOperacionActiva(), flipTrigger)) {
+                            continue;
+                        }
+                        final BigDecimal required = computeBufferedMargin(target.targetQty(), target.priceRef(), target.leverage());
+                        if (walletBudget.compareTo(ZERO) <= 0 || usedMargin.add(required).add(reserve).compareTo(hardCap) > 0) {
+                            log.warn(LOG_OPEN_SKIP_BUDGET, target.originId(), userId, walletId, target.symbol(), required.toPlainString(), walletBudget.toPlainString(), usedMargin.toPlainString());
+                            continue;
+                        }
+                        CopyOperationDto created = currentCopy == null
+                                ? executeOpenTarget(
+                                target,
+                                triggerOriginId,
+                                userDetail,
+                                walletAllocation,
+                                targetIsFlipOpen ? "FLIP" : "OPEN",
+                                targetIsFlipOpen ? "flip_open_new_side" : "rebalance_open",
+                                targetIsFlipOpen ? "flip_open_new_side" : null
+                        )
+                                : executeReopenExistingTarget(currentCopy, target, triggerOriginId, userDetail, walletAllocation);
+                        if (created == null) {
+                            continue;
+                        }
+                        current.put(target.originId(), created);
+                        usedMargin = usedMargin.add(computeCopyBufferedMargin(created));
+                        continue;
+                    }
+
+                    final BigDecimal currentQty = safeQty(currentCopy.getSizePar());
+                    final BigDecimal targetQty = safeQty(target.targetQty());
+                    if (shouldIncrease(currentQty, targetQty)) {
+                        if (shouldSkipStaleIncrease(target, triggerOriginId, userId, walletId, originOperation.isOperacionActiva())) {
+                            continue;
+                        }
+                        final BigDecimal deltaQty = targetQty.subtract(currentQty);
+                        final BigDecimal required = computeBufferedMargin(deltaQty, target.priceRef(), target.leverage());
+                        if (walletBudget.compareTo(ZERO) <= 0 || usedMargin.add(required).add(reserve).compareTo(hardCap) > 0) {
+                            log.warn(LOG_OPEN_SKIP_BUDGET, target.originId(), userId, walletId, target.symbol(), required.toPlainString(), walletBudget.toPlainString(), usedMargin.toPlainString());
+                            continue;
+                        }
+                        CopyOperationDto updated = executeIncrease(currentCopy, target, triggerOriginId, userDetail, walletAllocation);
+                        current.put(target.originId(), updated);
+                        usedMargin = sumBufferedMargin(current.values());
+                    }
+                }
+            }
+
+            log.info(LOG_RECONCILE_DONE,
+                    triggerOriginId,
+                    userId,
+                    walletId,
+                    sourceBasket.size(),
+                    totalTargets,
+                    totalActiveCopies);
+            return null;
+        });
+    }
+
     private boolean isFlipOpenPreflightAllowed(TargetLeg flipTarget,
                                                 String triggerOriginId,
                                                 String userId,
@@ -1015,6 +1420,73 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private MetricaWalletDto resolveWalletMetric(String originId, String walletId, UserDetailDto userDetail) {
         return resolveWalletMetric(null, originId, walletId, userDetail);
+    }
+
+    private List<AllocationCopyContext> resolveAllocationContexts(OperacionEvent event, UserDetailDto userDetail, CopyJobAction action) {
+        if (event == null || userDetail == null || userDetail.getUser() == null || userDetail.getUser().getId() == null) {
+            return List.of();
+        }
+        final OperacionDto operation = requireOperacion(event);
+        final String originId = operation.getIdOperacion() == null ? null : operation.getIdOperacion().toString();
+        final String walletId = operation.getIdCuenta();
+        final UUID userId = userDetail.getUser().getId();
+        final HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(event.getDeltaType());
+        final String side = operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
+        if (walletId == null || walletId.isBlank()) {
+            return List.of();
+        }
+
+        final long metricNs = System.nanoTime();
+        final List<MetricaWalletDto> metrics = resolveWalletMetrics(event, originId, walletId, userDetail);
+        final Map<String, MetricaWalletDto> metricsByStrategy = new HashMap<>();
+        for (MetricaWalletDto metric : metrics) {
+            if (metric == null) continue;
+            metricsByStrategy.putIfAbsent(copyStrategyRuntimeRouter.strategyCodeOf(metric), metric);
+        }
+        final List<UserCopyAllocationEntity> allocations = userCopyAllocationService.getActiveAllocationsForUserWallet(userId, walletId);
+        final List<AllocationCopyContext> contexts = new ArrayList<>();
+
+        for (UserCopyAllocationEntity allocation : allocations) {
+            if (allocation == null) continue;
+            final String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(allocation);
+            if (!copyStrategyRuntimeRouter.allocationAppliesToEvent(allocation, action, deltaType, side)) {
+                log.info("event=copy_open_skipped reasonCode=strategy_not_applicable originId={} userId={} allocationId={} wallet={} strategy={} side={} action={} deltaType={}",
+                        originId, userId, allocation.getId(), safeLog(walletId), strategyCode, side, action, deltaType);
+                continue;
+            }
+            final MetricaWalletDto metric = metricsByStrategy.get(strategyCode);
+            if (metric == null) {
+                log.info("event=copy_open_skipped reasonCode=metric_missing_for_allocation originId={} userId={} allocationId={} wallet={} strategy={} matchedMetrics={}",
+                        originId, userId, allocation.getId(), safeLog(walletId), strategyCode, metricsByStrategy.size());
+                continue;
+            }
+            contexts.add(new AllocationCopyContext(metric, allocation));
+        }
+
+        log.info("event=copy.allocation_contexts_loaded originId={} userId={} wallet={} side={} action={} deltaType={} metrics={} allocations={} applicable={} elapsedMs={}",
+                originId, userId, safeLog(walletId), side, action, deltaType, metrics.size(), allocations.size(), contexts.size(), elapsedMsSince(metricNs));
+        return contexts;
+    }
+
+    private List<MetricaWalletDto> resolveWalletMetrics(OperacionEvent event, String originId, String walletId, UserDetailDto userDetail) {
+        final UUID userId = userDetail.getUser().getId();
+        final List<MetricaWalletDto> metrics = normalizeCapitalShares(metricWalletService.getCandidatesUser(userId));
+        final String walletKey = normalizeSymbolKey(walletId);
+
+        final CopyJobAction action = event == null || event.getTipo() == null
+                ? CopyJobAction.OPEN
+                : (event.getTipo() == OperacionEvent.Tipo.CERRADA ? CopyJobAction.CLOSE : CopyJobAction.OPEN);
+        final HyperliquidDeltaType deltaType = event == null ? HyperliquidDeltaType.UNKNOWN : HyperliquidDeltaType.from(event.getDeltaType());
+        final String side = event == null || event.getOperacion() == null || event.getOperacion().getTipoOperacion() == null
+                ? null
+                : event.getOperacion().getTipoOperacion().name();
+
+        return metrics.stream()
+                .filter(Objects::nonNull)
+                .filter(m -> m.getWallet() != null && m.getWallet().getIdWallet() != null)
+                .filter(m -> Objects.equals(normalizeSymbolKey(m.getWallet().getIdWallet()), walletKey))
+                .sorted(copyStrategyRuntimeRouter.metricPreferenceComparator(action, deltaType, side))
+                .toList();
     }
 
     private MetricaWalletDto resolveWalletMetric(OperacionEvent event, String originId, String walletId, UserDetailDto userDetail) {
@@ -1819,25 +2291,48 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private CopyOperationDto findKnownCopyForTarget(TargetLeg target, String userId) {
+        return findKnownCopyForTarget(target, userId, null);
+    }
+
+    private CopyOperationDto findKnownCopyForTarget(TargetLeg target, String userId, UserCopyAllocationEntity allocation) {
         if (target == null || userId == null || userId.isBlank()) {
             return null;
         }
-        return activeCopyOperationCache.activeOperation(target.originId(), userId);
+        return activeCopyOperationCache.activeOperation(
+                target.originId(),
+                userId,
+                allocation == null ? null : allocation.getId(),
+                allocation == null ? null : allocation.getCopyStrategyCode(),
+                target.symbol(),
+                target.side() == null ? null : target.side().name()
+        );
+    }
+
+    private boolean sameAllocation(CopyOperationDto copy, UserCopyAllocationEntity allocation) {
+        if (copy == null || allocation == null) {
+            return false;
+        }
+        if (copy.getUserCopyAllocationId() != null && allocation.getId() != null) {
+            return Objects.equals(copy.getUserCopyAllocationId(), allocation.getId());
+        }
+        String copyStrategy = copy.getCopyStrategyCode() == null ? null : copy.getCopyStrategyCode().trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        String allocationStrategy = allocation.getCopyStrategyCode() == null ? null : allocation.getCopyStrategyCode().trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        return copyStrategy != null && copyStrategy.equals(allocationStrategy);
     }
 
     private CopyOperationDto executeOpenTarget(TargetLeg target, String triggerOriginId, UserDetailDto userDetail, UserCopyAllocationEntity allocation, String copyIntent, String source, String reasonCode) {
         final String userId = userDetail.getUser().getId().toString();
-        final String traceId = activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol());
+        final String traceId = activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode());
         final String effectiveReasonCode = reasonCode == null ? "rebalance_open" : reasonCode;
         final boolean flipOpen = "FLIP".equalsIgnoreCase(copyIntent);
         if (!allocationAllowsNewExposure(allocation, traceId, target.originId(), userId, target.walletId(), target.symbol(), flipOpen ? "flip_open_allocation_not_openable" : "rebalance_open_allocation_not_openable")) {
             return null;
         }
         final OperationDto dto = buildOpenOrIncreaseOrder(target, target.targetQty(), userDetail,
-                IdempotencyKeyUtil.openClientOrderId(target.originId(), userId, target.walletId()), true);
+                IdempotencyKeyUtil.openClientOrderId(target.originId(), userId, target.walletId(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode()), true);
 
         activeCopyOperationCache.markPendingOpen(target.originId(), userId, target.walletId(), target.symbol(),
-                target.side() == null ? null : target.side().name(), traceId);
+                target.side() == null ? null : target.side().name(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode(), traceId);
         log.info("event=rebalance.copy.open_send category=rebalance reasonCode={} reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} qty={} positionSide={} clientOrderId={} {}",
                 effectiveReasonCode,
                 flipOpen ? "flip_open_new_side" : "missing_copy_open",
@@ -1909,16 +2404,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private CopyOperationDto executeReopenExistingTarget(CopyOperationDto existingCopy, TargetLeg target, String triggerOriginId, UserDetailDto userDetail, UserCopyAllocationEntity fallbackAllocation) {
         final String userId = userDetail.getUser().getId().toString();
-        final String traceId = activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol());
         final UserCopyAllocationEntity allocation = fallbackAllocation;
+        final String traceId = activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode());
         if (!allocationAllowsNewExposure(allocation, traceId, target.originId(), userId, target.walletId(), target.symbol(), "rebalance_reopen_allocation_not_openable")) {
             return null;
         }
         final OperationDto dto = buildOpenOrIncreaseOrder(target, target.targetQty(), userDetail,
-                IdempotencyKeyUtil.rebalanceReopenClientOrderId(triggerOriginId, target.originId(), userId, target.walletId(), target.targetQty().stripTrailingZeros().toPlainString()), true);
+                IdempotencyKeyUtil.rebalanceReopenClientOrderId(triggerOriginId, target.originId(), userId, target.walletId(), target.targetQty().stripTrailingZeros().toPlainString(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode()), true);
 
         activeCopyOperationCache.markPendingOpen(target.originId(), userId, target.walletId(), target.symbol(),
-                target.side() == null ? null : target.side().name(), traceId);
+                target.side() == null ? null : target.side().name(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode(), traceId);
         log.info("event=rebalance.copy.reopen_send category=rebalance reasonAlias=inactive_copy_reopen friendlyReason=copia_inactiva_reabierta explanation=ya_existia_una_copia_inactiva_y_se_reabre_actualizando_la_misma_fila copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} copyId={} previousOrderId={} qty={} positionSide={} clientOrderId={}",
                 traceId, target.originId(), triggerOriginId, userId, target.walletId(), target.symbol(), existingCopy.getIdOperation(), existingCopy.getIdOrden(), dto.getQuantity(), dto.getPositionSide(), dto.getClientOrderId());
 
@@ -2008,8 +2503,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private CopyOperationDto executeIncrease(CopyOperationDto currentCopy, TargetLeg target, String triggerOriginId, UserDetailDto userDetail, UserCopyAllocationEntity fallbackAllocation) {
         final BigDecimal currentQty = safeQty(currentCopy.getSizePar());
-        final String traceId = activeCopyOperationCache.traceId(target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.symbol());
         final UserCopyAllocationEntity allocation = fallbackAllocation;
+        final String traceId = activeCopyOperationCache.traceId(target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.symbol(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode());
         if (!allocationAllowsNewExposure(allocation, traceId, target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.symbol(), "rebalance_increase_allocation_not_openable")) {
             return currentCopy;
         }
@@ -2021,7 +2516,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 target,
                 deltaQty,
                 userDetail,
-                IdempotencyKeyUtil.rebalanceIncreaseClientOrderId(triggerOriginId, target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.targetQty().stripTrailingZeros().toPlainString()),
+                IdempotencyKeyUtil.rebalanceIncreaseClientOrderId(triggerOriginId, target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.targetQty().stripTrailingZeros().toPlainString(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode()),
                 false
         );
         log.info("event=rebalance.copy.increase_send category=rebalance reasonAlias=resize_increase friendlyReason=aumento_de_copia explanation=se_envia_orden_para_aumentar_una_copia_existente copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} currentQty={} targetQty={} deltaQty={} positionSide={} clientOrderId={}",
@@ -2106,11 +2601,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         target.originId(),
                         userDetail.getUser().getId().toString(),
                         target.walletId(),
-                        targetQty.stripTrailingZeros().toPlainString()
+                        targetQty.stripTrailingZeros().toPlainString(),
+                        allocation == null ? null : allocation.getId(),
+                        allocation == null ? null : allocation.getCopyStrategyCode()
                 )
         );
 
-        final String traceId = activeCopyOperationCache.traceId(target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.symbol());
+        final String traceId = activeCopyOperationCache.traceId(target.originId(), userDetail.getUser().getId().toString(), target.walletId(), target.symbol(), allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode());
         log.info("event=rebalance.copy.reduce_send category=rebalance reasonAlias=resize_reduce friendlyReason=reduccion_de_copia explanation=se_envia_orden_reduceOnly_para_bajar_la_copia_al_tamano_objetivo copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} currentQty={} targetQty={} deltaQty={} positionSide={} clientOrderId={}",
                 traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(),
                 currentQty.toPlainString(), targetQty.toPlainString(), deltaQty.toPlainString(), dto.getPositionSide(), dto.getClientOrderId());
@@ -2170,7 +2667,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             applyCopyMetadata(closed, allocation);
 
             copyOperationService.closeOperation(closed);
-            activeCopyOperationCache.markClosed(currentCopy.getIdOrderOrigin(), userDetail.getUser().getId().toString());
+            activeCopyOperationCache.markClosed(currentCopy);
             log.info("event=rebalance.copy.reduce_to_close_ok category=rebalance reasonAlias=resize_reduce_closed friendlyReason=reduccion_cerro_copia explanation=la_reduccion_dejo_la_copia_en_cero_y_se_marco_como_cerrada copyImpact=copy_closed traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} filledQty={}",
                     traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(), response.getOrderId(), filledQty.toPlainString());
             return closed;
@@ -2444,7 +2941,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (prepared == null || userDetail == null) {
             return;
         }
-        final String traceId = activeCopyOperationCache.traceId(originId, userId, walletId, prepared.symbol);
+        final String traceId = activeCopyOperationCache.traceId(originId, userId, walletId, prepared.symbol, allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode());
 
         BigDecimal qty = null;
         if (openResponse != null) {
@@ -2477,7 +2974,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .leverage(null)
                 .reduceOnly(true)
                 .configureAccountSettings(false)
-                .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(originId, userId, walletId))
+                .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(originId, userId, walletId, allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode()))
                 .originId(originId)
                 .userId(userId)
                 .walletId(walletId)
@@ -2510,7 +3007,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 "persist_failed_after_binance_order",
                 allocation
         );
-        activeCopyOperationCache.markClosed(originId, userId);
+        activeCopyOperationCache.forgetPending(originId, userId, traceId, "panic_close_after_persist_failure");
         log.warn("event=panic_close.ok traceId={} originId={} userId={} wallet={} symbol={} qty={} orderId={}",
                 traceId, originId, userId, walletId, prepared.dto.getSymbol(), qty.toPlainString(), closeResp.getOrderId());
     }
@@ -2605,7 +3102,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         applyCopyMetadata(buildCopyOperation, allocationMetadataFromCopy(copyOperation));
         final long saveNs = System.nanoTime();
         copyOperationService.closeOperation(buildCopyOperation);
-        activeCopyOperationCache.markClosed(originId, userId);
+        activeCopyOperationCache.markClosed(buildCopyOperation);
         log.info("event=copy.job.phase action=CLOSE phase=save_copy_operation originId={} userId={} wallet={} symbol={} elapsedMs={}",
                 originId, userId, copyOperation.getIdWalletOrigin(), copyOperation.getParsymbol(), elapsedMsSince(saveNs));
 
@@ -3158,7 +3655,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 marginRequired.toPlainString(),
                 copyByMinNotional);
 
-        final OperationDto dto = buildBuyAndSellPosition(symbol, event, quantity, userDetail, leverage);
+        final OperationDto dto = buildBuyAndSellPosition(symbol, event, quantity, userDetail, leverage, allocation);
 
         return new PreparedOpen(
                 dto,
@@ -3176,7 +3673,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                                  OperacionEvent event,
                                                  BigDecimal quantity,
                                                  UserDetailDto userDetail,
-                                                 int leverage) {
+                                                 int leverage,
+                                                 UserCopyAllocationEntity allocation) {
 
         final PositionSide side = event.getOperacion().getTipoOperacion();
 
@@ -3199,7 +3697,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .leverage(leverage)
                 .reduceOnly(false)
                 .configureAccountSettings(true)
-                .clientOrderId(IdempotencyKeyUtil.openClientOrderId(event.getOperacion().getIdOperacion().toString(), userDetail.getUser().getId().toString(), event.getOperacion().getIdCuenta()))
+                .clientOrderId(IdempotencyKeyUtil.openClientOrderId(
+                        event.getOperacion().getIdOperacion().toString(),
+                        userDetail.getUser().getId().toString(),
+                        event.getOperacion().getIdCuenta(),
+                        allocation == null ? null : allocation.getId(),
+                        allocation == null ? null : allocation.getCopyStrategyCode()))
                 .originId(event.getOperacion().getIdOperacion().toString())
                 .userId(userDetail.getUser().getId().toString())
                 .walletId(event.getOperacion().getIdCuenta())
@@ -4037,7 +4540,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private String distLockKey(String userId, String walletId) {
-        return "copy-wallet-lock::" + userWalletKey(userId, walletId);
+        return distLockKey(userId, walletId, null);
+    }
+
+    private String distLockKey(String userId, String walletId, String symbol) {
+        String symbolScope = CopySymbolIdentity.primaryBaseAsset(symbol);
+        if (symbolScope == null || symbolScope.isBlank()) {
+            symbolScope = normalizeSymbolKey(symbol);
+        }
+        if (symbolScope == null || symbolScope.isBlank()) {
+            symbolScope = "wallet:" + walletId;
+        }
+        return "copy-user-symbol-lock::" + userId + "::" + symbolScope;
     }
 
     private BigDecimal safeBigDecimal(String raw) {
@@ -4063,6 +4577,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                              OffsetDateTime sourceCreatedAt,
                              OffsetDateTime sourceUpdatedAt,
                              OffsetDateTime sourceTs) {
+    }
+
+    private record AllocationCopyContext(MetricaWalletDto metric,
+                                         UserCopyAllocationEntity allocation) {
     }
 
     private record SymbolContractResolution(String rawSymbol,
