@@ -98,14 +98,26 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         }
 
         if (updated == 0) {
-            updated = copyOperationRepository.closeActiveByOriginAndUser(
-                    operation.getIdOrderOrigin(),
-                    operation.getIdUser(),
-                    operation.getPriceClose(),
-                    operation.getDateClose(),
-                    sizeUsd,
-                    sizePar
-            );
+            if (operation.getUserCopyAllocationId() != null) {
+                updated = copyOperationRepository.closeActiveByOriginUserAndAllocation(
+                        operation.getIdOrderOrigin(),
+                        operation.getIdUser(),
+                        operation.getUserCopyAllocationId(),
+                        operation.getPriceClose(),
+                        operation.getDateClose(),
+                        sizeUsd,
+                        sizePar
+                );
+            } else {
+                updated = copyOperationRepository.closeActiveByOriginAndUser(
+                        operation.getIdOrderOrigin(),
+                        operation.getIdUser(),
+                        operation.getPriceClose(),
+                        operation.getDateClose(),
+                        sizeUsd,
+                        sizePar
+                );
+            }
         }
 
         if (updated == 0) {
@@ -114,9 +126,9 @@ public class CopyOperationServiceImpl implements CopyOperationService {
             return;
         }
 
-        activeCopyOperationCache.markClosed(operation.getIdOrderOrigin(), operation.getIdUser());
-        log.info("event=copy_operation.close_ok originId={} userId={} active=false updated={}",
-                operation.getIdOrderOrigin(), operation.getIdUser(), updated);
+        activeCopyOperationCache.markClosed(operation);
+        log.info("event=copy_operation.close_ok originId={} userId={} allocationId={} strategy={} active=false updated={}",
+                operation.getIdOrderOrigin(), operation.getIdUser(), operation.getUserCopyAllocationId(), operation.getCopyStrategyCode(), updated);
     }
 
     @Transactional(readOnly = true)
@@ -169,6 +181,31 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
     @Transactional(readOnly = true)
     @Override
+    public CopyOperationDto findOperationForAllocation(String idOrderOrigin, String idUser, Long allocationId, String strategyCode, String typeOperation) {
+        if (idOrderOrigin == null || idOrderOrigin.isBlank()
+                || idUser == null || idUser.isBlank()
+                || typeOperation == null || typeOperation.isBlank()) {
+            return null;
+        }
+        if (allocationId != null) {
+            Optional<CopyOperationEntity> byAllocation = copyOperationRepository
+                    .findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(allocationId, idOrderOrigin, typeOperation);
+            if (byAllocation.isPresent()) {
+                return copyOperationMapper.toDto(byAllocation.get());
+            }
+        }
+        if (strategyCode != null && !strategyCode.isBlank()) {
+            Optional<CopyOperationEntity> byStrategy = copyOperationRepository
+                    .findByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperation(idOrderOrigin, idUser, strategyCode, typeOperation);
+            if (byStrategy.isPresent()) {
+                return copyOperationMapper.toDto(byStrategy.get());
+            }
+        }
+        return null;
+    }
+
+    @Transactional(readOnly = true)
+    @Override
     public CopyOperationDto findOperationForUserAndType(String idOrderOrigin, String idUser, String typeOperation) {
         if (idOrderOrigin == null || idOrderOrigin.isBlank()
                 || idUser == null || idUser.isBlank()
@@ -198,6 +235,18 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         }
 
         return copyOperationRepository.findAllByIdUserAndIdWalletOriginAndActiveTrue(idUser, walletId)
+                .stream()
+                .map(copyOperationMapper::toDto)
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public List<CopyOperationDto> findActiveOperationsForUserOrigin(String idOrderOrigin, String idUser) {
+        if (idOrderOrigin == null || idOrderOrigin.isBlank() || idUser == null || idUser.isBlank()) {
+            return List.of();
+        }
+        return copyOperationRepository.findAllByIdOrderOriginAndIdUserAndActiveTrue(idOrderOrigin, idUser)
                 .stream()
                 .map(copyOperationMapper::toDto)
                 .toList();
@@ -252,7 +301,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         if (operation.isActive()) {
             activeCopyOperationCache.markOpen(operation);
         } else {
-            activeCopyOperationCache.markClosed(operation.getIdOrderOrigin(), operation.getIdUser());
+            activeCopyOperationCache.markClosed(operation);
         }
 
         log.info("event=copy_operation.upsert_ok category=persistence reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_tracked originId={} userId={} typeOperation={} wallet={} symbol={} orderId={} active={} created={}",
@@ -302,6 +351,30 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
     private Optional<CopyOperationEntity> findOperationEntityForUpsert(CopyOperationDto operation) {
         final String typeOperation = operation.getTypeOperation();
+        if (operation.getUserCopyAllocationId() != null && typeOperation != null && !typeOperation.isBlank()) {
+            final Optional<CopyOperationEntity> byAllocation = copyOperationRepository
+                    .findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(
+                            operation.getUserCopyAllocationId(),
+                            operation.getIdOrderOrigin(),
+                            typeOperation
+                    );
+            if (byAllocation.isPresent()) {
+                return byAllocation;
+            }
+        }
+        if (operation.getCopyStrategyCode() != null && !operation.getCopyStrategyCode().isBlank()
+                && typeOperation != null && !typeOperation.isBlank()) {
+            final Optional<CopyOperationEntity> byStrategy = copyOperationRepository
+                    .findByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperation(
+                            operation.getIdOrderOrigin(),
+                            operation.getIdUser(),
+                            operation.getCopyStrategyCode(),
+                            typeOperation
+                    );
+            if (byStrategy.isPresent()) {
+                return byStrategy;
+            }
+        }
         if (typeOperation != null && !typeOperation.isBlank()) {
             final Optional<CopyOperationEntity> byType = copyOperationRepository
                     .findByIdOrderOriginAndIdUserAndTypeOperation(operation.getIdOrderOrigin(), operation.getIdUser(), typeOperation);
@@ -320,6 +393,8 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("originId", incoming.getIdOrderOrigin());
         details.put("userId", incoming.getIdUser());
+        details.put("allocationId", incoming.getUserCopyAllocationId());
+        details.put("strategyCode", incoming.getCopyStrategyCode());
         details.put("typeOperation", incoming.getTypeOperation());
         details.put("incomingOrderId", incoming.getIdOrden());
         details.put("existingCopyId", existing == null ? null : existing.getIdOperation());
@@ -336,7 +411,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         if (existing.isActive()) {
             activeCopyOperationCache.markOpen(existing);
         } else {
-            activeCopyOperationCache.markClosed(existing.getIdOrderOrigin(), existing.getIdUser());
+            activeCopyOperationCache.markClosed(existing);
         }
     }
 
@@ -378,7 +453,8 @@ public class CopyOperationServiceImpl implements CopyOperationService {
                 String normalized = msg.toLowerCase();
                 if (normalized.contains("23505")
                         || normalized.contains("duplicate key value violates unique constraint")
-                        || normalized.contains("ux_copy_operation_origin_user_type")) {
+                        || normalized.contains("ux_copy_operation_origin_user_type")
+                        || normalized.contains("ux_copy_operation_allocation_origin_type_active")) {
                     return true;
                 }
             }

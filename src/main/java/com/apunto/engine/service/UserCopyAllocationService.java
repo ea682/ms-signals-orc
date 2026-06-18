@@ -19,6 +19,8 @@ public interface UserCopyAllocationService {
 
     List<UserCopyAllocationEntity> getActiveAllocationsByWallet(String walletId);
 
+    List<UserCopyAllocationEntity> getActiveAllocationsForUserWallet(UUID idUser, String walletId);
+
     Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId);
 
     Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId, String strategyCode);
