@@ -11,6 +11,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,6 +42,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     @PersistenceContext
     private EntityManager entityManager;
+
+    @Value("${metric-wallet.allocation.default-execution-mode:SHADOW}")
+    private String defaultExecutionMode;
 
     @Override
     @Transactional
@@ -82,7 +86,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             final Set<String> blockedAllocationKeys = new HashSet<>();
             for (UserCopyAllocationEntity e : existingActive) {
                 if (e == null) continue;
-                if (!e.isActive()) {
+                if (!e.isActive() || e.getStatus() != UserCopyAllocationEntity.Status.ACTIVE) {
                     final String allocationKey = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
                     if (allocationKey != null) {
                         blockedAllocationKeys.add(allocationKey);
@@ -216,11 +220,18 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 final String walletId = d.walletId();
 
                 UserCopyAllocationEntity entity = existingByAllocationKey.get(allocationKey);
+                if (entity != null
+                        && (!entity.isActive()
+                        || entity.getEndsAt() != null
+                        || entity.getStatus() == UserCopyAllocationEntity.Status.CLOSED)) {
+                    entity = null;
+                }
                 if (entity == null) {
                     entity = UserCopyAllocationEntity.builder()
                             .idUser(idUser)
                             .walletId(walletId)
                             .isActive(true)
+                            .executionMode(normalizedDefaultExecutionMode())
                             .build();
                 }
 
@@ -237,8 +248,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 entity.setRankWithinStrategy(d.rankWithinStrategy());
                 entity.setGlobalRank(d.globalRank());
                 entity.setStrategyScore(d.strategyScore());
-                entity.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
-                entity.setEndsAt(null);
+                if (entity.getExecutionMode() == null || entity.getExecutionMode().isBlank()) {
+                    entity.setExecutionMode(normalizedDefaultExecutionMode());
+                }
+                if (entity.getStatus() == null || entity.getStatus() == UserCopyAllocationEntity.Status.ACTIVE) {
+                    entity.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
+                    entity.setEndsAt(null);
+                }
                 entity.setUpdatedAt(now);
 
                 toSave.add(entity);
@@ -250,6 +266,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             for (UserCopyAllocationEntity e : existingActive) {
                 if (e == null) continue;
                 if (!e.isActive()) continue;
+                if (e.getStatus() != UserCopyAllocationEntity.Status.ACTIVE) continue;
 
                 final String allocationKey = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
                 if (allocationKey == null) continue;
@@ -312,6 +329,23 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             return List.of();
         }
         return repository.findActiveByWalletId(normalizedWallet)
+                .stream()
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<UserCopyAllocationEntity> getActiveAllocationsForUserWallet(UUID idUser, String walletId) {
+        final String normalizedWallet = normalize(walletId);
+        if (idUser == null || normalizedWallet == null) {
+            return List.of();
+        }
+        return repository.findActiveAllocationsForUserWallet(
+                        idUser,
+                        normalizedWallet,
+                        UserCopyAllocationEntity.Status.ACTIVE
+                )
                 .stream()
                 .filter(Objects::nonNull)
                 .toList();
@@ -483,6 +517,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         if (s == null) return null;
         String t = s.trim();
         return t.isEmpty() ? null : t.toLowerCase();
+    }
+
+    private String normalizedDefaultExecutionMode() {
+        String value = defaultExecutionMode == null ? "" : defaultExecutionMode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        return "LIVE".equals(value) ? "LIVE" : "SHADOW";
     }
 
     private record Dist(

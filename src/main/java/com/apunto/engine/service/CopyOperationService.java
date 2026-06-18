@@ -15,7 +15,9 @@ public interface CopyOperationService {
     List<CopyOperationDto> findOperationsByOrigin(String idOrderOrigin);
     Optional<CopyOperationEntity> findOperationByOrigin(String idOrderOrigin);
     CopyOperationDto findOperationForUser(String idOrderOrigin, String idUser);
+    CopyOperationDto findOperationForAllocation(String idOrderOrigin, String idUser, Long allocationId, String strategyCode, String typeOperation);
     boolean existsByOriginAndUser(String idOrderOrigin, String idUser);
+    List<CopyOperationDto> findActiveOperationsForUserOrigin(String idOrderOrigin, String idUser);
     List<CopyOperationDto> findActiveOperationsByUserAndWallet(String idUser, String walletId);
     void upsertActiveOperation(CopyOperationDto operation);
     CopyOperationDto findOperationForUserAndType(String idOrderOrigin, String idUser, String typeOperation);

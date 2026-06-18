@@ -41,7 +41,6 @@ public interface CopyTradingMapper {
     }
 
     default OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
-        // Los cierres MARKET reduceOnly no deben mandar leverage; ms-binance usa fast path directo a /order.
 
         if ("LONG".equals(copyOperation.getTypeOperation())) {
             return OperationDto.builder()
@@ -51,7 +50,12 @@ public interface CopyTradingMapper {
                     .positionSide(PositionSide.LONG)
                     .quantity(copyOperation.getSizePar().toPlainString())
                     .leverage(null)
-                    .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(copyOperation.getIdOrderOrigin(), userDetail.getUser().getId().toString(), copyOperation.getIdWalletOrigin()))
+                    .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(
+                            copyOperation.getIdOrderOrigin(),
+                            userDetail.getUser().getId().toString(),
+                            copyOperation.getIdWalletOrigin(),
+                            copyOperation.getUserCopyAllocationId(),
+                            copyOperation.getCopyStrategyCode()))
                     .originId(copyOperation.getIdOrderOrigin())
                     .userId(userDetail.getUser().getId().toString())
                     .walletId(copyOperation.getIdWalletOrigin())
@@ -67,7 +71,12 @@ public interface CopyTradingMapper {
                     .positionSide(PositionSide.SHORT)
                     .quantity(copyOperation.getSizePar().toPlainString())
                     .leverage(null)
-                    .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(copyOperation.getIdOrderOrigin(), userDetail.getUser().getId().toString(), copyOperation.getIdWalletOrigin()))
+                    .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(
+                            copyOperation.getIdOrderOrigin(),
+                            userDetail.getUser().getId().toString(),
+                            copyOperation.getIdWalletOrigin(),
+                            copyOperation.getUserCopyAllocationId(),
+                            copyOperation.getCopyStrategyCode()))
                     .originId(copyOperation.getIdOrderOrigin())
                     .userId(userDetail.getUser().getId().toString())
                     .walletId(copyOperation.getIdWalletOrigin())
@@ -140,4 +149,3 @@ public interface CopyTradingMapper {
         return OffsetDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), ZoneOffset.UTC);
     }
 }
-
