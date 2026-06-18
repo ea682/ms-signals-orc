@@ -193,6 +193,7 @@ metric-wallet:
     cooldown-hours: ${METRIC_WALLET_COPY_GUARD_COOLDOWN_HOURS:48}
   allocation:
     sync-enabled: ${METRIC_WALLET_SYNC_DISTRIBUTION_ENABLED:false}
+    default-execution-mode: ${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:SHADOW}
   distribution:
     refresh-job: ${METRIC_WALLET_DISTRIBUTION_REFRESH_JOB:2m}
 

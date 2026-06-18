@@ -11,6 +11,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,6 +42,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     @PersistenceContext
     private EntityManager entityManager;
+
+    @Value("${metric-wallet.allocation.default-execution-mode:SHADOW}")
+    private String defaultExecutionMode;
 
     @Override
     @Transactional
@@ -221,6 +225,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                             .idUser(idUser)
                             .walletId(walletId)
                             .isActive(true)
+                            .executionMode(normalizedDefaultExecutionMode())
                             .build();
                 }
 
@@ -238,6 +243,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 entity.setGlobalRank(d.globalRank());
                 entity.setStrategyScore(d.strategyScore());
                 entity.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
+                if (entity.getExecutionMode() == null || entity.getExecutionMode().isBlank()) {
+                    entity.setExecutionMode(normalizedDefaultExecutionMode());
+                }
                 entity.setEndsAt(null);
                 entity.setUpdatedAt(now);
 
@@ -483,6 +491,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         if (s == null) return null;
         String t = s.trim();
         return t.isEmpty() ? null : t.toLowerCase();
+    }
+
+    private String normalizedDefaultExecutionMode() {
+        String value = defaultExecutionMode == null ? "" : defaultExecutionMode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        return "LIVE".equals(value) ? "LIVE" : "SHADOW";
     }
 
     private record Dist(
