@@ -15,6 +15,7 @@ import com.apunto.engine.service.CopyExecutionJobService;
 import com.apunto.engine.service.OperacionEventIngestService;
 import com.apunto.engine.service.OperationMovementEventService;
 import com.apunto.engine.service.MetricWalletService;
+import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
@@ -58,6 +59,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private final OperationMovementEventService operationMovementEventService;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     private final MetricWalletService metricWalletService;
+    private final ShadowCopyTradingService shadowCopyTradingService;
 
     @Value("${operation.job.ingest.filter-by-wallet-allocation:${copy.job.ingest.filter-by-wallet-allocation:true}}")
     private boolean filterByWalletAllocation;
@@ -90,6 +92,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                     activeCopyOperationCache.traceId(originId, "origin", walletId, operacion.getParSymbol()),
                     null
             );
+            recordShadowSafely(event);
 
             final List<UserDetailDto> usersCached = safeUsers(userDetailCachedService.getUsers());
             final List<UserDetailDto> eligibleUsers = applyBusinessRules(event, action, resolveCandidateUsers(event, action, usersCached));
@@ -140,6 +143,27 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
             return filterUsersById(usersCached, activeCopyOperationCache.activeUserIds(operation.getIdOperacion().toString()));
         }
         return resolveEligibleUsers(operation, action, deltaType, usersCached);
+    }
+
+    private void recordShadowSafely(OperacionEvent event) {
+        try {
+            int recorded = shadowCopyTradingService.recordShadowEvent(event);
+            if (recorded > 0) {
+                OperacionDto op = event == null ? null : event.getOperacion();
+                log.info("event=shadow_separate_ingest_ok originId={} walletId={} symbol={} recorded={} copyImpact=shadow_event_tracked",
+                        op == null || op.getIdOperacion() == null ? null : op.getIdOperacion(),
+                        op == null ? null : op.getIdCuenta(),
+                        op == null ? null : op.getParSymbol(),
+                        recorded);
+            }
+        } catch (RuntimeException ex) {
+            OperacionDto op = event == null ? null : event.getOperacion();
+            log.error("event=shadow_separate_ingest_failed originId={} walletId={} symbol={} reasonCode=shadow_ingest_failed copyImpact=live_not_blocked errClass={} errMsg=\"{}\"",
+                    op == null || op.getIdOperacion() == null ? null : op.getIdOperacion(),
+                    op == null ? null : op.getIdCuenta(),
+                    op == null ? null : op.getParSymbol(),
+                    ex.getClass().getSimpleName(), ex.getMessage());
+        }
     }
 
 

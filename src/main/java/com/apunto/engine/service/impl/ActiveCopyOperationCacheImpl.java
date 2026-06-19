@@ -216,7 +216,7 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         }
         RuntimeCopyRef next = RuntimeCopyRef.pending(originId, userId, walletId, symbol, typeOperation, allocationId, strategyCode, traceId);
         byRuntimeKey.put(key, next);
-        log.info("event=copy_runtime_state.pending_open category=runtime_state reasonAlias=open_in_progress friendlyReason=apertura_en_proceso explanation=la_operacion_queda_en_ram_para_evitar_duplicados_mientras_se_envia_a_binance copyImpact=blocks_duplicate_open traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} typeOperation={} runtimeSize={}",
+        log.info("event=copy_runtime_state.pending_open category=runtime_state reasonAlias=open_in_progress friendlyReason=apertura_en_proceso explanation=la_operacion_queda_en_ram_para_evitar_duplicados_mientras_se_envia_a_binance copyImpact=blocks_duplicate_open traceId={} originId={} userId={} allocationId={} strategyCode={} walletId={} symbol={} typeOperation={} runtimeSize={}",
                 safeLog(next.traceId()), safeLog(originId), safeLog(userId), allocationId, safeLog(strategyCode), safeLog(walletId), safeLog(symbol), safeLog(typeOperation), byRuntimeKey.size());
     }
 
@@ -232,7 +232,7 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         String traceId = traceId(operation.getIdOrderOrigin(), operation.getIdUser(), operation.getIdWalletOrigin(), operation.getParsymbol(), operation.getUserCopyAllocationId(), operation.getCopyStrategyCode());
         RuntimeCopyRef next = RuntimeCopyRef.active(operation, traceId);
         byRuntimeKey.put(key, next);
-        log.info("event=copy_runtime_state.active category=runtime_state reasonAlias=copy_active friendlyReason=copia_activa_en_ram explanation=la_copia_quedo_disponible_en_ram_para_la_ruta_caliente copyImpact=copy_tracked traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} typeOperation={} qty={} runtimeSize={}",
+        log.info("event=copy_runtime_state.active category=runtime_state reasonAlias=copy_active friendlyReason=copia_activa_en_ram explanation=la_copia_quedo_disponible_en_ram_para_la_ruta_caliente copyImpact=copy_tracked traceId={} originId={} userId={} allocationId={} strategyCode={} walletId={} symbol={} typeOperation={} qty={} runtimeSize={}",
                 safeLog(traceId), safeLog(operation.getIdOrderOrigin()), safeLog(operation.getIdUser()),
                 operation.getUserCopyAllocationId(), safeLog(operation.getCopyStrategyCode()), safeLog(operation.getIdWalletOrigin()),
                 safeLog(operation.getParsymbol()), safeLog(operation.getTypeOperation()), operation.getSizePar(), byRuntimeKey.size());
@@ -249,9 +249,9 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         }
         RuntimeCopyRef next = RuntimeCopyRef.uncertain(operation, traceId);
         byRuntimeKey.put(key, next);
-        log.warn("event=copy_runtime_state.uncertain category=runtime_state reasonAlias=copy_state_uncertain friendlyReason=estado_de_copia_incierto explanation=hubo_orden_binance_o_estado_parcial_y_se_requiere_reconciliacion copyImpact=blocks_duplicate_open traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} typeOperation={} reasonCode={} runtimeSize={}",
-                safeLog(next.traceId()), safeLog(operation.getIdOrderOrigin()), safeLog(operation.getIdUser()), safeLog(operation.getIdWalletOrigin()),
-                operation.getUserCopyAllocationId(), safeLog(operation.getCopyStrategyCode()),
+        log.warn("event=copy_runtime_state.uncertain category=runtime_state reasonAlias=copy_state_uncertain friendlyReason=estado_de_copia_incierto explanation=hubo_orden_binance_o_estado_parcial_y_se_requiere_reconciliacion copyImpact=blocks_duplicate_open traceId={} originId={} userId={} allocationId={} strategyCode={} walletId={} symbol={} typeOperation={} reasonCode={} runtimeSize={}",
+                safeLog(next.traceId()), safeLog(operation.getIdOrderOrigin()), safeLog(operation.getIdUser()),
+                operation.getUserCopyAllocationId(), safeLog(operation.getCopyStrategyCode()), safeLog(operation.getIdWalletOrigin()),
                 safeLog(operation.getParsymbol()), safeLog(operation.getTypeOperation()), safeLog(reasonCode), byRuntimeKey.size());
     }
 
@@ -292,7 +292,7 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
         }
         String key = key(operation);
         RuntimeCopyRef removed = key == null ? null : byRuntimeKey.remove(key);
-        log.info("event=copy_runtime_state.closed category=runtime_state reasonAlias=copy_closed friendlyReason=copia_cerrada_en_ram explanation=la_copia_se_removio_de_la_ruta_caliente copyImpact=no_active_copy traceId={} originId={} userId={} allocationId={} strategy={} removed={} runtimeSize={}",
+        log.info("event=copy_runtime_state.closed category=runtime_state reasonAlias=copy_closed friendlyReason=copia_cerrada_en_ram explanation=la_copia_se_removio_de_la_ruta_caliente copyImpact=no_active_copy traceId={} originId={} userId={} allocationId={} strategyCode={} removed={} runtimeSize={}",
                 removed == null ? traceId(operation.getIdOrderOrigin(), operation.getIdUser(), operation.getIdWalletOrigin(), operation.getParsymbol(), operation.getUserCopyAllocationId(), operation.getCopyStrategyCode()) : safeLog(removed.traceId()),
                 safeLog(operation.getIdOrderOrigin()), safeLog(operation.getIdUser()), operation.getUserCopyAllocationId(),
                 safeLog(operation.getCopyStrategyCode()), removed != null, byRuntimeKey.size());
