@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <springProperty scope="context" name="APP_NAME" source="spring.application.name" defaultValue="ms-signals-orc"/>
+    <springProperty scope="context" name="APP_ENV" source="APP_ENV" defaultValue="local"/>
+    <springProperty scope="context" name="SPRING_PROFILE" source="spring.profiles.active" defaultValue="NA"/>
+    <springProperty scope="context" name="LOG_LEVEL_ROOT" source="LOG_LEVEL_ROOT" defaultValue="INFO"/>
+    <springProperty scope="context" name="LOG_LEVEL_APP" source="LOG_LEVEL_APP" defaultValue="INFO"/>
+    <springProperty scope="context" name="LOG_ASYNC_QUEUE_SIZE" source="LOG_ASYNC_QUEUE_SIZE" defaultValue="32768"/>
+    <springProperty scope="context" name="LOG_ASYNC_DISCARDING_THRESHOLD" source="LOG_ASYNC_DISCARDING_THRESHOLD" defaultValue="0"/>
+    <springProperty scope="context" name="LOG_ASYNC_NEVER_BLOCK" source="LOG_ASYNC_NEVER_BLOCK" defaultValue="false"/>
+    <springProperty scope="context" name="LOG_ASYNC_MAX_FLUSH_MS" source="LOG_ASYNC_MAX_FLUSH_MS" defaultValue="5000"/>
+
+    <shutdownHook class="ch.qos.logback.core.hook.DefaultShutdownHook"/>
+
+    <appender name="CONSOLE_SYNC" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>ts=%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%level app=${APP_NAME} profile=${SPRING_PROFILE} env=${APP_ENV} thread="%thread" logger="%logger{36}" traceId=%X{traceId:-NA} %msg%n%wEx</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="CONSOLE_ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>${LOG_ASYNC_QUEUE_SIZE}</queueSize>
+        <discardingThreshold>${LOG_ASYNC_DISCARDING_THRESHOLD}</discardingThreshold>
+        <neverBlock>${LOG_ASYNC_NEVER_BLOCK}</neverBlock>
+        <maxFlushTime>${LOG_ASYNC_MAX_FLUSH_MS}</maxFlushTime>
+        <includeCallerData>false</includeCallerData>
+        <appender-ref ref="CONSOLE_SYNC"/>
+    </appender>
+
+    <logger name="com.apunto.engine" level="${LOG_LEVEL_APP}"/>
+
+    <root level="${LOG_LEVEL_ROOT}">
+        <appender-ref ref="CONSOLE_ASYNC"/>
+    </root>
+</configuration>

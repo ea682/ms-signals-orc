@@ -4,14 +4,33 @@ public record CopyStrategyGuardDecision(
         boolean allowed,
         String reason,
         String detail,
-        String statusWhenBlocked
+        String statusWhenBlocked,
+        String action,
+        double capitalMultiplier,
+        String targetExecutionMode
 ) {
     public static CopyStrategyGuardDecision allow() {
-        return new CopyStrategyGuardDecision(true, "OK", "", null);
+        return new CopyStrategyGuardDecision(true, "OK", "", null, "ALLOW", 1.0, "KEEP");
+    }
+
+    public static CopyStrategyGuardDecision warn(String reason, String detail, double capitalMultiplier) {
+        return new CopyStrategyGuardDecision(true, reason, detail == null ? "" : detail, null, "WARNING", clampMultiplier(capitalMultiplier), "KEEP");
+    }
+
+    public static CopyStrategyGuardDecision reduce(String reason, String detail, double capitalMultiplier) {
+        return new CopyStrategyGuardDecision(true, reason, detail == null ? "" : detail, null, "REDUCE_CAPITAL", clampMultiplier(capitalMultiplier), "KEEP");
+    }
+
+    public static CopyStrategyGuardDecision shadowOnly(String reason, String detail, double capitalMultiplier) {
+        return new CopyStrategyGuardDecision(true, reason, detail == null ? "" : detail, null, "SHADOW_ONLY", clampMultiplier(capitalMultiplier), "SHADOW");
     }
 
     public static CopyStrategyGuardDecision blocked(String reason, String detail) {
-        return new CopyStrategyGuardDecision(false, reason, detail == null ? "" : detail, statusFor(reason));
+        return new CopyStrategyGuardDecision(false, reason, detail == null ? "" : detail, statusFor(reason), "PAUSE_OPEN", 0.0, "KEEP");
+    }
+
+    public static CopyStrategyGuardDecision disabled(String reason, String detail) {
+        return new CopyStrategyGuardDecision(false, reason, detail == null ? "" : detail, "PAUSED_BY_RISK", "DISABLED", 0.0, "KEEP");
     }
 
     private static String statusFor(String reason) {
@@ -19,7 +38,12 @@ public record CopyStrategyGuardDecision(
         String r = reason.trim().toUpperCase(java.util.Locale.ROOT);
         if (r.contains("NEGATIVE")) return "PAUSED_BY_NEGATIVE_PNL";
         if (r.contains("STALE") || r.contains("MISSING")) return "PAUSED_BY_STALE_METRIC";
-        if (r.contains("RISK") || r.contains("COVERAGE")) return "PAUSED_BY_RISK";
+        if (r.contains("RISK") || r.contains("COVERAGE") || r.contains("PAUSE") || r.contains("GUARD")) return "PAUSED_BY_RISK";
         return "EXIT_ONLY";
+    }
+
+    private static double clampMultiplier(double value) {
+        if (!Double.isFinite(value)) return 1.0;
+        return Math.max(0.0, Math.min(1.0, value));
     }
 }

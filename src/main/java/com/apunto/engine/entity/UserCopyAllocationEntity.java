@@ -121,6 +121,26 @@ public class UserCopyAllocationEntity {
     @Column(name = "copy_min_notional_min_operations")
     private Integer copyMinNotionalMinOperations;
 
+    @Builder.Default
+    @Column(name = "scope_type", nullable = false, length = 32)
+    private String scopeType = "strategy";
+
+    @Builder.Default
+    @Column(name = "scope_value", nullable = false, length = 160)
+    private String scopeValue = "default";
+
+    @Column(name = "strategy_key", length = 420)
+    private String strategyKey;
+
+    @Column(name = "linked_shadow_allocation_id")
+    private Long linkedShadowAllocationId;
+
+    @Column(name = "promoted_from_shadow_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime promotedFromShadowAt;
+
+    @Column(name = "source_ranking_version", length = 80)
+    private String sourceRankingVersion;
+
     public enum Status {
         ACTIVE,
         EXIT_ONLY,
@@ -149,6 +169,9 @@ public class UserCopyAllocationEntity {
         copyStrategyLabel = normalize(copyStrategyLabel);
         copyMode = normalize(copyMode);
         strategySourceEndpoint = normalize(strategySourceEndpoint);
+        scopeType = normalizeScopeType(scopeType);
+        scopeValue = normalizeScopeValue(scopeValue);
+        strategyKey = normalizeStrategyKey(strategyKey, walletId, copyStrategyCode, scopeType, scopeValue);
 
         if (strategyScore != null) {
             strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
@@ -179,6 +202,9 @@ public class UserCopyAllocationEntity {
         copyStrategyLabel = normalize(copyStrategyLabel);
         copyMode = normalize(copyMode);
         strategySourceEndpoint = normalize(strategySourceEndpoint);
+        scopeType = normalizeScopeType(scopeType);
+        scopeValue = normalizeScopeValue(scopeValue);
+        strategyKey = normalizeStrategyKey(strategyKey, walletId, copyStrategyCode, scopeType, scopeValue);
 
         if (strategyScore != null) {
             strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
@@ -212,6 +238,24 @@ public class UserCopyAllocationEntity {
         String t = normalize(s);
         if (t == null) return "MOVEMENT_ALL";
         return t.toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+    }
+
+    private static String normalizeScopeType(String s) {
+        String t = normalize(s);
+        return t == null ? "strategy" : t.toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static String normalizeScopeValue(String s) {
+        String t = normalize(s);
+        return t == null ? "default" : t;
+    }
+
+    private static String normalizeStrategyKey(String current, String walletId, String strategyCode, String scopeType, String scopeValue) {
+        String t = normalize(current);
+        if (t != null) return t;
+        String wallet = walletId == null ? "" : walletId.toLowerCase(java.util.Locale.ROOT);
+        String strategy = normalizeStrategyCode(strategyCode);
+        return wallet + "|" + strategy + "|" + normalizeScopeType(scopeType) + "|" + normalizeScopeValue(scopeValue);
     }
 
     public boolean allowsNewEntries(OffsetDateTime now) {

@@ -19,6 +19,7 @@ public class MetricaWalletDto {
     private WalletDto wallet;
     private ActivityDto activity;
     private StrategyDto strategy;
+    private RealJewelDto realJewel;
     private ScoringDto scoring;
     private CopySimulationDto copySimulation;
     private ExposureAndCapacityDto exposureAndCapacity;
@@ -80,6 +81,59 @@ public class MetricaWalletDto {
         private String sourceEndpoint;
         private Double score;
         private CopyabilityDto copyability;
+        private CopyGuardDto copyGuard;
+        private RealJewelDto riskAdjustedCapitalEfficiency;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class RealJewelDto {
+        private String basis;
+        private String unitKey;
+        private String walletId;
+        private String strategyCode;
+        private String strategyLabel;
+        private String scopeType;
+        private String scopeValue;
+        private Double scoreFinal;
+        private Double rankingScore;
+        private Double capitalEfficiency;
+        private Double capitalEfficiencyPct;
+        private Double pnlCopyNetAdjusted;
+        private Double capitalUsed;
+        private String capitalUsedBasis;
+        private Double riskScore;
+        private Double dataQualityScore;
+        private Double consistencyScore;
+        private Double executionScore;
+        private Double shadowScore;
+        private Double strategyLiftScore;
+        private String status;
+        private CopyGuardDto copyGuard;
+        private List<String> reasons;
+        private List<String> hardRejectReasons;
+        private List<String> flags;
+        private Boolean requiresFullSimulation;
+        private Boolean redundantVariant;
+        private String redundantOf;
+        private Double redundantOverlapPct;
+        private Map<String, Object> topTradeConcentration;
+        private String explanation;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class CopyGuardDto {
+        private String status;
+        private String action;
+        private Boolean allowNewEntries;
+        private Boolean allowReductions;
+        private Boolean allowCloses;
+        private Double capitalMultiplier;
+        private String targetExecutionMode;
+        private Double severityScore;
+        private List<String> reasons;
+        private List<String> logs;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
@@ -425,4 +479,3 @@ public class MetricaWalletDto {
         private List<String> reconciliationReasons;
     }
 }
-

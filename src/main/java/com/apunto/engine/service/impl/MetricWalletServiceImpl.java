@@ -24,7 +24,6 @@ import org.springframework.web.client.RestClientException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +31,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Service
@@ -57,15 +57,20 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private final boolean copyGuardRequireWindowData;
     private final double copyGuardMinTotalPnlUsdt;
     private final double copyGuardMinWindowPnlUsdt;
+    private final double copyGuardPauseTotalPnlUsdt;
+    private final double copyGuardPauseWindowPnlUsdt;
+    private final double copyGuardOneWeekCapitalMultiplier;
+    private final double copyGuardOneMonthCapitalMultiplier;
     private final List<String> copyGuardWindows;
 
     private final MetricWalletsInfoClient metricWalletsInfoClient;
     private final UserCopyAllocationService userCopyAllocationService;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
 
-    private final AtomicReference<List<MetricaWalletDto>> lastKnownGoodHistory = new AtomicReference<>(List.of());
+    private final AtomicReference<HistorySnapshot> lastKnownGoodHistory = new AtomicReference<>(HistorySnapshot.empty());
+    private final AtomicLong lastKnownGoodWarnAtMs = new AtomicLong(0L);
 
-    private final LoadingCache<Integer, List<MetricaWalletDto>> allPositionHistoryCache;
+    private final LoadingCache<Integer, HistorySnapshot> allPositionHistoryCache;
 
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
@@ -90,6 +95,10 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             @Value("${metric-wallet.copy-guard.require-window-data:true}") boolean copyGuardRequireWindowData,
             @Value("${metric-wallet.copy-guard.min-total-pnl-usdt:0}") double copyGuardMinTotalPnlUsdt,
             @Value("${metric-wallet.copy-guard.min-window-pnl-usdt:0}") double copyGuardMinWindowPnlUsdt,
+            @Value("${metric-wallet.copy-guard.pause-total-pnl-usdt:-50}") double copyGuardPauseTotalPnlUsdt,
+            @Value("${metric-wallet.copy-guard.pause-window-pnl-usdt:-25}") double copyGuardPauseWindowPnlUsdt,
+            @Value("${metric-wallet.copy-guard.one-week-capital-multiplier:0.70}") double copyGuardOneWeekCapitalMultiplier,
+            @Value("${metric-wallet.copy-guard.one-month-capital-multiplier:0.25}") double copyGuardOneMonthCapitalMultiplier,
             @Value("${metric-wallet.copy-guard.windows:2w,1mo}") String copyGuardWindows
     ) {
         this.metricWalletsInfoClient = Objects.requireNonNull(metricWalletsInfoClient, "metricWalletsInfoClient");
@@ -120,11 +129,15 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         this.copyGuardRequireWindowData = copyGuardRequireWindowData;
         this.copyGuardMinTotalPnlUsdt = copyGuardMinTotalPnlUsdt;
         this.copyGuardMinWindowPnlUsdt = copyGuardMinWindowPnlUsdt;
+        this.copyGuardPauseTotalPnlUsdt = copyGuardPauseTotalPnlUsdt;
+        this.copyGuardPauseWindowPnlUsdt = copyGuardPauseWindowPnlUsdt;
+        this.copyGuardOneWeekCapitalMultiplier = copyGuardOneWeekCapitalMultiplier;
+        this.copyGuardOneMonthCapitalMultiplier = copyGuardOneMonthCapitalMultiplier;
         this.copyGuardWindows = parseGuardWindows(copyGuardWindows);
 
         log.info(
-                "event=metric_wallets.config historyLimit={} historySource={} joyasLimit={} joyasDayz={} joyasSimulation={} minHistoryDays={} copyGuardEnabled={} copyGuardWindows={} copyGuardMinWindowPnlUsdt={} copyGuardMinTotalPnlUsdt={} copyGuardRequireWindowData={} copyGuardFailOpenOnMissingMetric={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={} syncDistributionEnabled={}",
-                this.historyLimit, this.historySource, this.joyasLimit, this.joyasDayz, this.joyasSimulation, this.minHistoryDays, this.copyGuardEnabled, this.copyGuardWindows, this.copyGuardMinWindowPnlUsdt, this.copyGuardMinTotalPnlUsdt, this.copyGuardRequireWindowData, this.copyGuardFailOpenOnMissingMetric, this.cacheMaxSize, this.cacheRefreshAfter, this.cacheExpireAfter, this.slowThreshold, this.syncDistributionEnabled
+                "event=metric_wallets.config historyLimit={} historySource={} joyasLimit={} joyasDayz={} joyasSimulation={} minHistoryDays={} copyGuardEnabled={} copyGuardWindows={} copyGuardMinWindowPnlUsdt={} copyGuardMinTotalPnlUsdt={} copyGuardPauseWindowPnlUsdt={} copyGuardPauseTotalPnlUsdt={} copyGuardRequireWindowData={} copyGuardFailOpenOnMissingMetric={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={} syncDistributionEnabled={}",
+                this.historyLimit, this.historySource, this.joyasLimit, this.joyasDayz, this.joyasSimulation, this.minHistoryDays, this.copyGuardEnabled, this.copyGuardWindows, this.copyGuardMinWindowPnlUsdt, this.copyGuardMinTotalPnlUsdt, this.copyGuardPauseWindowPnlUsdt, this.copyGuardPauseTotalPnlUsdt, this.copyGuardRequireWindowData, this.copyGuardFailOpenOnMissingMetric, this.cacheMaxSize, this.cacheRefreshAfter, this.cacheExpireAfter, this.slowThreshold, this.syncDistributionEnabled
         );
     }
 
@@ -149,27 +162,16 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         final HistoryResult history = getHistory(historyLimit);
         final String historySource = history == null ? "null" : history.source();
         final List<MetricaWalletDto> historyValues = history == null ? List.of() : history.values();
+        final HistoryIndex historyIndex = history == null ? HistoryIndex.empty() : history.index();
 
-        final Map<String, MetricaWalletDto> metricByAllocationKey = new HashMap<>();
-        final Map<String, MetricaWalletDto> metricByWalletId = new HashMap<>();
-        for (MetricaWalletDto m : historyValues) {
-            if (m == null || m.getWallet() == null || m.getWallet().getIdWallet() == null) {
-                continue;
-            }
-            final String walletId = normalizeWalletId(m.getWallet().getIdWallet());
-            final String allocationKey = copyStrategyRuntimeRouter.allocationKey(walletId, copyStrategyRuntimeRouter.strategyCodeOf(m));
-            if (allocationKey != null) {
-                metricByAllocationKey.put(allocationKey, m);
-            }
-            metricByWalletId.putIfAbsent(walletId, m);
-        }
-
-        log.info(
-                "event=metric_wallets.candidates.lookup userId={} allocations={} historySource={} historySize={} sampleAllocations={} sampleHistory={}",
+        log.debug(
+                "event=metric_wallets.candidates.lookup userId={} allocations={} historySource={} historySize={} indexedByAllocation={} indexedByWallet={} sampleAllocations={} sampleHistory={}",
                 idUser,
                 allocations.size(),
                 historySource,
                 historyValues.size(),
+                historyIndex.allocationSize(),
+                historyIndex.walletSize(),
                 allocations.stream()
                         .map(UserCopyAllocationEntity::getWalletId)
                         .filter(Objects::nonNull)
@@ -203,8 +205,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                             .orElse(0.0);
 
                     final MetricaWalletDto cached = allocationKey == null
-                            ? metricByWalletId.get(walletId)
-                            : metricByAllocationKey.get(allocationKey);
+                            ? historyIndex.findByWallet(walletId)
+                            : historyIndex.findByAllocationKey(allocationKey);
                     if (cached != null) {
                         final CopyStrategyGuardDecision guardDecision = evaluateCopyGuard(cached);
                         if (!guardDecision.allowed()) {
@@ -217,14 +219,26 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
                         MetricaWalletDto out = new MetricaWalletDto();
                         BeanUtils.copyProperties(cached, out);
-                        out.setCapitalShare(allocationPct);
+                        final double effectiveAllocationPct = clamp01(allocationPct * guardDecision.capitalMultiplier());
+                        if (effectiveAllocationPct <= 0.0) {
+                            log.warn(
+                                    "event=metric_wallets.candidates.skip_allocation userId={} wallet={} strategy={} reason=guard_capital_zero action={} allocationPct={} multiplier={} historySource={}",
+                                    idUser, walletId, strategyCode, guardDecision.action(), allocationPct, guardDecision.capitalMultiplier(), historySource
+                            );
+                            return null;
+                        }
+                        out.setCapitalShare(effectiveAllocationPct);
 
-                        log.info(
-                                "event=metric_wallets.candidates.match userId={} wallet={} strategy={} allocationPct={} hasScoring={} decisionMetricConservative={} historySource={}",
+                        log.debug(
+                                "event=metric_wallets.candidates.match userId={} wallet={} strategy={} allocationPct={} effectiveAllocationPct={} guardAction={} guardMultiplier={} guardTargetExecutionMode={} hasScoring={} decisionMetricConservative={} historySource={}",
                                 idUser,
                                 walletId,
                                 strategyCode,
                                 allocationPct,
+                                effectiveAllocationPct,
+                                guardDecision.action(),
+                                guardDecision.capitalMultiplier(),
+                                guardDecision.targetExecutionMode(),
                                 out.getScoring() != null,
                                 out.getScoring() != null ? out.getScoring().getDecisionMetricConservative() : null,
                                 historySource
@@ -278,7 +292,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .count();
         final long placeholders = result.size() - withScoring;
 
-        log.info(
+        log.debug(
                 "event=metric_wallets.candidates.result userId={} resultSize={} withScoring={} placeholders={} sampleResult={}",
                 idUser,
                 result.size(),
@@ -301,7 +315,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     @Override
     public boolean isCopyStrategyHealthyForCopy(String walletId, String strategyCode) {
-        return evaluateCopyStrategyForCopy(walletId, strategyCode).allowed();
+        CopyStrategyGuardDecision decision = evaluateCopyStrategyForCopy(walletId, strategyCode);
+        return decision.allowed() && !"SHADOW_ONLY".equals(decision.action());
     }
 
     @Override
@@ -320,16 +335,20 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         final HistoryResult history = getHistory(historyLimit);
         final List<MetricaWalletDto> values = history == null ? List.of() : history.values();
-        final MetricaWalletDto metric = findMetric(values, walletKey, strategyKey);
+        final HistoryIndex index = history == null ? HistoryIndex.empty() : history.index();
+        final MetricaWalletDto metric = index.find(walletKey, strategyKey);
         if (metric == null) {
             final boolean allowed = copyGuardFailOpenOnMissingMetric;
             log.warn(
-                    "event=metric_wallets.copy_guard.missing_metric wallet={} strategy={} allowed={} historySource={} historySize={}",
+                    "event=metric_wallets.copy_guard.missing_metric walletId={} strategyCode={} allowed={} historySource={} historySize={} indexedByAllocation={} indexedByWallet={} reasonCode=METRIC_MISSING copyImpact={}",
                     walletKey,
                     strategyKey,
                     allowed,
                     history == null ? "null" : history.source(),
-                    values.size()
+                    values.size(),
+                    index.allocationSize(),
+                    index.walletSize(),
+                    allowed ? "fail_open_allowed" : "no_new_live_open"
             );
             return allowed
                     ? CopyStrategyGuardDecision.allow()
@@ -339,7 +358,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         final CopyStrategyGuardDecision decision = evaluateCopyGuard(metric);
         if (!decision.allowed()) {
             log.warn(
-                    "event=metric_wallets.copy_guard.block wallet={} strategy={} reason={} detail={}",
+                    "event=metric_wallets.copy_guard.block walletId={} strategyCode={} reasonCode={} detail={} copyImpact=no_new_live_open",
                     walletKey,
                     strategyKey,
                     decision.reason(),
@@ -371,6 +390,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         List<MetricaWalletDto> candidates = selectCandidates(history.values(), dayzLimit);
 
         CapitalAllocator.allocate(candidates, maxCapitalToUse, maxPerWallet);
+        applyGuardCapitalMultipliers(candidates);
         validateLimits(candidates, maxPerWallet, maxCapitalToUse);
 
         syncDistributionIfEnabled(candidates, history.source());
@@ -398,8 +418,14 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     @EventListener(ApplicationReadyEvent.class)
     public void primeHistoryCache() {
         try {
-            List<MetricaWalletDto> v = allPositionHistoryCache.get(historyLimit);
-            log.info("event=metric_wallets.cache_primed limit={} size={}", historyLimit, v.size());
+            HistorySnapshot snapshot = allPositionHistoryCache.get(historyLimit);
+            log.info(
+                    "event=metric_wallets.cache_primed limit={} size={} indexedByAllocation={} indexedByWallet={}",
+                    historyLimit,
+                    snapshot.size(),
+                    snapshot.index().allocationSize(),
+                    snapshot.index().walletSize()
+            );
         } catch (EngineException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             log.warn("event=metric_wallets.cache_prime_failed limit={} errClass={} errMsg=\"{}\"", historyLimit, ex.getClass().getSimpleName(), safeErr(ex));
         }
@@ -415,7 +441,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         }
     }
 
-    private LoadingCache<Integer, List<MetricaWalletDto>> buildHistoryCache() {
+    private LoadingCache<Integer, HistorySnapshot> buildHistoryCache() {
         return Caffeine.newBuilder()
                 .maximumSize(cacheMaxSize)
                 .refreshAfterWrite(cacheRefreshAfter)
@@ -424,11 +450,11 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .build(this::loadAllPositionHistory);
     }
 
-    private List<MetricaWalletDto> loadAllPositionHistory(Integer limit) {
+    private HistorySnapshot loadAllPositionHistory(Integer limit) {
         return loadAllPositionHistory(limit, dayzLimit);
     }
 
-    private List<MetricaWalletDto> loadAllPositionHistory(Integer limit, Integer dayz) {
+    private HistorySnapshot loadAllPositionHistory(Integer limit, Integer dayz) {
         final long startNs = System.nanoTime();
 
         List<MetricaWalletDto> resp;
@@ -441,7 +467,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         } catch (RestClientException | IllegalStateException | IllegalArgumentException ex) {
             long durationMs = elapsedMs(startNs);
             log.warn("event=metric_wallets.history_client_failed source={} limit={} dayz={} joyasLimit={} joyasDayz={} durationMs={} errClass={} errMsg=\"{}\"", historySource, limit, dayz, joyasLimit, joyasDayz, durationMs, ex.getClass().getSimpleName(), safeErr(ex));
-            return List.of();
+            return HistorySnapshot.empty();
         }
 
         long durationMs = elapsedMs(startNs);
@@ -449,23 +475,34 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         if (resp == null) {
             log.warn("event=metric_wallets.history_null limit={} durationMs={}", limit, durationMs);
-            return List.of();
+            return HistorySnapshot.empty();
         }
 
         if (!resp.isEmpty()) {
-            lastKnownGoodHistory.set(List.copyOf(resp));
+            HistorySnapshot snapshot = HistorySnapshot.from(resp, copyStrategyRuntimeRouter);
+            lastKnownGoodHistory.set(snapshot);
+            log.debug(
+                    "event=metric_wallets.history_loaded source={} limit={} size={} indexedByAllocation={} indexedByWallet={} durationMs={}",
+                    historySource,
+                    limit,
+                    snapshot.size(),
+                    snapshot.index().allocationSize(),
+                    snapshot.index().walletSize(),
+                    durationMs
+            );
+            return snapshot;
         } else {
             log.warn("event=metric_wallets.history_empty_response limit={} durationMs={}", limit, durationMs);
         }
 
         log.debug("event=metric_wallets.history_loaded source={} limit={} size={} durationMs={}", historySource, limit, size, durationMs);
-        return resp;
+        return HistorySnapshot.empty();
     }
 
     private HistoryResult getHistory(int limit) {
         try {
-            List<MetricaWalletDto> v = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(List.of());
-            if (!v.isEmpty()) return new HistoryResult(v, "cache");
+            HistorySnapshot snapshot = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(HistorySnapshot.empty());
+            if (!snapshot.isEmpty()) return new HistoryResult(snapshot, "cache");
         } catch (EngineException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             log.warn(
                     "event=metric_wallets.history_load_failed limit={} errClass={} errMsg=\"{}\" cacheStats={}",
@@ -473,17 +510,18 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             );
         }
 
-        List<MetricaWalletDto> present = allPositionHistoryCache.getIfPresent(limit);
+        HistorySnapshot present = allPositionHistoryCache.getIfPresent(limit);
         if (present != null && !present.isEmpty()) {
             return new HistoryResult(present, "cache_if_present");
         }
 
-        List<MetricaWalletDto> lkg = lastKnownGoodHistory.get();
+        HistorySnapshot lkg = lastKnownGoodHistory.get();
         if (lkg != null && !lkg.isEmpty()) {
+            warnLastKnownGoodIfDue(limit, lkg);
             return new HistoryResult(lkg, "last_known_good");
         }
 
-        return new HistoryResult(List.of(), "empty");
+        return new HistoryResult(HistorySnapshot.empty(), "empty");
     }
 
     private List<MetricaWalletDto> selectCandidates(List<MetricaWalletDto> base, int dayzLimit) {
@@ -514,7 +552,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         CopyStrategyGuardDecision decision = evaluateCopyGuard(dto);
         if (!decision.allowed()) {
             log.info(
-                    "event=metric_wallets.candidate_filtered reason={} detail={} wallet={} strategy={}",
+                    "event=metric_wallets.candidate_filtered reasonCode={} detail={} walletId={} strategyCode={} copyImpact=no_live_candidate",
                     decision.reason(),
                     decision.detail(),
                     dto == null || dto.getWallet() == null ? null : dto.getWallet().getIdWallet(),
@@ -531,6 +569,13 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         if (dto == null) {
             return CopyStrategyGuardDecision.blocked("METRIC_NULL", "metric dto is null");
         }
+        String walletId = dto.getWallet() == null ? null : dto.getWallet().getIdWallet();
+        String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(dto);
+
+        CopyStrategyGuardDecision realJewelDecision = decisionFromMetricCopyGuard(dto);
+        if (realJewelDecision != null) {
+            return realJewelDecision;
+        }
 
         MetricaWalletDto.CopySimulationDto simulation = dto.getCopySimulation();
         if (simulation == null) {
@@ -541,10 +586,10 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         Double totalNet = simulation.getPnlCopyTotalNetUSDT();
         if (totalNet != null && totalNet < copyGuardMinTotalPnlUsdt) {
-            return CopyStrategyGuardDecision.blocked(
-                    "NEGATIVE_TOTAL_NET_PNL",
-                    "pnlCopyTotalNetUSDT=" + totalNet + " min=" + copyGuardMinTotalPnlUsdt
-            );
+            String detail = "pnlCopyTotalNetUSDT=" + totalNet + " min=" + copyGuardMinTotalPnlUsdt + " pauseAt=" + copyGuardPauseTotalPnlUsdt;
+            return totalNet <= copyGuardPauseTotalPnlUsdt
+                    ? CopyStrategyGuardDecision.blocked("NEGATIVE_TOTAL_NET_PNL", detail)
+                    : CopyStrategyGuardDecision.reduce("NEGATIVE_TOTAL_NET_PNL", detail, 0.5);
         }
 
         for (String window : copyGuardWindows) {
@@ -559,14 +604,102 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 continue;
             }
             if (pnl < copyGuardMinWindowPnlUsdt) {
-                return CopyStrategyGuardDecision.blocked(
-                        "NEGATIVE_WINDOW_NET_PNL",
-                        "window=" + window + " pnl=" + pnl + " min=" + copyGuardMinWindowPnlUsdt
-                );
+                String detail = "window=" + window + " pnl=" + pnl + " min=" + copyGuardMinWindowPnlUsdt + " pauseAt=" + copyGuardPauseWindowPnlUsdt;
+                String normalizedWindow = window == null ? "" : window.trim().toLowerCase(java.util.Locale.ROOT);
+                if ("1w".equals(normalizedWindow)) {
+                    log.info("event=guard_1w_warning walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_1W_NET_PNL action=REDUCE_CAPITAL copyImpact=capital_reduced",
+                            walletId, strategyCode, window, pnl);
+                    return CopyStrategyGuardDecision.reduce("NEGATIVE_1W_NET_PNL", detail, copyGuardOneWeekCapitalMultiplier);
+                }
+                if ("2w".equals(normalizedWindow)) {
+                    log.warn("event=guard_2w_pause_open walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_2W_NET_PNL action=PAUSE_OPEN copyImpact=no_new_live_open",
+                            walletId, strategyCode, window, pnl);
+                    return CopyStrategyGuardDecision.blocked("NEGATIVE_2W_NET_PNL", detail);
+                }
+                if ("1mo".equals(normalizedWindow)) {
+                    log.warn("event=guard_1mo_shadow_only walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_1MO_NET_PNL action=SHADOW_ONLY copyImpact=shadow_only",
+                            walletId, strategyCode, window, pnl);
+                    return CopyStrategyGuardDecision.shadowOnly("NEGATIVE_1MO_NET_PNL", detail, copyGuardOneMonthCapitalMultiplier);
+                }
+                return pnl <= copyGuardPauseWindowPnlUsdt
+                        ? CopyStrategyGuardDecision.blocked("NEGATIVE_WINDOW_NET_PNL", detail)
+                        : CopyStrategyGuardDecision.reduce("NEGATIVE_WINDOW_NET_PNL", detail, 0.5);
             }
         }
 
         return CopyStrategyGuardDecision.allow();
+    }
+
+    private CopyStrategyGuardDecision decisionFromMetricCopyGuard(MetricaWalletDto dto) {
+        MetricaWalletDto.CopyGuardDto guard = metricCopyGuard(dto);
+        if (guard == null || guard.getAction() == null || guard.getAction().isBlank()) {
+            return null;
+        }
+        String action = guard.getAction().trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        String status = guard.getStatus() == null ? "" : guard.getStatus().trim().toUpperCase(java.util.Locale.ROOT);
+        String detail = "status=" + status
+                + " reasons=" + String.join("|", guard.getReasons() == null ? List.of() : guard.getReasons())
+                + " severity=" + guard.getSeverityScore();
+        double multiplier = guard.getCapitalMultiplier() == null ? 1.0 : guard.getCapitalMultiplier();
+        boolean allowNewEntries = !Boolean.FALSE.equals(guard.getAllowNewEntries());
+
+        if ("DISABLED".equals(action) || "DISABLED".equals(status)) {
+            return CopyStrategyGuardDecision.disabled("METRIC_COPY_GUARD_DISABLED", detail);
+        }
+        if ("PAUSE_OPEN".equals(action) || !allowNewEntries) {
+            return CopyStrategyGuardDecision.blocked("METRIC_COPY_GUARD_PAUSE_OPEN", detail);
+        }
+        if ("SHADOW_ONLY".equals(action) || "SHADOW_ONLY".equals(status)) {
+            return CopyStrategyGuardDecision.shadowOnly("METRIC_COPY_GUARD_SHADOW_ONLY", detail, multiplier);
+        }
+        if ("REDUCE_CAPITAL".equals(action) || "REDUCE_CAPITAL".equals(status) || "HIGH_RISK".equals(status)) {
+            return CopyStrategyGuardDecision.reduce("METRIC_COPY_GUARD_REDUCE_CAPITAL", detail, multiplier);
+        }
+        if ("WARNING".equals(action) || "WATCHLIST".equals(status) || "DATA_RISK".equals(status)) {
+            return CopyStrategyGuardDecision.warn("METRIC_COPY_GUARD_WARNING", detail, multiplier);
+        }
+        return CopyStrategyGuardDecision.allow();
+    }
+
+    private static MetricaWalletDto.CopyGuardDto metricCopyGuard(MetricaWalletDto dto) {
+        if (dto == null) {
+            return null;
+        }
+        if (dto.getRealJewel() != null && dto.getRealJewel().getCopyGuard() != null) {
+            return dto.getRealJewel().getCopyGuard();
+        }
+        if (dto.getStrategy() != null && dto.getStrategy().getCopyGuard() != null) {
+            return dto.getStrategy().getCopyGuard();
+        }
+        if (dto.getStrategy() != null
+                && dto.getStrategy().getRiskAdjustedCapitalEfficiency() != null
+                && dto.getStrategy().getRiskAdjustedCapitalEfficiency().getCopyGuard() != null) {
+            return dto.getStrategy().getRiskAdjustedCapitalEfficiency().getCopyGuard();
+        }
+        return null;
+    }
+
+    private void applyGuardCapitalMultipliers(List<MetricaWalletDto> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return;
+        }
+        for (MetricaWalletDto candidate : candidates) {
+            CopyStrategyGuardDecision decision = evaluateCopyGuard(candidate);
+            double before = candidate == null ? 0.0 : candidate.getCapitalShare();
+            if (candidate != null && decision.allowed() && decision.capitalMultiplier() < 1.0) {
+                double after = clamp01(before * decision.capitalMultiplier());
+                candidate.setCapitalShare(after);
+                log.info("event=metric_wallets.capital_guard_applied walletId={} strategyCode={} action={} multiplier={} capitalShareBefore={} capitalShareAfter={} reasonCode={} detail={} copyImpact=capital_reduced",
+                        candidate.getWallet() == null ? null : candidate.getWallet().getIdWallet(),
+                        copyStrategyRuntimeRouter.strategyCodeOf(candidate),
+                        decision.action(),
+                        decision.capitalMultiplier(),
+                        before,
+                        after,
+                        decision.reason(),
+                        decision.detail());
+            }
+        }
     }
 
     private static MetricaWalletDto findMetric(List<MetricaWalletDto> values, String walletKey, String strategyCode) {
@@ -636,6 +769,13 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return value != null && value >= threshold;
     }
 
+    private static double clamp01(double value) {
+        if (!Double.isFinite(value)) {
+            return 0.0;
+        }
+        return Math.max(0.0, Math.min(1.0, value));
+    }
+
 
     private MetricaWalletDto copyForAllocation(MetricaWalletDto src) {
         MetricaWalletDto dst = new MetricaWalletDto();
@@ -686,13 +826,140 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return t.getClass().getSimpleName() + ": " + (t.getMessage() == null ? "" : t.getMessage());
     }
 
+    private void warnLastKnownGoodIfDue(int limit, HistorySnapshot snapshot) {
+        long now = System.currentTimeMillis();
+        long prev = lastKnownGoodWarnAtMs.get();
+        if (now - prev < 60_000L || !lastKnownGoodWarnAtMs.compareAndSet(prev, now)) {
+            return;
+        }
+        log.warn(
+                "event=metric_wallets.history_lkg_used limit={} size={} indexedByAllocation={} indexedByWallet={} reasonCode=cache_empty_or_refresh_failed copyImpact=uses_stale_metric_snapshot",
+                limit,
+                snapshot.size(),
+                snapshot.index().allocationSize(),
+                snapshot.index().walletSize()
+        );
+    }
+
+    private static final class HistorySnapshot {
+        private static final HistorySnapshot EMPTY = new HistorySnapshot(List.of(), HistoryIndex.empty());
+
+        private final List<MetricaWalletDto> values;
+        private final HistoryIndex index;
+
+        private HistorySnapshot(List<MetricaWalletDto> values, HistoryIndex index) {
+            this.values = values == null ? List.of() : values;
+            this.index = index == null ? HistoryIndex.empty() : index;
+        }
+
+        static HistorySnapshot empty() {
+            return EMPTY;
+        }
+
+        static HistorySnapshot from(List<MetricaWalletDto> values, CopyStrategyRuntimeRouter router) {
+            List<MetricaWalletDto> snapshot = values == null ? List.of() : List.copyOf(values);
+            return snapshot.isEmpty()
+                    ? empty()
+                    : new HistorySnapshot(snapshot, HistoryIndex.from(snapshot, router));
+        }
+
+        List<MetricaWalletDto> values() {
+            return values;
+        }
+
+        HistoryIndex index() {
+            return index;
+        }
+
+        int size() {
+            return values.size();
+        }
+
+        boolean isEmpty() {
+            return values.isEmpty();
+        }
+    }
+
+    private static final class HistoryIndex {
+        private static final HistoryIndex EMPTY = new HistoryIndex(Map.of(), Map.of());
+
+        private final Map<String, MetricaWalletDto> byAllocationKey;
+        private final Map<String, MetricaWalletDto> byWalletId;
+
+        private HistoryIndex(Map<String, MetricaWalletDto> byAllocationKey,
+                             Map<String, MetricaWalletDto> byWalletId) {
+            this.byAllocationKey = byAllocationKey == null ? Map.of() : Map.copyOf(byAllocationKey);
+            this.byWalletId = byWalletId == null ? Map.of() : Map.copyOf(byWalletId);
+        }
+
+        static HistoryIndex empty() {
+            return EMPTY;
+        }
+
+        static HistoryIndex from(List<MetricaWalletDto> values, CopyStrategyRuntimeRouter router) {
+            if (values == null || values.isEmpty()) {
+                return empty();
+            }
+            Map<String, MetricaWalletDto> byAllocationKey = new java.util.HashMap<>();
+            Map<String, MetricaWalletDto> byWalletId = new java.util.HashMap<>();
+            for (MetricaWalletDto metric : values) {
+                if (metric == null || metric.getWallet() == null) {
+                    continue;
+                }
+                String walletId = normalizeWalletId(metric.getWallet().getIdWallet());
+                if (walletId == null) {
+                    continue;
+                }
+                byWalletId.putIfAbsent(walletId, metric);
+                String strategyCode = router == null ? strategyCodeFromMetric(metric) : router.strategyCodeOf(metric);
+                String allocationKey = router == null
+                        ? walletId + "|" + strategyCodeFromMetric(metric)
+                        : router.allocationKey(walletId, strategyCode);
+                if (allocationKey != null) {
+                    byAllocationKey.put(allocationKey, metric);
+                }
+            }
+            return byAllocationKey.isEmpty() && byWalletId.isEmpty()
+                    ? empty()
+                    : new HistoryIndex(byAllocationKey, byWalletId);
+        }
+
+        MetricaWalletDto find(String walletId, String strategyCode) {
+            String normalizedWallet = normalizeWalletId(walletId);
+            if (normalizedWallet == null) {
+                return null;
+            }
+            String normalizedStrategy = strategyCode == null ? CopyStrategyRuntimeRouter.DEFAULT_STRATEGY_CODE : strategyCode;
+            return byAllocationKey.get(normalizedWallet + "|" + normalizedStrategy);
+        }
+
+        MetricaWalletDto findByAllocationKey(String allocationKey) {
+            return allocationKey == null ? null : byAllocationKey.get(allocationKey);
+        }
+
+        MetricaWalletDto findByWallet(String walletId) {
+            String normalizedWallet = normalizeWalletId(walletId);
+            return normalizedWallet == null ? null : byWalletId.get(normalizedWallet);
+        }
+
+        int allocationSize() {
+            return byAllocationKey.size();
+        }
+
+        int walletSize() {
+            return byWalletId.size();
+        }
+    }
+
     private static final class HistoryResult {
         private final List<MetricaWalletDto> values;
         private final String source;
+        private final HistoryIndex index;
 
-        private HistoryResult(List<MetricaWalletDto> values, String source) {
-            this.values = values;
+        private HistoryResult(HistorySnapshot snapshot, String source) {
+            this.values = snapshot == null ? List.of() : snapshot.values();
             this.source = source;
+            this.index = snapshot == null ? HistoryIndex.empty() : snapshot.index();
         }
 
         public List<MetricaWalletDto> values() {
@@ -701,6 +968,10 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         public String source() {
             return source;
+        }
+
+        public HistoryIndex index() {
+            return index;
         }
     }
 
