@@ -995,8 +995,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         walletId,
                         walletMetric != null);
             }
-            final BigDecimal walletBudget = canOpenOrResize ? resolveWalletBudget(userDetail, walletMetric) : ZERO;
             final UserCopyAllocationEntity walletAllocation = resolveAllocationForMetric(userDetail, walletId, walletMetric);
+            final BigDecimal walletBudget = canOpenOrResize ? resolveWalletBudget(userDetail, walletMetric, walletAllocation) : ZERO;
             final int leverage = resolveUserLeverage(userDetail, walletAllocation);
 
             final List<OriginBasketPositionDto> sourceBasket = patchSourceBasket(
@@ -1224,8 +1224,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     log.info("event=copy_reconcile_metric_not_eligible triggerOriginId={} userId={} allocationId={} strategy={} wallet={} metricPresent={} note=will_only_close_stale_copies",
                             triggerOriginId, userId, allocationId, strategyCode, walletId, walletMetric != null);
                 }
-                final BigDecimal walletBudget = canOpenOrResize ? resolveWalletBudget(userDetail, walletMetric) : ZERO;
                 final int leverage = resolveUserLeverage(userDetail, walletAllocation);
+                final BigDecimal walletBudget = canOpenOrResize ? resolveWalletBudget(userDetail, walletMetric, walletAllocation) : ZERO;
                 final Map<String, TargetLeg> targets = buildTargetBasket(userDetail, sourceBasket, walletBudget, walletMetric, leverage, triggerDeltaType, triggerOriginId);
                 totalTargets += targets.size();
 
@@ -1623,6 +1623,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private BigDecimal resolveWalletBudget(UserDetailDto userDetail, MetricaWalletDto walletMetric) {
+        return resolveWalletBudget(userDetail, walletMetric, null);
+    }
+
+    private BigDecimal resolveWalletBudget(UserDetailDto userDetail, MetricaWalletDto walletMetric, UserCopyAllocationEntity allocation) {
         if (userDetail == null || userDetail.getDetail() == null || walletMetric == null) {
             return ZERO;
         }
@@ -1630,8 +1634,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (share == null || !Double.isFinite(share) || share <= 0) {
             return ZERO;
         }
-        return BigDecimal.valueOf(userDetail.getDetail().getCapital())
+        return BigDecimal.valueOf(resolveCopyCapital(userDetail, allocation))
                 .multiply(BigDecimal.valueOf(Math.max(0.0, Math.min(1.0, share))));
+    }
+
+    private int resolveCopyCapital(UserDetailDto userDetail, UserCopyAllocationEntity allocation) {
+        if (userDetail == null || userDetail.getDetail() == null) {
+            return 0;
+        }
+        Integer capital = isShadowMode(allocation)
+                ? userDetail.getDetail().getCapitalShadow()
+                : userDetail.getDetail().getCapital();
+        if (capital == null) {
+            capital = userDetail.getDetail().getCapital();
+        }
+        return capital == null ? 0 : Math.max(0, capital);
     }
 
     private int resolveUserLeverage(UserDetailDto userDetail) {
@@ -3148,7 +3165,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final BigDecimal walletMarginBudget = BigDecimal.valueOf(userDetail.getDetail().getCapital() * capitalShare);
+        final int copyCapital = resolveCopyCapital(userDetail, allocation);
+        final BigDecimal walletMarginBudget = BigDecimal.valueOf(copyCapital)
+                .multiply(BigDecimal.valueOf(capitalShare));
         if (walletMarginBudget.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_BUDGET, originId, userId, walletId);
             throw new SkipExecutionException(
@@ -3156,7 +3175,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     "Presupuesto inválido: walletMarginBudget <= 0",
                     com.apunto.engine.shared.util.LogFmt.kv(
                             "wallet", walletId,
-                            "capitalTotal", userDetail.getDetail().getCapital(),
+                            "capitalTotal", copyCapital,
+                            "capitalSource", isShadowMode(allocation) && userDetail.getDetail().getCapitalShadow() != null ? "capital_shadow" : "capital",
                             "capitalShare", capitalShare,
                             "walletMarginBudget", walletMarginBudget
                     )
