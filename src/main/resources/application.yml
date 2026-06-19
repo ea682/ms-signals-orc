@@ -16,7 +16,7 @@ rest-client:
 
 logging:
   pattern:
-    console: "ts=%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%level app=${spring.application.name} profile=${spring.profiles.active:-NA} env=${APP_ENV:local} thread=\"%thread\" logger=\"%logger{36}\" traceId=%X{traceId:-NA} %msg%n%wEx"
+    console: "ts=%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} level=%level app=${spring.application.name} profile=${spring.profiles.active:-NA} env=${APP_ENV:local} thread=\"%thread\" logger=\"%logger{36}\" traceId=%X{traceId:-NA} %msg%n%ex"
 
 spring:
   application:
