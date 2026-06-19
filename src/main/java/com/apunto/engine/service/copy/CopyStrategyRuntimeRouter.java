@@ -118,6 +118,15 @@ public class CopyStrategyRuntimeRouter {
         return strategyAppliesToEvent(strategyCodeOf(metric), action, deltaType, side);
     }
 
+    public boolean strategyCodeAppliesToEvent(
+            String strategyCode,
+            CopyJobAction action,
+            HyperliquidDeltaType deltaType,
+            String side
+    ) {
+        return strategyAppliesToEvent(strategyCode, action, deltaType, side);
+    }
+
     public boolean metricAllowsTargetLeg(
             MetricaWalletDto metric,
             PositionSide side,

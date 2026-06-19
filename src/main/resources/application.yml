@@ -186,15 +186,28 @@ metric-wallet:
     simulation: ${METRIC_WALLET_JOYAS_SIMULATION:summary}
   copy-guard:
     enabled: ${METRIC_WALLET_COPY_GUARD_ENABLED:true}
-    windows: ${METRIC_WALLET_COPY_GUARD_WINDOWS:2w,1mo}
+    windows: ${METRIC_WALLET_COPY_GUARD_WINDOWS:1w,2w,1mo}
     min-window-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_MIN_WINDOW_PNL_USDT:0}
     min-total-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_MIN_TOTAL_PNL_USDT:0}
+    pause-window-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_PAUSE_WINDOW_PNL_USDT:-25}
+    pause-total-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_PAUSE_TOTAL_PNL_USDT:-50}
+    one-week-capital-multiplier: ${METRIC_WALLET_COPY_GUARD_1W_CAPITAL_MULTIPLIER:0.70}
+    one-month-capital-multiplier: ${METRIC_WALLET_COPY_GUARD_1MO_CAPITAL_MULTIPLIER:0.25}
     require-window-data: ${METRIC_WALLET_COPY_GUARD_REQUIRE_WINDOW_DATA:true}
     fail-open-on-missing-metric: ${METRIC_WALLET_COPY_GUARD_FAIL_OPEN_ON_MISSING_METRIC:false}
     cooldown-hours: ${METRIC_WALLET_COPY_GUARD_COOLDOWN_HOURS:48}
+  shadow:
+    separate-enabled: ${METRIC_WALLET_SHADOW_SEPARATE_ENABLED:true}
+    max-strategies: ${METRIC_WALLET_SHADOW_MAX_STRATEGIES:80}
+    version: ${METRIC_WALLET_SHADOW_VERSION:1}
+    require-positive-windows: ${METRIC_WALLET_SHADOW_REQUIRE_POSITIVE_WINDOWS:2w,1mo}
+    slippage-bps: ${METRIC_WALLET_SHADOW_SLIPPAGE_BPS:2}
+    reentry-capital-multiplier: ${METRIC_WALLET_SHADOW_REENTRY_CAPITAL_MULTIPLIER:0.25}
   allocation:
     sync-enabled: ${METRIC_WALLET_SYNC_DISTRIBUTION_ENABLED:false}
-    default-execution-mode: ${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:SHADOW}
+    default-execution-mode: ${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:LIVE}
+    runtime-cache-ttl: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_TTL:1500ms}
+    runtime-cache-max-size: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_MAX_SIZE:20000}
   distribution:
     refresh-job: ${METRIC_WALLET_DISTRIBUTION_REFRESH_JOB:2m}
 
