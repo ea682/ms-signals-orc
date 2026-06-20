@@ -2,8 +2,11 @@ package com.apunto.engine.repository;
 
 import com.apunto.engine.entity.ShadowPositionStateEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.util.Optional;
 import java.util.List;
 import java.util.UUID;
@@ -23,4 +26,22 @@ public interface ShadowPositionStateRepository extends JpaRepository<ShadowPosit
             String parsymbol,
             String status
     );
+
+    @Query("""
+            select count(s)
+            from ShadowPositionStateEntity s
+            where s.shadowAllocationId = :shadowAllocationId
+              and s.status = 'CLOSED'
+              and s.closedAt is not null
+            """)
+    long countClosedPositions(@Param("shadowAllocationId") Long shadowAllocationId);
+
+    @Query("""
+            select sum(s.realizedPnlUsd)
+            from ShadowPositionStateEntity s
+            where s.shadowAllocationId = :shadowAllocationId
+              and s.status = 'CLOSED'
+              and s.closedAt is not null
+            """)
+    BigDecimal sumClosedRealizedPnlUsd(@Param("shadowAllocationId") Long shadowAllocationId);
 }

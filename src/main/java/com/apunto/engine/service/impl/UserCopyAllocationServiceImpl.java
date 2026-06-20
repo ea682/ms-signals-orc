@@ -101,18 +101,6 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             return;
         }
 
-        final List<MetricaWalletDto> liveCandidates = shadowCopyTradingService.isSeparateShadowEnabled()
-                ? candidates.stream().filter(shadowCopyTradingService::isLivePromotable).toList()
-                : candidates;
-        final Map<String, LivePauseDecision> pauseByAllocationKey = shadowCopyTradingService.isSeparateShadowEnabled()
-                ? livePauseDecisions(candidates)
-                : Map.of();
-        final Set<String> liveCandidateKeys = liveCandidates.stream()
-                .map(this::allocationKey)
-                .filter(Objects::nonNull)
-                .collect(java.util.stream.Collectors.toUnmodifiableSet());
-        final BigDecimal targetTotalPct = sumPositivePct(liveCandidates);
-
         for (UserDetailDto user : users) {
             if (user == null || user.getDetail() == null || user.getUser() == null) continue;
 
@@ -130,6 +118,19 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
             entityManager.flush();
             entityManager.clear();
+
+            final List<MetricaWalletDto> liveCandidates = shadowCopyTradingService.isSeparateShadowEnabled()
+                    ? candidates.stream().filter(dto -> shadowCopyTradingService.isLivePromotable(idUser, dto)).toList()
+                    : candidates;
+            final Map<String, LivePauseDecision> pauseByAllocationKey = shadowCopyTradingService.isSeparateShadowEnabled()
+                    ? livePauseDecisions(idUser, candidates)
+                    : Map.of();
+            final Set<String> liveCandidateKeys = liveCandidates.stream()
+                    .map(this::allocationKey)
+                    .filter(Objects::nonNull)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            final BigDecimal targetTotalPct = sumPositivePct(liveCandidates);
+
             final List<UserCopyAllocationEntity> existingActive =
                     repository.findAllByIdUserAndEndsAtIsNull(idUser);
 
@@ -611,13 +612,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         return clean.length() > 160 ? clean.substring(0, 160) : clean;
     }
 
-    private Map<String, LivePauseDecision> livePauseDecisions(List<MetricaWalletDto> candidates) {
+    private Map<String, LivePauseDecision> livePauseDecisions(UUID idUser, List<MetricaWalletDto> candidates) {
         if (candidates == null || candidates.isEmpty()) {
             return Map.of();
         }
         Map<String, LivePauseDecision> out = new HashMap<>();
         for (MetricaWalletDto dto : candidates) {
-            if (dto == null || shadowCopyTradingService.isLivePromotable(dto)) {
+            if (dto == null || shadowCopyTradingService.isLivePromotable(idUser, dto)) {
                 continue;
             }
             String key = allocationKey(dto);

@@ -202,6 +202,9 @@ metric-wallet:
     version: ${METRIC_WALLET_SHADOW_VERSION:1}
     require-positive-windows: ${METRIC_WALLET_SHADOW_REQUIRE_POSITIVE_WINDOWS:2w,1mo}
     slippage-bps: ${METRIC_WALLET_SHADOW_SLIPPAGE_BPS:2}
+    require-validation-before-live: ${METRIC_WALLET_SHADOW_REQUIRE_VALIDATION_BEFORE_LIVE:true}
+    min-closed-operations-for-live: ${METRIC_WALLET_SHADOW_MIN_CLOSED_OPERATIONS_FOR_LIVE:5}
+    min-net-pnl-usdt-for-live: ${METRIC_WALLET_SHADOW_MIN_NET_PNL_USDT_FOR_LIVE:0}
     reentry-capital-multiplier: ${METRIC_WALLET_SHADOW_REENTRY_CAPITAL_MULTIPLIER:0.25}
   allocation:
     sync-enabled: ${METRIC_WALLET_SYNC_DISTRIBUTION_ENABLED:false}

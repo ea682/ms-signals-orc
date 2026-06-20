@@ -63,6 +63,15 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     @Value("${metric-wallet.shadow.slippage-bps:2}")
     private double shadowSlippageBps;
 
+    @Value("${metric-wallet.shadow.require-validation-before-live:true}")
+    private boolean requireShadowValidationBeforeLive;
+
+    @Value("${metric-wallet.shadow.min-closed-operations-for-live:5}")
+    private int minShadowClosedOperationsForLive;
+
+    @Value("${metric-wallet.shadow.min-net-pnl-usdt-for-live:0}")
+    private BigDecimal minShadowNetPnlUsdtForLive;
+
     @Override
     @Transactional
     public void syncShadowAllocations(UUID idUser, List<MetricaWalletDto> candidates, int userMaxWallet, OffsetDateTime now) {
@@ -119,9 +128,9 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                         .build();
             }
 
-            boolean livePromotable = isLivePromotable(dto);
-            String status = shadowStatus(dto);
-            String validationReason = validationReason(dto, livePromotable);
+            boolean livePromotable = isLivePromotable(idUser, dto);
+            String status = shadowStatus(idUser, dto);
+            String validationReason = validationReason(idUser, dto, livePromotable);
             entity.setCopyStrategySlug(strategySlug(dto));
             entity.setCopyStrategyLabel(strategyLabel(dto));
             entity.setCopyMode(copyMode(dto));
@@ -259,7 +268,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     }
 
     @Override
-    public boolean isLivePromotable(MetricaWalletDto candidate) {
+    public boolean isLivePromotable(UUID idUser, MetricaWalletDto candidate) {
         if (!separateShadowEnabled) {
             return true;
         }
@@ -278,13 +287,16 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         if ("SHADOW_ONLY".equals(status) || "DATA_RISK".equals(status) || "DISABLED".equals(status)) {
             return false;
         }
+        if (!shadowValidationDecision(idUser, candidate).passed()) {
+            return false;
+        }
         if (!requiredWindowsPositive(candidate)) {
             return false;
         }
         if (!slippageValidationPasses(candidate)) {
             return false;
         }
-        return !"SHADOW_REJECTED".equals(shadowStatus(candidate));
+        return !"SHADOW_REJECTED".equals(shadowStatus(idUser, candidate));
     }
 
     private void recordShadowForAllocation(
@@ -421,10 +433,20 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             if (state == null) {
                 return;
             }
+            BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(slippageUsd);
+            BigDecimal realizedPnl = shadowRealizedPnl(
+                    state.getPositionSide(),
+                    firstNonNull(state.getQty(), qty),
+                    firstNonNull(state.getEntryPrice(), op.getPrecioEntrada()),
+                    price
+            ).subtract(firstNonNull(state.getFeesUsd(), ZERO))
+                    .subtract(totalSlippage);
             state.setStatus("CLOSED");
             state.setClosedAt(eventTime);
             state.setQty(ZERO);
             state.setMarkPrice(price);
+            state.setSlippageUsd(totalSlippage);
+            state.setRealizedPnlUsd(realizedPnl);
             state.setLastSourceEventId(originId);
             shadowPositionStateRepository.save(state);
             return;
@@ -468,10 +490,19 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             if (state == null || Objects.equals(state.getPositionSide(), newPositionSide)) {
                 continue;
             }
+            BigDecimal closePrice = firstNonNull(op.getPrecioMercado(), op.getPrecioEntrada(), op.getPrecioCierre());
+            BigDecimal realizedPnl = shadowRealizedPnl(
+                    state.getPositionSide(),
+                    state.getQty(),
+                    state.getEntryPrice(),
+                    closePrice
+            ).subtract(firstNonNull(state.getFeesUsd(), ZERO))
+                    .subtract(firstNonNull(state.getSlippageUsd(), ZERO));
             state.setStatus("CLOSED");
             state.setClosedAt(eventTime);
             state.setQty(ZERO);
-            state.setMarkPrice(firstNonNull(op.getPrecioMercado(), op.getPrecioEntrada(), op.getPrecioCierre()));
+            state.setMarkPrice(closePrice);
+            state.setRealizedPnlUsd(realizedPnl);
             state.setLastSourceEventId(originId);
             shadowPositionStateRepository.save(state);
             log.info("event=shadow_flip_closed_previous_side shadowAllocationId={} walletId={} strategyCode={} symbol={} previousSide={} newSide={} originId={} reasonCode=shadow_flip_close_previous copyImpact=shadow_position_reconciled",
@@ -511,11 +542,12 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         return score == null || score >= 0;
     }
 
-    private String shadowStatus(MetricaWalletDto dto) {
+    private String shadowStatus(UUID idUser, MetricaWalletDto dto) {
         String action = copyGuardAction(dto);
         String status = copyGuardStatus(dto);
         if ("SHADOW_ONLY".equals(action) || "SHADOW_ONLY".equals(status)) return "SHADOW_ONLY";
         if ("PAUSE_OPEN".equals(action) || "DISABLED".equals(action) || "DATA_RISK".equals(status)) return "SHADOW_REJECTED";
+        if (!shadowValidationDecision(idUser, dto).passed()) return "SHADOW_ACTIVE";
         if (!requiredWindowsPositive(dto)) return "SHADOW_ACTIVE";
         if (!slippageValidationPasses(dto)) return "SHADOW_ONLY";
         if ("WARNING".equals(action) || "REDUCE_CAPITAL".equals(action) || "HIGH_RISK".equals(status)) return "SHADOW_WARNING";
@@ -537,10 +569,14 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     }
 
     private String validationReason(MetricaWalletDto dto) {
-        return validationReason(dto, isLivePromotable(dto));
+        return validationReason(null, dto, false);
     }
 
     private String validationReason(MetricaWalletDto dto, boolean livePromotable) {
+        return validationReason(null, dto, livePromotable);
+    }
+
+    private String validationReason(UUID idUser, MetricaWalletDto dto, boolean livePromotable) {
         if (livePromotable) {
             return "shadow_filters_passed";
         }
@@ -549,11 +585,50 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         if ("SHADOW_ONLY".equals(action) || "SHADOW_ONLY".equals(status)) return "shadow_only_by_copy_guard";
         if ("PAUSE_OPEN".equals(action)) return "pause_open_by_copy_guard";
         if ("DATA_RISK".equals(status)) return "data_risk_by_copy_guard";
+        ShadowValidationDecision shadowValidation = shadowValidationDecision(idUser, dto);
+        if (!shadowValidation.passed()) return shadowValidation.reason();
         if (!requiredWindowsPositive(dto)) {
             return "required_shadow_windows_not_positive:" + String.join(",", parseWindows(requirePositiveWindows));
         }
         if (!slippageValidationPasses(dto)) return "slippage_simulation_failed";
         return "required_shadow_windows_not_positive:" + String.join(",", parseWindows(requirePositiveWindows));
+    }
+
+    private ShadowValidationDecision shadowValidationDecision(UUID idUser, MetricaWalletDto dto) {
+        if (!requireShadowValidationBeforeLive) {
+            return ShadowValidationDecision.passed("shadow_validation_not_required");
+        }
+        if (idUser == null) {
+            return ShadowValidationDecision.blocked("shadow_validation_pending:user_missing");
+        }
+        String walletId = walletId(dto);
+        String strategyCode = strategyCode(dto);
+        if (walletId == null || strategyCode == null) {
+            return ShadowValidationDecision.blocked("shadow_validation_pending:wallet_or_strategy_missing");
+        }
+        ShadowCopyAllocationEntity shadow = shadowAllocationRepository
+                .findActiveStrategy(idUser, walletId, strategyCode, scopeType(dto), scopeValue(dto, strategyCode), shadowVersion)
+                .orElse(null);
+        if (shadow == null || shadow.getId() == null) {
+            return ShadowValidationDecision.blocked("shadow_validation_pending:no_shadow_allocation");
+        }
+
+        long closed = Math.max(0L, shadowPositionStateRepository.countClosedPositions(shadow.getId()));
+        BigDecimal net = firstNonNull(shadowPositionStateRepository.sumClosedRealizedPnlUsd(shadow.getId()), ZERO);
+        int minClosed = Math.max(0, minShadowClosedOperationsForLive);
+        BigDecimal minNet = minShadowNetPnlUsdtForLive == null ? ZERO : minShadowNetPnlUsdtForLive;
+
+        if (closed < minClosed) {
+            return ShadowValidationDecision.blocked(
+                    "shadow_validation_pending:closed=" + closed + "/min=" + minClosed + " net=" + net
+            );
+        }
+        if (net.compareTo(minNet) <= 0) {
+            return ShadowValidationDecision.blocked(
+                    "shadow_validation_negative_pnl:closed=" + closed + " net=" + net + "/min_gt=" + minNet
+            );
+        }
+        return ShadowValidationDecision.passed("shadow_validation_passed:closed=" + closed + " net=" + net);
     }
 
     private boolean slippageValidationPasses(MetricaWalletDto dto) {
@@ -596,6 +671,16 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     ) {
         static SlippageDecision notEvaluated(boolean passed) {
             return new SlippageDecision(false, passed, null, null, 1.0, 0.0, 0.0);
+        }
+    }
+
+    private record ShadowValidationDecision(boolean passed, String reason) {
+        static ShadowValidationDecision passed(String reason) {
+            return new ShadowValidationDecision(true, reason);
+        }
+
+        static ShadowValidationDecision blocked(String reason) {
+            return new ShadowValidationDecision(false, reason);
         }
     }
 
@@ -753,6 +838,18 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         }
         return notional.multiply(BigDecimal.valueOf(shadowSlippageBps))
                 .divide(BigDecimal.valueOf(10_000), 12, RoundingMode.HALF_UP);
+    }
+
+    private static BigDecimal shadowRealizedPnl(String side, BigDecimal qty, BigDecimal entryPrice, BigDecimal closePrice) {
+        BigDecimal safeQty = qty == null ? ZERO : qty.abs();
+        if (safeQty.signum() <= 0 || entryPrice == null || closePrice == null) {
+            return ZERO;
+        }
+        String normalizedSide = normalizeStatus(side);
+        if ("SHORT".equals(normalizedSide)) {
+            return entryPrice.subtract(closePrice).multiply(safeQty).setScale(12, RoundingMode.HALF_UP);
+        }
+        return closePrice.subtract(entryPrice).multiply(safeQty).setScale(12, RoundingMode.HALF_UP);
     }
 
     @SafeVarargs

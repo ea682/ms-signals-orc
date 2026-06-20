@@ -18,5 +18,5 @@ public interface ShadowCopyTradingService {
 
     boolean isSeparateShadowEnabled();
 
-    boolean isLivePromotable(MetricaWalletDto candidate);
+    boolean isLivePromotable(UUID idUser, MetricaWalletDto candidate);
 }
