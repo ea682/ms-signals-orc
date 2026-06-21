@@ -209,10 +209,33 @@ metric-wallet:
   allocation:
     sync-enabled: ${METRIC_WALLET_SYNC_DISTRIBUTION_ENABLED:false}
     default-execution-mode: ${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:LIVE}
+    max-profiles-per-wallet: ${COPY_USER_MAX_PROFILES_PER_WALLET:1}
     runtime-cache-ttl: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_TTL:1500ms}
     runtime-cache-max-size: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_MAX_SIZE:20000}
   distribution:
     refresh-job: ${METRIC_WALLET_DISTRIBUTION_REFRESH_JOB:2m}
+
+copy-profile:
+  movement-all-enabled: ${COPY_PROFILE_MOVEMENT_ALL_ENABLED:true}
+  long-only-enabled: ${COPY_PROFILE_LONG_ONLY_ENABLED:true}
+  short-only-enabled: ${COPY_PROFILE_SHORT_ONLY_ENABLED:true}
+  first-open-final-close-enabled: ${COPY_PROFILE_FIRST_OPEN_FINAL_CLOSE_ENABLED:true}
+  pure-open-close-enabled: ${COPY_PROFILE_PURE_OPEN_CLOSE_ENABLED:true}
+  flip-only-enabled: ${COPY_PROFILE_FLIP_ONLY_ENABLED:true}
+  symbol-specialist-enabled: ${COPY_PROFILE_SYMBOL_SPECIALIST_ENABLED:true}
+  high-liquidity-only-enabled: ${COPY_PROFILE_HIGH_LIQUIDITY_ONLY_ENABLED:true}
+  majors-only-enabled: ${COPY_PROFILE_MAJORS_ONLY_ENABLED:true}
+  high-quality-symbols-only-enabled: ${COPY_PROFILE_HIGH_QUALITY_SYMBOLS_ONLY_ENABLED:true}
+  low-leverage-only-enabled: ${COPY_PROFILE_LOW_LEVERAGE_ONLY_ENABLED:true}
+  top-symbols-only-enabled: ${COPY_PROFILE_TOP_SYMBOLS_ONLY_ENABLED:true}
+  swing-only-enabled: ${COPY_PROFILE_SWING_ONLY_ENABLED:true}
+  recent-windows-as-live-enabled: ${COPY_PROFILE_RECENT_WINDOWS_AS_LIVE_ENABLED:false}
+  majors-symbols: ${COPY_PROFILE_MAJORS_SYMBOLS:BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT}
+  blocked-symbols: ${COPY_PROFILE_BLOCKED_SYMBOLS:FARTCOINUSDT,LITUSDT}
+  allowed-symbols: ${COPY_PROFILE_ALLOWED_SYMBOLS:}
+
+copy-shadow:
+  enable-scoring-windows: ${COPY_SHADOW_ENABLE_SCORING_WINDOWS:false}
 
 futures:
   capital-maintenance:

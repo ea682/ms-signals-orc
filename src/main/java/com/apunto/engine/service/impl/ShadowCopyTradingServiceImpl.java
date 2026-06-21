@@ -84,7 +84,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
 
         List<MetricaWalletDto> relevant = candidates.stream()
                 .filter(Objects::nonNull)
-                .filter(copyStrategyRuntimeRouter::isCopyableJoyasCandidate)
+                .filter(copyStrategyRuntimeRouter::isShadowEligibleJoyasCandidate)
                 .filter(this::isRelevantForShadow)
                 .sorted(Comparator
                         .comparingDouble((MetricaWalletDto dto) -> safePct(dto.getCapitalShare()).doubleValue())
@@ -249,7 +249,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
 
         int recorded = 0;
         for (ShadowCopyAllocationEntity allocation : allocations) {
-            if (!copyStrategyRuntimeRouter.strategyCodeAppliesToEvent(allocation.getCopyStrategyCode(), action, deltaType, side)) {
+            if (!copyStrategyRuntimeRouter.strategyCodeAppliesToEvent(allocation.getCopyStrategyCode(), allocation.getScopeValue(), action, deltaType, side, operation.getParSymbol())) {
                 continue;
             }
             recordShadowForAllocation(allocation, event, action, deltaType);
@@ -272,7 +272,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         if (!separateShadowEnabled) {
             return true;
         }
-        if (candidate == null || !copyStrategyRuntimeRouter.isCopyableJoyasCandidate(candidate)) {
+        if (candidate == null || !copyStrategyRuntimeRouter.isLiveEligibleJoyasCandidate(candidate)) {
             return false;
         }
         MetricaWalletDto.CopyGuardDto guard = copyGuard(candidate);

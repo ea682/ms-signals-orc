@@ -166,7 +166,7 @@ public class HyperliquidCopyCandidateResolver {
         String side = operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
         Set<UUID> activeUserIds = activeAllocations.stream()
                 .filter(Objects::nonNull)
-                .filter(a -> copyStrategyRuntimeRouter.allocationAppliesToEvent(a, action, deltaType, side))
+                .filter(a -> copyStrategyRuntimeRouter.allocationAppliesToEvent(a, action, deltaType, side, operation.getParSymbol()))
                 .filter(a -> guardAllowsNewEntry(a))
                 .map(UserCopyAllocationEntity::getIdUser)
                 .filter(Objects::nonNull)

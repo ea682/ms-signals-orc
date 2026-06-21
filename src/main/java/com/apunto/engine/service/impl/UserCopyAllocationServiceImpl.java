@@ -61,6 +61,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     @Value("${metric-wallet.allocation.runtime-cache-max-size:20000}")
     private long runtimeCacheMaxSize;
 
+    @Value("${metric-wallet.allocation.max-profiles-per-wallet:1}")
+    private int maxProfilesPerWallet;
+
     private volatile Cache<String, List<UserCopyAllocationEntity>> activeByWalletCache;
     private volatile Cache<UUID, List<UserCopyAllocationEntity>> activeByUserCache;
 
@@ -169,9 +172,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     )
                     .toList();
 
-            final List<MetricaWalletDto> top = (rankedForPersist.size() <= maxWallet)
-                    ? rankedForPersist
-                    : rankedForPersist.subList(0, maxWallet);
+            final List<MetricaWalletDto> top = selectTopProfilesForUser(rankedForPersist, maxWallet, idUser);
 
             final Map<String, Dist> newDist = new LinkedHashMap<>();
 
@@ -642,6 +643,41 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         }
         String reason = "shadow_live_validation_failed action=" + action + " status=" + status;
         return new LivePauseDecision(target, reason, action);
+    }
+
+    private List<MetricaWalletDto> selectTopProfilesForUser(List<MetricaWalletDto> rankedCandidates, int maxProfiles, UUID idUser) {
+        if (rankedCandidates == null || rankedCandidates.isEmpty() || maxProfiles <= 0) {
+            return List.of();
+        }
+        int perWalletLimit = Math.max(0, maxProfilesPerWallet);
+        List<MetricaWalletDto> selected = new ArrayList<>(Math.min(maxProfiles, rankedCandidates.size()));
+        Map<String, Integer> selectedByWallet = new HashMap<>();
+        for (MetricaWalletDto dto : rankedCandidates) {
+            if (dto == null || dto.getWallet() == null) {
+                continue;
+            }
+            String walletId = normalize(dto.getWallet().getIdWallet());
+            if (walletId == null) {
+                continue;
+            }
+            int walletCount = selectedByWallet.getOrDefault(walletId, 0);
+            if (perWalletLimit > 0 && walletCount >= perWalletLimit) {
+                log.debug(
+                        "event=copy_profile_strategy_live_blocked userId={} walletId={} strategyCode={} reasonCode=MAX_PROFILES_PER_WALLET maxProfilesPerWallet={} liveImpact=LIVE_SELECTION_SKIPPED",
+                        idUser,
+                        walletId,
+                        strategyCode(dto),
+                        perWalletLimit
+                );
+                continue;
+            }
+            selected.add(dto);
+            selectedByWallet.put(walletId, walletCount + 1);
+            if (selected.size() >= maxProfiles) {
+                break;
+            }
+        }
+        return selected;
     }
 
     private void applyLivePause(UserCopyAllocationEntity entity, LivePauseDecision pause, OffsetDateTime now) {
