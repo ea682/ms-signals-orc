@@ -284,7 +284,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
         final List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWallet(walletId);
         final Set<UUID> activeUserIds = activeAllocations.stream()
                 .filter(Objects::nonNull)
-                .filter(a -> copyStrategyRuntimeRouter.allocationAppliesToEvent(a, action, deltaType, side))
+                .filter(a -> copyStrategyRuntimeRouter.allocationAppliesToEvent(a, action, deltaType, side, operation.getParSymbol()))
                 .filter(a -> !requiresCopyHealthGuard(action, deltaType)
                         || metricWalletService.isCopyStrategyHealthyForCopy(a.getWalletId(), a.getCopyStrategyCode()))
                 .map(UserCopyAllocationEntity::getIdUser)

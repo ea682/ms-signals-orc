@@ -1449,7 +1449,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         for (UserCopyAllocationEntity allocation : allocations) {
             if (allocation == null) continue;
             final String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(allocation);
-            if (!copyStrategyRuntimeRouter.allocationAppliesToEvent(allocation, action, deltaType, side)) {
+            if (!copyStrategyRuntimeRouter.allocationAppliesToEvent(allocation, action, deltaType, side, operation.getParSymbol())) {
                 log.info("event=copy_open_skipped reasonCode=strategy_not_applicable originId={} userId={} allocationId={} wallet={} strategy={} side={} action={} deltaType={}",
                         originId, userId, allocation.getId(), safeLog(walletId), strategyCode, side, action, deltaType);
                 continue;
@@ -1786,7 +1786,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 continue;
             }
             try {
-                if (!copyStrategyRuntimeRouter.metricAllowsTargetLeg(walletMetric, leg.getSide(), triggerDeltaType, leg.getOriginId(), triggerOriginId)) {
+                if (!copyStrategyRuntimeRouter.metricAllowsTargetLeg(walletMetric, leg.getSide(), triggerDeltaType, leg.getOriginId(), triggerOriginId, leg.getSymbol())) {
                     log.info("event=rebalance.target.skip originLegId={} wallet={} symbol={} side={} reason=strategy_filter strategy={} triggerDeltaType={} triggerOriginId={}",
                             leg.getOriginId(), leg.getWalletId(), safeLog(leg.getSymbol()), leg.getSide(), copyStrategyRuntimeRouter.strategySummary(walletMetric), triggerDeltaType, triggerOriginId);
                     continue;
