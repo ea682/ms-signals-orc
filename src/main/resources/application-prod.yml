@@ -51,3 +51,16 @@ metric:
     enabled: ${METRIC_OUTBOX_ENABLED:true}
     publisher:
       enabled: ${METRIC_OUTBOX_PUBLISHER_ENABLED:true}
+
+metric-wallet:
+  allocation:
+    max-profiles-per-wallet: ${COPY_USER_MAX_PROFILES_PER_WALLET:1}
+
+copy-profile:
+  recent-windows-as-live-enabled: ${COPY_PROFILE_RECENT_WINDOWS_AS_LIVE_ENABLED:false}
+  majors-symbols: ${COPY_PROFILE_MAJORS_SYMBOLS:BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT}
+  blocked-symbols: ${COPY_PROFILE_BLOCKED_SYMBOLS:FARTCOINUSDT,LITUSDT}
+  allowed-symbols: ${COPY_PROFILE_ALLOWED_SYMBOLS:}
+
+copy-shadow:
+  enable-scoring-windows: ${COPY_SHADOW_ENABLE_SCORING_WINDOWS:false}

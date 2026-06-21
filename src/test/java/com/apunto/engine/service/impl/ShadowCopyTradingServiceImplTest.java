@@ -42,6 +42,19 @@ class ShadowCopyTradingServiceImplTest {
         assertFalse(service.isLivePromotable(UUID.randomUUID(), metric));
     }
 
+    @Test
+    void advancedRealProfileCanPromoteButScoringWindowCannot() throws Exception {
+        UUID user = UUID.randomUUID();
+        ShadowCopyTradingServiceImpl service = service(
+                Map.of(user, shadowAllocation(10L, user)),
+                Map.of(10L, 5L),
+                Map.of(10L, new BigDecimal("1.25"))
+        );
+
+        assertTrue(service.isLivePromotable(user, metric("0xabc", "TOP_SYMBOLS_ONLY")));
+        assertFalse(service.isLivePromotable(user, metric("0xabc", "RECENT_30D")));
+    }
+
     private static ShadowCopyTradingServiceImpl service(
             Map<UUID, ShadowCopyAllocationEntity> shadowsByUser,
             Map<Long, Long> closedByShadow,

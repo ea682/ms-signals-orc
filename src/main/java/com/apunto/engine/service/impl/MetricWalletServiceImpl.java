@@ -528,7 +528,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return base.stream()
                 .filter(Objects::nonNull)
                 .filter(dto -> dto.getScoring() != null)
-                .filter(copyStrategyRuntimeRouter::isCopyableJoyasCandidate)
+                .filter(copyStrategyRuntimeRouter::isShadowEligibleJoyasCandidate)
                 .filter(this::passesCopySimulationGuard)
                 .filter(MetricWalletServiceImpl::hasClosedHistory)
                 .filter(dto -> dto.getWallet() != null && dto.getWallet().getHistoryDays() != null)
