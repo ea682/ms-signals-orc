@@ -13,6 +13,10 @@ public interface UserCopyAllocationService {
 
     void syncDistribution(List<MetricaWalletDto> candidates);
 
+    default void syncDistribution(List<MetricaWalletDto> liveCandidates, List<MetricaWalletDto> shadowCandidates) {
+        syncDistribution(liveCandidates);
+    }
+
     List<UserCopyAllocationEntity> getWalletUserId(UUID idUser);
 
     Set<UUID> getActiveUserIdsByWallet(String walletId);
@@ -26,6 +30,10 @@ public interface UserCopyAllocationService {
     Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId, String strategyCode);
 
     Optional<UserCopyAllocationEntity> findOpenAllocation(UUID idUser, String walletId, String strategyCode);
+
+    default Optional<UserCopyAllocationEntity> findOpenAllocation(UUID idUser, String walletId, String strategyCode, String scopeType, String scopeValue) {
+        return findOpenAllocation(idUser, walletId, strategyCode);
+    }
 
     void markGuardBlocked(UUID idUser, String walletId, String strategyCode, String targetStatus, String reason, OffsetDateTime cooldownUntil);
 }

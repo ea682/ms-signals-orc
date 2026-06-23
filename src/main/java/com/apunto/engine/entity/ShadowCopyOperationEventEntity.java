@@ -35,6 +35,12 @@ public class ShadowCopyOperationEventEntity {
     @Column(name = "linked_live_allocation_id")
     private Long linkedLiveAllocationId;
 
+    @Column(name = "wallet_profile_id")
+    private Long walletProfileId;
+
+    @Column(name = "shadow_validation_id")
+    private Long shadowValidationId;
+
     @Column(name = "id_order_origin", nullable = false, length = 120)
     private String idOrderOrigin;
 

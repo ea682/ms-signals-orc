@@ -152,8 +152,17 @@ public class MetricaWalletDto {
         private Boolean hasOpenPositions;
         private Integer openPositionsCount;
         private OffsetDateTime lastActivityAt;
+        private OffsetDateTime lastOpenedAt;
         private OffsetDateTime lastClosedAt;
         private Double inactiveDays;
+        private Double inactiveDaysSinceLastOpen;
+        private Double inactiveDaysSinceLastClose;
+        private OffsetDateTime walletLastActivityAt;
+        private OffsetDateTime walletLastOpenedAt;
+        private OffsetDateTime walletLastClosedAt;
+        private OffsetDateTime strategyLastActivityAt;
+        private OffsetDateTime strategyLastOpenedAt;
+        private OffsetDateTime strategyLastClosedAt;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor

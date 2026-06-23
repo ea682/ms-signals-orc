@@ -33,6 +33,12 @@ public class ShadowPositionStateEntity {
     @Column(name = "linked_live_allocation_id")
     private Long linkedLiveAllocationId;
 
+    @Column(name = "wallet_profile_id")
+    private Long walletProfileId;
+
+    @Column(name = "shadow_validation_id")
+    private Long shadowValidationId;
+
     @Column(name = "id_user", nullable = false, length = 80)
     private String idUser;
 

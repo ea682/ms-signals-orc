@@ -64,6 +64,12 @@ public class ShadowCopyAllocationEntity {
     @Column(name = "strategy_key", nullable = false, length = 420)
     private String strategyKey;
 
+    @Column(name = "wallet_profile_id")
+    private Long walletProfileId;
+
+    @Column(name = "shadow_validation_id")
+    private Long shadowValidationId;
+
     @Builder.Default
     @Column(name = "shadow_version", nullable = false)
     private Integer shadowVersion = 1;
@@ -111,6 +117,24 @@ public class ShadowCopyAllocationEntity {
 
     @Column(name = "last_validation_reason", length = 300)
     private String lastValidationReason;
+
+    @Column(name = "wallet_last_activity_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime walletLastActivityAt;
+
+    @Column(name = "wallet_last_opened_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime walletLastOpenedAt;
+
+    @Column(name = "wallet_last_closed_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime walletLastClosedAt;
+
+    @Column(name = "strategy_last_activity_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime strategyLastActivityAt;
+
+    @Column(name = "strategy_last_opened_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime strategyLastOpenedAt;
+
+    @Column(name = "strategy_last_closed_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime strategyLastClosedAt;
 
     @Column(name = "last_seen_at", nullable = false, columnDefinition = "timestamp with time zone")
     private OffsetDateTime lastSeenAt;

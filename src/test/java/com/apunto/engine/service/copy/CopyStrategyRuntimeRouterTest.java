@@ -38,11 +38,30 @@ class CopyStrategyRuntimeRouterTest {
     }
 
     @Test
-    void scoringWindowsNeverApplyToNewLiveOpenEvents() {
+    void scoringWindowsNeverApplyToRuntimeEvents() {
         UserCopyAllocationEntity recent = allocation("RECENT_30D", "30D");
 
         assertFalse(router.allocationAppliesToEvent(recent, CopyJobAction.OPEN, HyperliquidDeltaType.OPEN, "LONG", "BTCUSDT"));
-        assertTrue(router.allocationAppliesToEvent(recent, CopyJobAction.CLOSE, HyperliquidDeltaType.CLOSE, "LONG", "BTCUSDT"));
+        assertFalse(router.allocationAppliesToEvent(recent, CopyJobAction.CLOSE, HyperliquidDeltaType.CLOSE, "LONG", "BTCUSDT"));
+    }
+
+    @Test
+    void closeEventsAreFilteredByStrategySide() {
+        UserCopyAllocationEntity longOnly = allocation("LONG_ONLY", "LONG");
+        UserCopyAllocationEntity shortOnly = allocation("SHORT_ONLY", "SHORT");
+
+        assertTrue(router.allocationAppliesToEvent(longOnly, CopyJobAction.CLOSE, HyperliquidDeltaType.CLOSE, "LONG", "BTCUSDT"));
+        assertFalse(router.allocationAppliesToEvent(shortOnly, CopyJobAction.CLOSE, HyperliquidDeltaType.CLOSE, "LONG", "BTCUSDT"));
+    }
+
+    @Test
+    void allocationKeyIncludesScopeSoSameStrategyCanHaveIndependentProfiles() {
+        String btc = router.allocationKey("0xABC", "SYMBOL_SPECIALIST", "SYMBOL", "BTCUSDT");
+        String eth = router.allocationKey("0xABC", "SYMBOL_SPECIALIST", "SYMBOL", "ETHUSDT");
+
+        assertTrue(btc.contains("0xabc|SYMBOL_SPECIALIST|symbol|BTCUSDT"));
+        assertTrue(eth.contains("0xabc|SYMBOL_SPECIALIST|symbol|ETHUSDT"));
+        assertFalse(btc.equals(eth));
     }
 
     private static MetricaWalletDto metric(String strategyCode) {

@@ -132,6 +132,9 @@ public class UserCopyAllocationEntity {
     @Column(name = "strategy_key", length = 420)
     private String strategyKey;
 
+    @Column(name = "wallet_profile_id")
+    private Long walletProfileId;
+
     @Column(name = "linked_shadow_allocation_id")
     private Long linkedShadowAllocationId;
 
