@@ -185,6 +185,33 @@ public class CopyStrategyRuntimeRouter {
         return wallet + "|" + (strategy == null ? DEFAULT_STRATEGY_CODE : strategy);
     }
 
+    public String allocationKey(String walletId, String strategyCode, String scopeType, String scopeValue) {
+        return profileKey(walletId, strategyCode, scopeType, scopeValue);
+    }
+
+    public String allocationKey(UserCopyAllocationEntity allocation) {
+        if (allocation == null) {
+            return null;
+        }
+        return allocationKey(
+                allocation.getWalletId(),
+                strategyCodeOf(allocation),
+                allocation.getScopeType(),
+                allocation.getScopeValue()
+        );
+    }
+
+    public String profileKey(String walletId, String strategyCode, String scopeType, String scopeValue) {
+        String wallet = normalizeWalletId(walletId);
+        String strategy = normalizeStrategyCode(strategyCode);
+        if (wallet == null) return null;
+        String effectiveStrategy = strategy == null ? DEFAULT_STRATEGY_CODE : strategy;
+        return wallet
+                + "|" + effectiveStrategy
+                + "|" + normalizeScopeType(scopeType)
+                + "|" + normalizeScopeValue(scopeValue, effectiveStrategy);
+    }
+
     public boolean isCopyableJoyasCandidate(MetricaWalletDto metric) {
         return isLiveEligibleJoyasCandidate(metric);
     }
@@ -379,9 +406,6 @@ public class CopyStrategyRuntimeRouter {
         String strategyCode = normalizeStrategyCode(strategy);
         if (strategyCode == null) strategyCode = DEFAULT_STRATEGY_CODE;
 
-        if (action == CopyJobAction.CLOSE) {
-            return true;
-        }
         if (!profileEnabled(strategyCode)) {
             return false;
         }
@@ -576,6 +600,20 @@ public class CopyStrategyRuntimeRouter {
         if (raw == null) return null;
         String value = raw.trim().toUpperCase(Locale.ROOT);
         return value.isEmpty() ? null : value;
+    }
+
+
+    private static String normalizeScopeType(String raw) {
+        String value = normalizeLower(raw);
+        return value == null ? "strategy" : value;
+    }
+
+    private static String normalizeScopeValue(String raw, String strategyCode) {
+        String value = raw == null ? null : raw.trim();
+        if (value == null || value.isEmpty()) {
+            return strategyCode == null ? "ALL" : strategyCode;
+        }
+        return value;
     }
 
     private static String normalizeLower(String raw) {

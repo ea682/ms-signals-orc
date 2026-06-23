@@ -9,6 +9,7 @@ import com.apunto.engine.hyperliquid.service.HyperliquidDirectDeltaIngestService
 import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.service.HyperliquidDirectCopyDispatchService;
 import com.apunto.engine.service.OperationMovementEventService;
+import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.util.CopyTraceIdUtil;
 import com.apunto.engine.shared.util.CopyLogAdvice;
@@ -49,6 +50,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final HyperliquidDirectIngestIdempotencyGuard idempotencyGuard;
     private final HyperliquidOriginPositionStoreService originPositionStoreService;
     private final OperationMovementEventService operationMovementEventService;
+    private final ShadowCopyTradingService shadowCopyTradingService;
     private final MeterRegistry meterRegistry;
     private final int laneCount;
     private final BlockingQueue<QueuedDelta>[] lanes;
@@ -72,6 +74,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             HyperliquidDirectIngestIdempotencyGuard idempotencyGuard,
             HyperliquidOriginPositionStoreService originPositionStoreService,
             OperationMovementEventService operationMovementEventService,
+            ShadowCopyTradingService shadowCopyTradingService,
             MeterRegistry meterRegistry
     ) {
         this.properties = properties;
@@ -79,6 +82,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         this.idempotencyGuard = idempotencyGuard;
         this.originPositionStoreService = originPositionStoreService;
         this.operationMovementEventService = operationMovementEventService;
+        this.shadowCopyTradingService = shadowCopyTradingService;
         this.meterRegistry = meterRegistry;
         this.laneCount = Math.max(1, properties.getWorkerThreads());
         int perLaneCapacity = Math.max(1, (Math.max(1, properties.getQueueCapacity()) + laneCount - 1) / laneCount);
@@ -345,7 +349,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", originTraceId(mapped))) {
             copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
             MDC.put("traceId", originTraceId(copyReady));
+            int shadowRecorded = recordShadowBeforeLive(copyReady);
             HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady);
+            logShadowLiveSeparation(copyReady, dispatchResult, shadowRecorded);
             operationMovementEventService.recordAsync(copyReady, dispatchResult, dispatchResult.reasonCode());
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
             idempotencyGuard.markProcessed(copyReady, dispatchResult.reasonCode());
@@ -374,6 +380,34 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queueDepth());
         } finally {
             MDC.remove("traceId");
+        }
+    }
+
+    private int recordShadowBeforeLive(HyperliquidMappedDelta mappedDelta) {
+        if (mappedDelta == null || mappedDelta.event() == null) {
+            return 0;
+        }
+        try {
+            int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event());
+            if (recorded > 0) {
+                log.info("event=shadow_processed_before_live idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} recorded={} reasonCode=SHADOW_INDEPENDENT_FROM_LIVE reasonMessage=\"El evento fue registrado en SHADOW antes de evaluar LIVE\" shadowImpact=SHADOW_EVENT_RECORDED",
+                        mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), recorded);
+            }
+            return recorded;
+        } catch (RuntimeException ex) {
+            log.error("event=shadow_ingest_failed idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} reasonCode=SHADOW_INGEST_FAILED copyImpact=LIVE_NOT_BLOCKED errClass={} errMsg=\"{}\"",
+                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            return 0;
+        }
+    }
+
+    private void logShadowLiveSeparation(HyperliquidMappedDelta mappedDelta, HyperliquidDirectCopyDispatchResult dispatchResult, int shadowRecorded) {
+        if (mappedDelta == null || dispatchResult == null || shadowRecorded <= 0) {
+            return;
+        }
+        if (dispatchResult.eligibleUsers() == 0 && dispatchResult.submittedTasks() == 0) {
+            log.info("event=live_skipped_but_shadow_recorded idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} eligibleUsers={} submitted={} shadowRecorded={} reasonCode=SHADOW_INDEPENDENT_FROM_LIVE reasonMessage=\"El evento fue registrado en SHADOW aunque no existen usuarios LIVE\" shadowImpact=SHADOW_EVENT_RECORDED liveImpact=NO_LIVE_USERS",
+                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), shadowRecorded);
         }
     }
 

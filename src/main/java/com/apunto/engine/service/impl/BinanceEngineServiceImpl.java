@@ -1602,7 +1602,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (strategyCode == null || strategyCode.isBlank()) {
             return false;
         }
-        return userCopyAllocationService.findOpenAllocation(userId, walletId, strategyCode).isPresent();
+        return userCopyAllocationService.findOpenAllocation(
+                userId,
+                walletId,
+                strategyCode,
+                metricScopeType(metric),
+                metricScopeValue(metric, strategyCode)
+        ).isPresent();
     }
 
     private String sampleWalletIds(List<MetricaWalletDto> metrics, int limit) {
@@ -1668,7 +1674,46 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return null;
         }
         String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(metric);
-        return userCopyAllocationService.findOpenAllocation(userDetail.getUser().getId(), walletId, strategyCode).orElse(null);
+        return userCopyAllocationService.findOpenAllocation(
+                userDetail.getUser().getId(),
+                walletId,
+                strategyCode,
+                metricScopeType(metric),
+                metricScopeValue(metric, strategyCode)
+        ).orElse(null);
+    }
+
+    private static String metricScopeType(MetricaWalletDto metric) {
+        String fromBreakdown = metric != null && metric.getWallet() != null && metric.getWallet().getCountOperationBreakdown() != null
+                ? metric.getWallet().getCountOperationBreakdown().getScopeType()
+                : null;
+        String fromJewel = metric != null && metric.getRealJewel() != null ? metric.getRealJewel().getScopeType() : null;
+        return normalizeScopeType(firstNonBlank(fromBreakdown, fromJewel, "strategy"));
+    }
+
+    private static String metricScopeValue(MetricaWalletDto metric, String strategyCode) {
+        String fromBreakdown = metric != null && metric.getWallet() != null && metric.getWallet().getCountOperationBreakdown() != null
+                ? metric.getWallet().getCountOperationBreakdown().getScopeValue()
+                : null;
+        String fromJewel = metric != null && metric.getRealJewel() != null ? metric.getRealJewel().getScopeValue() : null;
+        return normalizeScopeValue(firstNonBlank(fromBreakdown, fromJewel, strategyCode), strategyCode);
+    }
+
+    private static String normalizeScopeType(String raw) {
+        if (raw == null || raw.isBlank()) return "strategy";
+        return raw.trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static String normalizeScopeValue(String raw, String strategyCode) {
+        if (raw == null || raw.isBlank()) return normalizeStrategyCode(strategyCode);
+        return raw.trim();
+    }
+
+    private static String normalizeStrategyCode(String strategyCode) {
+        if (strategyCode == null || strategyCode.isBlank()) {
+            return CopyStrategyRuntimeRouter.DEFAULT_STRATEGY_CODE;
+        }
+        return strategyCode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
     }
 
     private String formatCapitalShare(MetricaWalletDto walletMetric) {
@@ -2934,7 +2979,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
     }
 
-    private String firstNonBlank(String... values) {
+    private static String firstNonBlank(String... values) {
         if (values == null) {
             return null;
         }

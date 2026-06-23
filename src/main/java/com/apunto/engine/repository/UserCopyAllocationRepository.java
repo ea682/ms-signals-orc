@@ -103,6 +103,25 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
             @Param("strategyCode") String strategyCode
     );
 
+    @Query("""
+            select uca
+            from UserCopyAllocationEntity uca
+            where uca.idUser = :idUser
+              and lower(uca.walletId) = lower(:walletId)
+              and uca.copyStrategyCode = :strategyCode
+              and uca.scopeType = :scopeType
+              and uca.scopeValue = :scopeValue
+              and uca.endsAt is null
+              and uca.executionMode = 'LIVE'
+            """)
+    Optional<UserCopyAllocationEntity> findOpenAllocationForUserWalletStrategyScope(
+            @Param("idUser") UUID idUser,
+            @Param("walletId") String walletId,
+            @Param("strategyCode") String strategyCode,
+            @Param("scopeType") String scopeType,
+            @Param("scopeValue") String scopeValue
+    );
+
     default Optional<UserCopyAllocationEntity> findActiveAllocation(
             UUID idUser,
             String walletId,

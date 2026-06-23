@@ -194,7 +194,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .map(a -> {
                     final String walletId = normalizeWalletId(a.getWalletId());
                     final String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(a);
-                    final String allocationKey = copyStrategyRuntimeRouter.allocationKey(walletId, strategyCode);
+                    final String allocationKey = copyStrategyRuntimeRouter.allocationKey(a);
                     if (walletId == null) {
                         log.warn("event=metric_wallets.candidates.skip_allocation userId={} reason=wallet_null allocationId={}", idUser, a.getId());
                         return null;
@@ -393,13 +393,13 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         applyGuardCapitalMultipliers(candidates);
         validateLimits(candidates, maxPerWallet, maxCapitalToUse);
 
-        syncDistributionIfEnabled(candidates, history.source());
+        syncDistributionIfEnabled(candidates, history.values(), history.source());
 
         return candidates;
     }
 
 
-    private void syncDistributionIfEnabled(List<MetricaWalletDto> candidates, String historySource) {
+    private void syncDistributionIfEnabled(List<MetricaWalletDto> liveCandidates, List<MetricaWalletDto> shadowCandidates, String historySource) {
         if (!syncDistributionEnabled) {
             log.debug("event=user_copy_allocation.sync_skipped reason=external_allocator_enabled source={}", historySource);
             return;
@@ -409,7 +409,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             return;
         }
         try {
-            userCopyAllocationService.syncDistribution(candidates);
+            userCopyAllocationService.syncDistribution(liveCandidates, shadowCandidates);
         } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException ex) {
             log.warn("event=user_copy_allocation.sync_failed errClass={} errMsg=\"{}\"", ex.getClass().getSimpleName(), safeErr(ex));
         }
@@ -727,6 +727,40 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return metric.getStrategy().getStrategyCode().trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
     }
 
+    private static String scopeTypeFromMetric(MetricaWalletDto metric) {
+        String fromBreakdown = metric != null && metric.getWallet() != null && metric.getWallet().getCountOperationBreakdown() != null
+                ? metric.getWallet().getCountOperationBreakdown().getScopeType()
+                : null;
+        String fromJewel = metric != null && metric.getRealJewel() != null ? metric.getRealJewel().getScopeType() : null;
+        String value = firstNonBlank(fromBreakdown, fromJewel, "strategy");
+        return value == null ? "strategy" : value.trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static String scopeValueFromMetric(MetricaWalletDto metric, String strategyCode) {
+        String fromBreakdown = metric != null && metric.getWallet() != null && metric.getWallet().getCountOperationBreakdown() != null
+                ? metric.getWallet().getCountOperationBreakdown().getScopeValue()
+                : null;
+        String fromJewel = metric != null && metric.getRealJewel() != null ? metric.getRealJewel().getScopeValue() : null;
+        String effectiveStrategy = normalizeStrategyCode(strategyCode);
+        String value = firstNonBlank(fromBreakdown, fromJewel, effectiveStrategy);
+        return value == null || value.isBlank() ? effectiveStrategy : value.trim();
+    }
+
+    private static String normalizeStrategyCode(String strategyCode) {
+        if (strategyCode == null || strategyCode.isBlank()) {
+            return CopyStrategyRuntimeRouter.DEFAULT_STRATEGY_CODE;
+        }
+        return strategyCode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) return null;
+        for (String value : values) {
+            if (value != null && !value.isBlank()) return value;
+        }
+        return null;
+    }
+
     private static Double windowNetPnl(MetricaWalletDto.CopySimulationDto simulation, String window) {
         if (simulation == null || window == null) return null;
 
@@ -913,8 +947,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 byWalletId.putIfAbsent(walletId, metric);
                 String strategyCode = router == null ? strategyCodeFromMetric(metric) : router.strategyCodeOf(metric);
                 String allocationKey = router == null
-                        ? walletId + "|" + strategyCodeFromMetric(metric)
-                        : router.allocationKey(walletId, strategyCode);
+                        ? walletId + "|" + strategyCodeFromMetric(metric) + "|" + scopeTypeFromMetric(metric) + "|" + scopeValueFromMetric(metric, strategyCode)
+                        : router.allocationKey(walletId, strategyCode, scopeTypeFromMetric(metric), scopeValueFromMetric(metric, strategyCode));
                 if (allocationKey != null) {
                     byAllocationKey.put(allocationKey, metric);
                 }
@@ -930,7 +964,8 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 return null;
             }
             String normalizedStrategy = strategyCode == null ? CopyStrategyRuntimeRouter.DEFAULT_STRATEGY_CODE : strategyCode;
-            return byAllocationKey.get(normalizedWallet + "|" + normalizedStrategy);
+            MetricaWalletDto direct = byAllocationKey.get(normalizedWallet + "|" + normalizedStrategy + "|strategy|" + normalizedStrategy);
+            return direct == null ? byAllocationKey.get(normalizedWallet + "|" + normalizedStrategy + "|all|ALL") : direct;
         }
 
         MetricaWalletDto findByAllocationKey(String allocationKey) {
