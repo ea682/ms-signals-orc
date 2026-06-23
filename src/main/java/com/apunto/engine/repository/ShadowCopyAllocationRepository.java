@@ -28,9 +28,54 @@ public interface ShadowCopyAllocationRepository extends JpaRepository<ShadowCopy
             where lower(s.walletId) = lower(:walletId)
               and s.active = true
               and s.endsAt is null
-              and s.status in ('SHADOW_ACTIVE', 'SHADOW_WARNING', 'SHADOW_VALIDATED', 'SHADOW_ONLY', 'PROMOTED_TO_LIVE')
+              and s.status in (
+                    'SHADOW_TESTING',
+                    'SHADOW_ACTIVE',
+                    'SHADOW_WARNING',
+                    'SHADOW_VALIDATED',
+                    'SHADOW_ONLY',
+                    'VALIDATED',
+                    'LIVE_ELIGIBLE',
+                    'PROMOTED_TO_LIVE',
+                    'LIVE_ACTIVE'
+              )
             """)
     List<ShadowCopyAllocationEntity> findRuntimeActiveByWallet(@Param("walletId") String walletId);
+
+    @Query(value = """
+            with ranked as (
+                select s.id,
+                       row_number() over (
+                           partition by coalesce(
+                               s.wallet_profile_id::text,
+                               lower(s.wallet_id) || '|' || s.copy_strategy_code || '|' || s.scope_type || '|' || s.scope_value
+                           )
+                           order by
+                               case when s.linked_live_allocation_id is null then 0 else 1 end,
+                               s.id
+                       ) as rn
+                from futuros_operaciones.shadow_copy_allocation s
+                where lower(s.wallet_id) = lower(:walletId)
+                  and s.is_active = true
+                  and s.ends_at is null
+                  and s.status in (
+                        'SHADOW_TESTING',
+                        'SHADOW_ACTIVE',
+                        'SHADOW_WARNING',
+                        'SHADOW_VALIDATED',
+                        'SHADOW_ONLY',
+                        'VALIDATED',
+                        'LIVE_ELIGIBLE',
+                        'PROMOTED_TO_LIVE',
+                        'LIVE_ACTIVE'
+                  )
+            )
+            select s.*
+            from futuros_operaciones.shadow_copy_allocation s
+            join ranked r on r.id = s.id
+            where r.rn = 1
+            """, nativeQuery = true)
+    List<ShadowCopyAllocationEntity> findRuntimeProfileRepresentativesByWallet(@Param("walletId") String walletId);
 
     @Query("""
             select s

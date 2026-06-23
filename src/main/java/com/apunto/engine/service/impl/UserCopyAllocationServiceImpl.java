@@ -90,8 +90,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     @Override
     @Transactional
     public void syncDistribution(List<MetricaWalletDto> candidates) {
+        syncDistribution(candidates, candidates);
+    }
 
-        if (candidates == null || candidates.isEmpty()) {
+    @Override
+    @Transactional
+    public void syncDistribution(List<MetricaWalletDto> candidates, List<MetricaWalletDto> shadowCandidates) {
+
+        final List<MetricaWalletDto> liveSource = candidates == null ? List.of() : candidates;
+        final List<MetricaWalletDto> shadowSource = shadowCandidates == null ? liveSource : shadowCandidates;
+
+        if (liveSource.isEmpty() && shadowSource.isEmpty()) {
             log.debug("event=user_copy_allocation.sync_skipped reason=empty_candidates");
             return;
         }
@@ -117,16 +126,16 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 continue;
             }
 
-            shadowCopyTradingService.syncShadowAllocations(idUser, candidates, maxWallet, now);
+            shadowCopyTradingService.syncShadowAllocations(idUser, shadowSource, maxWallet, now);
 
             entityManager.flush();
             entityManager.clear();
 
             final List<MetricaWalletDto> liveCandidates = shadowCopyTradingService.isSeparateShadowEnabled()
-                    ? candidates.stream().filter(dto -> shadowCopyTradingService.isLivePromotable(idUser, dto)).toList()
-                    : candidates;
+                    ? liveSource.stream().filter(dto -> shadowCopyTradingService.isLivePromotable(idUser, dto)).toList()
+                    : liveSource;
             final Map<String, LivePauseDecision> pauseByAllocationKey = shadowCopyTradingService.isSeparateShadowEnabled()
-                    ? livePauseDecisions(idUser, candidates)
+                    ? livePauseDecisions(idUser, shadowSource)
                     : Map.of();
             final Set<String> liveCandidateKeys = liveCandidates.stream()
                     .map(this::allocationKey)
@@ -140,7 +149,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             final Set<String> blockedAllocationKeys = new HashSet<>();
             for (UserCopyAllocationEntity e : existingActive) {
                 if (e == null) continue;
-                final String allocationKey = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
+                final String allocationKey = allocationKey(e);
                 if (allocationKey == null) continue;
                 if (!e.isActive()
                         || e.getStatus() == UserCopyAllocationEntity.Status.DISABLED_MANUAL
@@ -204,7 +213,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     if (e == null) continue;
                     if (!e.isActive()) continue;
 
-                    final String allocationKey = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
+                    final String allocationKey = allocationKey(e);
                     LivePauseDecision pause = allocationKey == null ? null : pauseByAllocationKey.get(allocationKey);
                     if (pause != null) {
                         applyLivePause(e, pause, now);
@@ -275,7 +284,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             final Map<String, UserCopyAllocationEntity> existingByAllocationKey = new HashMap<>();
             for (UserCopyAllocationEntity e : existingForNewWallets) {
                 if (e == null) continue;
-                final String key = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
+                final String key = allocationKey(e);
                 if (key != null) existingByAllocationKey.put(key, e);
             }
 
@@ -353,7 +362,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 if (!e.isActive()) continue;
                 if (e.getStatus() != UserCopyAllocationEntity.Status.ACTIVE) continue;
 
-                final String allocationKey = allocationKey(e.getWalletId(), e.getCopyStrategyCode());
+                final String allocationKey = allocationKey(e);
                 if (allocationKey == null) continue;
                 if (newAllocationKeys.contains(allocationKey)) continue;
 
@@ -392,7 +401,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     "event=user_copy_allocation.sync_ok userId={} maxWallet={} candidates={} persisted={} closed={} paused={} blocked={} targetTotalPct={} persistedTotal={}",
                     idUser,
                     maxWallet,
-                    candidates.size(),
+                    liveSource.size(),
                     newDist.size(),
                     closed,
                     paused,
@@ -500,6 +509,25 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             return Optional.empty();
         }
         return repository.findOpenAllocationForUserWalletStrategy(idUser, normalizedWallet, normalizedStrategy);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Optional<UserCopyAllocationEntity> findOpenAllocation(UUID idUser, String walletId, String strategyCode, String scopeType, String scopeValue) {
+        final String normalizedWallet = normalize(walletId);
+        final String normalizedStrategy = copyStrategyRuntimeRouter.strategyCodeOf(UserCopyAllocationEntity.builder().copyStrategyCode(strategyCode).build());
+        final String normalizedScopeType = normalizeScopeType(scopeType);
+        final String normalizedScopeValue = normalizeScopeValue(scopeValue, normalizedStrategy);
+        if (idUser == null || normalizedWallet == null || normalizedStrategy == null) {
+            return Optional.empty();
+        }
+        return repository.findOpenAllocationForUserWalletStrategyScope(
+                idUser,
+                normalizedWallet,
+                normalizedStrategy,
+                normalizedScopeType,
+                normalizedScopeValue
+        );
     }
 
     @Override
@@ -703,11 +731,16 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     private String allocationKey(MetricaWalletDto dto) {
         if (dto == null || dto.getWallet() == null) return null;
-        return allocationKey(dto.getWallet().getIdWallet(), strategyCode(dto));
+        String strategyCode = strategyCode(dto);
+        return allocationKey(dto.getWallet().getIdWallet(), strategyCode, scopeType(dto), scopeValue(dto, strategyCode));
     }
 
-    private String allocationKey(String walletId, String strategyCode) {
-        return copyStrategyRuntimeRouter.allocationKey(walletId, strategyCode);
+    private String allocationKey(UserCopyAllocationEntity entity) {
+        return copyStrategyRuntimeRouter.allocationKey(entity);
+    }
+
+    private String allocationKey(String walletId, String strategyCode, String scopeType, String scopeValue) {
+        return copyStrategyRuntimeRouter.allocationKey(walletId, strategyCode, scopeType, scopeValue);
     }
 
     private String strategyCode(MetricaWalletDto dto) {
@@ -756,11 +789,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 ? dto.getWallet().getCountOperationBreakdown().getScopeValue()
                 : null;
         String fromJewel = dto != null && dto.getRealJewel() != null ? dto.getRealJewel().getScopeValue() : null;
-        return normalizeScopeValue(firstNonBlank(fromBreakdown, fromJewel, strategyCode));
+        return normalizeScopeValue(firstNonBlank(fromBreakdown, fromJewel, strategyCode), strategyCode);
     }
 
     private static String strategyKey(String walletId, String strategyCode, String scopeType, String scopeValue) {
-        return normalize(walletId) + "|" + normalizeStrategy(strategyCode) + "|" + normalizeScopeType(scopeType) + "|" + normalizeScopeValue(scopeValue);
+        return normalize(walletId) + "|" + normalizeStrategy(strategyCode) + "|" + normalizeScopeType(scopeType) + "|" + normalizeScopeValue(scopeValue, strategyCode);
     }
 
     private static String targetExecutionMode(MetricaWalletDto dto) {
@@ -819,8 +852,8 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         return s.trim().toLowerCase(java.util.Locale.ROOT);
     }
 
-    private static String normalizeScopeValue(String s) {
-        if (s == null || s.isBlank()) return "default";
+    private static String normalizeScopeValue(String s, String strategyCode) {
+        if (s == null || s.isBlank()) return normalizeStrategy(strategyCode);
         return s.trim();
     }
 

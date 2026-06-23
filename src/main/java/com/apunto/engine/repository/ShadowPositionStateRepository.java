@@ -27,6 +27,19 @@ public interface ShadowPositionStateRepository extends JpaRepository<ShadowPosit
             String status
     );
 
+    Optional<ShadowPositionStateEntity> findFirstByWalletProfileIdAndParsymbolAndPositionSideAndStatus(
+            Long walletProfileId,
+            String parsymbol,
+            String positionSide,
+            String status
+    );
+
+    List<ShadowPositionStateEntity> findAllByWalletProfileIdAndParsymbolAndStatus(
+            Long walletProfileId,
+            String parsymbol,
+            String status
+    );
+
     @Query("""
             select count(s)
             from ShadowPositionStateEntity s
@@ -44,4 +57,37 @@ public interface ShadowPositionStateRepository extends JpaRepository<ShadowPosit
               and s.closedAt is not null
             """)
     BigDecimal sumClosedRealizedPnlUsd(@Param("shadowAllocationId") Long shadowAllocationId);
+
+    @Query("""
+            select count(s)
+            from ShadowPositionStateEntity s
+            where s.walletProfileId = :walletProfileId
+              and s.status = 'OPEN'
+            """)
+    long countOpenPositionsByWalletProfileId(@Param("walletProfileId") Long walletProfileId);
+
+    @Query("""
+            select count(s)
+            from ShadowPositionStateEntity s
+            where s.walletProfileId = :walletProfileId
+              and s.status = 'CLOSED'
+              and s.closedAt is not null
+            """)
+    long countClosedPositionsByWalletProfileId(@Param("walletProfileId") Long walletProfileId);
+
+    @Query("""
+            select sum(s.realizedPnlUsd)
+            from ShadowPositionStateEntity s
+            where s.walletProfileId = :walletProfileId
+              and s.status = 'CLOSED'
+              and s.closedAt is not null
+            """)
+    BigDecimal sumClosedRealizedPnlUsdByWalletProfileId(@Param("walletProfileId") Long walletProfileId);
+
+    @Query("""
+            select sum(s.slippageUsd)
+            from ShadowPositionStateEntity s
+            where s.walletProfileId = :walletProfileId
+            """)
+    BigDecimal sumSlippageUsdByWalletProfileId(@Param("walletProfileId") Long walletProfileId);
 }

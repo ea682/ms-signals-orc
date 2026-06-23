@@ -20,7 +20,9 @@ import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -164,10 +166,11 @@ public class HyperliquidCopyCandidateResolver {
 
         List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWallet(walletId);
         String side = operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
+        Map<String, CopyStrategyGuardDecision> guardByProfile = new HashMap<>();
         Set<UUID> activeUserIds = activeAllocations.stream()
                 .filter(Objects::nonNull)
                 .filter(a -> copyStrategyRuntimeRouter.allocationAppliesToEvent(a, action, deltaType, side, operation.getParSymbol()))
-                .filter(a -> guardAllowsNewEntry(a))
+                .filter(a -> guardAllowsNewEntry(a, guardByProfile))
                 .map(UserCopyAllocationEntity::getIdUser)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toUnmodifiableSet());
@@ -190,13 +193,19 @@ public class HyperliquidCopyCandidateResolver {
         return new CandidateUsers(usersCached, eligible, "allocation");
     }
 
-    private boolean guardAllowsNewEntry(UserCopyAllocationEntity allocation) {
+    private boolean guardAllowsNewEntry(UserCopyAllocationEntity allocation, Map<String, CopyStrategyGuardDecision> guardByProfile) {
         if (allocation == null) {
             return false;
         }
-        CopyStrategyGuardDecision decision = metricWalletService.evaluateCopyStrategyForCopy(
-                allocation.getWalletId(),
-                allocation.getCopyStrategyCode()
+        String profileKey = copyStrategyRuntimeRouter.allocationKey(allocation);
+        if (profileKey == null) {
+            profileKey = safeLog(allocation.getWalletId()) + "|" + safeLog(allocation.getCopyStrategyCode());
+        }
+        CopyStrategyGuardDecision decision = guardByProfile.computeIfAbsent(profileKey, ignored ->
+                metricWalletService.evaluateCopyStrategyForCopy(
+                        allocation.getWalletId(),
+                        allocation.getCopyStrategyCode()
+                )
         );
         if (decision.allowed()) {
             return true;
