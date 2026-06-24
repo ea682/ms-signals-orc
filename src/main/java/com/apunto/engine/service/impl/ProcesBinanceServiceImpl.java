@@ -52,6 +52,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         validateOperation(dto);
 
         Boolean reduceOnlyForClient = reduceOnlyForClient(dto);
+        Boolean configureAccountSettingsForClient = configureAccountSettingsForClient(dto);
 
         NewOperationClientRequest request = NewOperationClientRequest.builder()
                 .symbol(dto.getSymbol())
@@ -63,7 +64,7 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 .leverage(dto.getLeverage())
                 .positionSide(dto.getPositionSide())
                 .reduceOnly(reduceOnlyForClient)
-                .configureAccountSettings(dto.getConfigureAccountSettings())
+                .configureAccountSettings(configureAccountSettingsForClient)
                 .clientOrderId(dto.getClientOrderId())
                 .build();
 
@@ -309,6 +310,16 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         }
 
         return Boolean.TRUE;
+    }
+
+    private Boolean configureAccountSettingsForClient(OperationDto dto) {
+        if (dto == null) {
+            return null;
+        }
+        if (dto.isReduceOnly()) {
+            return Boolean.FALSE;
+        }
+        return dto.getConfigureAccountSettings();
     }
 
     private boolean isHedgePositionSide(PositionSide side) {

@@ -71,11 +71,20 @@ public class ShadowWalletProfileValidationEntity {
     @Column(name = "avg_slippage_bps", precision = 18, scale = 6)
     private BigDecimal avgSlippageBps;
 
+    @Column(name = "simulated_events", nullable = false)
+    private Long simulatedEvents;
+
+    @Column(name = "recorded_events", nullable = false)
+    private Long recordedEvents;
+
     @Column(name = "skipped_events", nullable = false)
     private Long skippedEvents;
 
     @Column(name = "duplicate_events", nullable = false)
     private Long duplicateEvents;
+
+    @Column(name = "error_events", nullable = false)
+    private Long errorEvents;
 
     @Column(name = "last_validation_reason", length = 300)
     private String lastValidationReason;
@@ -112,7 +121,10 @@ public class ShadowWalletProfileValidationEntity {
         if (grossPnlUsd == null) grossPnlUsd = BigDecimal.ZERO;
         if (feesUsd == null) feesUsd = BigDecimal.ZERO;
         if (slippageUsd == null) slippageUsd = BigDecimal.ZERO;
+        if (simulatedEvents == null) simulatedEvents = 0L;
+        if (recordedEvents == null) recordedEvents = 0L;
         if (skippedEvents == null) skippedEvents = 0L;
         if (duplicateEvents == null) duplicateEvents = 0L;
+        if (errorEvents == null) errorEvents = 0L;
     }
 }

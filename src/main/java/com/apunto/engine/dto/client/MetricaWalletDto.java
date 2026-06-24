@@ -18,6 +18,8 @@ public class MetricaWalletDto {
 
     private WalletDto wallet;
     private ActivityDto activity;
+    private ActivityDto walletActivity;
+    private ActivityDto strategyActivity;
     private StrategyDto strategy;
     private RealJewelDto realJewel;
     private ScoringDto scoring;
@@ -34,6 +36,17 @@ public class MetricaWalletDto {
     private ExecutionAndFrictionDto executionAndFriction;
     private MarketRelationDto marketRelation;
     private DataQualityDto dataQuality;
+    private Boolean decisionFinal;
+    private Map<String, Object> summaryConsistency;
+    private Map<String, Object> fieldAvailability;
+    private Map<String, Object> windowMeta;
+    private Map<String, Object> windowContributionAudit;
+    private Map<String, Object> strategySimulationAudit;
+    private Map<String, Object> copySizingAudit;
+    private Map<String, Object> copyGuardWindowAudit;
+    private Map<String, Object> simulationAudit;
+    private Map<String, Object> walletExposure;
+    private Map<String, Object> strategyExposure;
     private double capitalShare;
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
@@ -149,6 +162,7 @@ public class MetricaWalletDto {
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class ActivityDto {
+        private String unitKey;
         private Boolean hasOpenPositions;
         private Integer openPositionsCount;
         private OffsetDateTime lastActivityAt;
@@ -231,6 +245,17 @@ public class MetricaWalletDto {
         private CopySizingDto copySizing;
         private CopySimulationCoverageDto copySimulationCoverage;
         private Map<String, Object> liveExposure;
+        private String decisionUse;
+        private Boolean decisionFinal;
+        private Boolean requiresSimulationFull;
+        private Map<String, Object> summaryConsistency;
+        private Map<String, Object> fieldAvailability;
+        private Map<String, Object> windowMeta;
+        private Map<String, Object> windowContributionAudit;
+        private Map<String, Object> strategySimulationAudit;
+        private Map<String, Object> copySizingAudit;
+        private Map<String, Object> copyGuardWindowAudit;
+        private Map<String, Object> simulationAudit;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor
@@ -466,6 +491,19 @@ public class MetricaWalletDto {
         private Integer sourceFacts;
         private Integer loadedFacts;
         private Integer excludedFacts;
+        private Boolean factPayloadLoaded;
+        private Boolean summaryMode;
+        private String decisionUse;
+        private Boolean decisionFinal;
+        private Boolean requiresSimulationFull;
+        private Map<String, Object> summaryConsistency;
+        private Map<String, Object> fieldAvailability;
+        private Map<String, Object> windowMeta;
+        private Map<String, Object> windowContributionAudit;
+        private Map<String, Object> strategySimulationAudit;
+        private Map<String, Object> copySizingAudit;
+        private Map<String, Object> copyGuardWindowAudit;
+        private Map<String, Object> simulationAudit;
         private CopySimulationCoverageDto simulationCoverage;
     }
 
@@ -480,6 +518,7 @@ public class MetricaWalletDto {
         private Integer excludedFacts;
         private Double coveragePct;
         private Boolean isComplete;
+        private Boolean factPayloadLoaded;
         private List<String> exclusionReasons;
         private String reconciliationStatus;
         private Integer reconciliationDelta;

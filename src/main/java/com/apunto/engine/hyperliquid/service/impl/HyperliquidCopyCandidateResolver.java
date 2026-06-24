@@ -175,11 +175,11 @@ public class HyperliquidCopyCandidateResolver {
                 .filter(Objects::nonNull)
                 .collect(Collectors.toUnmodifiableSet());
         if (activeUserIds.isEmpty()) {
-            log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} side={} deltaType={} action={} activeAllocations={} matchingAllocationUsers=0 usersCached={} eligibleUsers=0 fallbackAllUsers={} reasonCode=allocation_empty {}",
+            log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} side={} deltaType={} action={} activeAllocations={} matchingAllocationUsers=0 usersCached={} eligibleUsers=0 fallbackAllUsers={} reasonCode=ALLOCATION_EMPTY {}",
                     safeLog(walletId), safeLog(side), deltaType, action, activeAllocations.size(), usersCached.size(), fallbackAllUsersOnEmptyAllocation,
-                    CopyLogAdvice.fields("allocation_empty", CopyLogAdvice.context(activeAllocations.size(), 0, 0, 0, null, null, 0, "allocation")));
+                    CopyLogAdvice.fields("ALLOCATION_EMPTY", CopyLogAdvice.context(activeAllocations.size(), 0, 0, 0, null, null, 0, "allocation")));
             List<UserDetailDto> eligible = fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
-            return new CandidateUsers(usersCached, eligible, "allocation_empty");
+            return new CandidateUsers(usersCached, eligible, "allocation_empty", "ALLOCATION_EMPTY");
         }
 
         List<UserDetailDto> eligible = usersCached.stream()
@@ -267,7 +267,11 @@ public class HyperliquidCopyCandidateResolver {
     public record CandidateUsers(
             List<UserDetailDto> usersCached,
             List<UserDetailDto> eligibleUsers,
-            String source
+            String source,
+            String reasonCode
     ) {
+        public CandidateUsers(List<UserDetailDto> usersCached, List<UserDetailDto> eligibleUsers, String source) {
+            this(usersCached, eligibleUsers, source, null);
+        }
     }
 }
