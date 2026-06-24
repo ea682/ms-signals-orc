@@ -30,4 +30,6 @@ public interface ShadowCopyOperationEventRepository extends JpaRepository<Shadow
             String positionSide,
             OffsetDateTime eventTime
     );
+
+    long countByWalletProfileIdAndDecision(Long walletProfileId, String decision);
 }
