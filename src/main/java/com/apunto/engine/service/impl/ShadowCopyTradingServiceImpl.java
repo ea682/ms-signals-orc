@@ -52,25 +52,43 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
 
-    private record ShadowPositionImpact(String reasonCode, String shadowImpact, BigDecimal realizedPnlUsd) {
-        static ShadowPositionImpact opened() {
-            return new ShadowPositionImpact("SHADOW_POSITION_OPENED", "POSITION_OPENED", null);
+    private record ShadowPositionImpact(
+            String reasonCode,
+            String shadowImpact,
+            BigDecimal realizedPnlUsd,
+            UUID shadowPositionId,
+            boolean positionUpdated
+    ) {
+        static ShadowPositionImpact opened(UUID shadowPositionId) {
+            return new ShadowPositionImpact("SHADOW_POSITION_OPENED", "POSITION_OPENED", null, shadowPositionId, true);
         }
 
-        static ShadowPositionImpact resized() {
-            return new ShadowPositionImpact("SHADOW_POSITION_RESIZED", "POSITION_RESIZED", null);
+        static ShadowPositionImpact resized(UUID shadowPositionId) {
+            return new ShadowPositionImpact("SHADOW_POSITION_RESIZED", "POSITION_RESIZED", null, shadowPositionId, true);
         }
 
-        static ShadowPositionImpact closed(BigDecimal pnl) {
-            return new ShadowPositionImpact("SHADOW_POSITION_CLOSED", "POSITION_CLOSED", pnl);
+        static ShadowPositionImpact closed(BigDecimal pnl, UUID shadowPositionId) {
+            return new ShadowPositionImpact("SHADOW_POSITION_CLOSED", "POSITION_CLOSED", pnl, shadowPositionId, true);
         }
 
         static ShadowPositionImpact resizeWithoutOpen() {
-            return new ShadowPositionImpact("RESIZE_WITHOUT_SHADOW_OPEN", "NO_VALID_POSITION", null);
+            return new ShadowPositionImpact("RESIZE_WITHOUT_SHADOW_OPEN", "NO_VALID_POSITION", null, null, false);
+        }
+
+        static ShadowPositionImpact warmupResizeWithoutOpen() {
+            return new ShadowPositionImpact("WARMUP_RESIZE_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_POSITION", null, null, false);
+        }
+
+        static ShadowPositionImpact resizeAfterClosed(UUID shadowPositionId) {
+            return new ShadowPositionImpact("RESIZE_AFTER_SHADOW_CLOSED", "NO_VALID_POSITION", null, shadowPositionId, false);
         }
 
         static ShadowPositionImpact closeWithoutOpen() {
-            return new ShadowPositionImpact("CLOSE_WITHOUT_SHADOW_OPEN", "NO_VALID_PNL", null);
+            return new ShadowPositionImpact("CLOSE_WITHOUT_SHADOW_OPEN", "NO_VALID_PNL", null, null, false);
+        }
+
+        static ShadowPositionImpact warmupCloseWithoutOpen() {
+            return new ShadowPositionImpact("WARMUP_CLOSE_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_PNL", null, null, false);
         }
     }
 
@@ -100,11 +118,14 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     @Value("${metric-wallet.shadow.require-validation-before-live:true}")
     private boolean requireShadowValidationBeforeLive;
 
-    @Value("${metric-wallet.shadow.min-closed-operations-for-live:5}")
+    @Value("${metric-wallet.shadow.min-closed-operations-for-live:50}")
     private int minShadowClosedOperationsForLive;
 
     @Value("${metric-wallet.shadow.min-net-pnl-usdt-for-live:0}")
     private BigDecimal minShadowNetPnlUsdtForLive;
+
+    @Value("${metric-wallet.shadow.warmup-minutes:60}")
+    private long shadowWarmupMinutes;
 
     @Override
     @Transactional
@@ -593,76 +614,31 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         BigDecimal slippageUsd = slippageUsd(notional);
         String eventType = shadowEventType(action, deltaType);
 
+        shadowEventRepository.lockShadowEventIdempotency(shadowEventIdempotencyKey(allocation, originId, eventType, typeOperation, eventTime));
         boolean duplicate = allocation.getWalletProfileId() != null
                 ? shadowEventRepository.existsByWalletProfileIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime(
                 allocation.getWalletProfileId(), originId, eventType, typeOperation, eventTime)
                 : shadowEventRepository.existsByShadowAllocationIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime(
                 allocation.getId(), originId, eventType, typeOperation, eventTime);
         if (duplicate) {
-            log.info("event=shadow_event_recorded originId={} shadowAllocationId={} walletId={} copyProfileCode={} symbol={} side={} action={} deltaType={} reasonCode=DUPLICATE_SHADOW_EVENT shadowImpact=NO_DUPLICATE_EVENT",
-                    originId, allocation.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), typeOperation, action, deltaType);
+            log.info("event=duplicate_shadow_event_skipped originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} action={} deltaType={} reasonCode=DUPLICATE_SHADOW_EVENT shadowImpact=NO_DUPLICATE_EVENT",
+                    originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), typeOperation, action, deltaType);
             return false;
         }
 
+        ShadowPositionImpact impact = updateShadowPositionState(allocation, op, action, deltaType, eventTime, qty, notional, price, slippageUsd, originId, typeOperation);
         ShadowCopyOperationEntity shadowOperation = null;
-        if (action != CopyJobAction.CLOSE) {
-            boolean canStartShadowOperation = deltaType == HyperliquidDeltaType.OPEN
-                    || deltaType == HyperliquidDeltaType.FLIP
-                    || deltaType == HyperliquidDeltaType.UNKNOWN;
-            Optional<ShadowCopyOperationEntity> existingShadowOperation = allocation.getWalletProfileId() == null
-                    ? Optional.empty()
-                    : shadowOperationRepository.findFirstByWalletProfileIdAndIdOrderOriginAndTypeOperationAndActiveTrue(allocation.getWalletProfileId(), originId, typeOperation);
-            existingShadowOperation = existingShadowOperation
-                    .or(() -> shadowOperationRepository.findFirstByShadowAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrue(allocation.getId(), originId, typeOperation));
-            shadowOperation = existingShadowOperation.orElseGet(() -> canStartShadowOperation
-                    ? ShadowCopyOperationEntity.builder()
-                    .idOperation(UUID.randomUUID())
-                    .shadowAllocationId(allocation.getId())
-                    .linkedLiveAllocationId(allocation.getLinkedLiveAllocationId())
-                    .walletProfileId(allocation.getWalletProfileId())
-                    .shadowValidationId(allocation.getShadowValidationId())
-                    .idUser(allocation.getIdUser().toString())
-                    .idOrderOrigin(originId)
-                    .idWalletOrigin(allocation.getWalletId())
-                    .copyStrategyCode(allocation.getCopyStrategyCode())
-                    .scopeType(allocation.getScopeType())
-                    .scopeValue(allocation.getScopeValue())
-                    .strategyKey(allocation.getStrategyKey())
-                    .parsymbol(op.getParSymbol())
-                    .typeOperation(typeOperation)
-                    .dateCreation(eventTime)
-                    .active(true)
-                    .status("OPEN")
-                    .build()
-                    : null);
-            if (shadowOperation != null) {
-                shadowOperation.setSizePar(qty);
-                shadowOperation.setSizeUsd(notional);
-                shadowOperation.setPriceEntry(price);
-                shadowOperation.setSimulatedSlippageUsd(slippageUsd);
-                shadowOperation.setSimulatedFeeUsd(ZERO);
-                shadowOperationRepository.save(shadowOperation);
-            }
-        } else {
-            Optional<ShadowCopyOperationEntity> existingShadowOperation = allocation.getWalletProfileId() == null
-                    ? Optional.empty()
-                    : shadowOperationRepository.findFirstByWalletProfileIdAndIdOrderOriginAndTypeOperationAndActiveTrue(allocation.getWalletProfileId(), originId, typeOperation);
-            shadowOperation = existingShadowOperation
-                    .or(() -> shadowOperationRepository.findFirstByShadowAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrue(allocation.getId(), originId, typeOperation))
-                    .orElse(null);
-            if (shadowOperation != null) {
-                shadowOperation.setActive(false);
-                shadowOperation.setStatus("CLOSED");
-                shadowOperation.setDateClose(eventTime);
-                shadowOperation.setPriceClose(price);
-                shadowOperationRepository.save(shadowOperation);
+        if (impact.positionUpdated()) {
+            if (action == CopyJobAction.CLOSE) {
+                shadowOperation = closeShadowOperation(allocation, op, eventTime, originId, typeOperation, price, impact.realizedPnlUsd());
+            } else {
+                shadowOperation = upsertOpenShadowOperation(allocation, op, deltaType, eventTime, originId, typeOperation, qty, notional, price, slippageUsd);
             }
         }
 
-        ShadowPositionImpact impact = updateShadowPositionState(allocation, op, action, deltaType, eventTime, qty, notional, price, slippageUsd, originId, typeOperation);
-
         ShadowCopyOperationEventEntity shadowEvent = ShadowCopyOperationEventEntity.builder()
                 .shadowOperationId(shadowOperation == null ? null : shadowOperation.getIdOperation())
+                .shadowPositionId(impact.shadowPositionId())
                 .shadowAllocationId(allocation.getId())
                 .linkedLiveAllocationId(allocation.getLinkedLiveAllocationId())
                 .walletProfileId(allocation.getWalletProfileId())
@@ -687,7 +663,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .feeUsd(ZERO)
                 .slippageBps(BigDecimal.valueOf(shadowSlippageBps).setScale(6, RoundingMode.HALF_UP))
                 .slippageUsd(slippageUsd)
-                .decision(impact.reasonCode().contains("WITHOUT") ? "SKIPPED" : "SIMULATED")
+                .decision(impact.positionUpdated() ? "SIMULATED" : "SKIPPED")
                 .decisionReason("shadow_separate_table")
                 .source("shadow_copy")
                 .reasonCode(impact.reasonCode())
@@ -695,10 +671,15 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .dateCreation(OffsetDateTime.now())
                 .build();
         shadowEventRepository.save(shadowEvent);
-        log.info("event=shadow_event_recorded originId={} userId={} shadowAllocationId={} liveAllocationId={} walletId={} copyProfileCode={} executionMode=SHADOW intent={} symbol={} side={} reasonCode={} shadowImpact={} qty={} notional={} slippageUsd={}",
+        updateRuntimeActivity(allocation, eventType, impact, eventTime);
+        refreshProfileValidationAfterEvent(allocation, eventType, impact, eventTime);
+        log.info("event=shadow_event_recorded originId={} userId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} shadowOperationId={} liveAllocationId={} walletId={} copyProfileCode={} executionMode=SHADOW intent={} symbol={} side={} reasonCode={} shadowImpact={} qty={} notional={} slippageUsd={}",
                 originId,
                 allocation.getIdUser(),
                 allocation.getId(),
+                allocation.getWalletProfileId(),
+                impact.shadowPositionId(),
+                shadowOperation == null ? null : shadowOperation.getIdOperation(),
                 allocation.getLinkedLiveAllocationId(),
                 allocation.getWalletId(),
                 allocation.getCopyStrategyCode(),
@@ -711,6 +692,242 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 notional,
                 slippageUsd);
         return true;
+    }
+
+    private String shadowEventIdempotencyKey(
+            ShadowCopyAllocationEntity allocation,
+            String originId,
+            String eventType,
+            String typeOperation,
+            OffsetDateTime eventTime
+    ) {
+        String scope = allocation.getWalletProfileId() == null
+                ? "allocation:" + allocation.getId()
+                : "profile:" + allocation.getWalletProfileId();
+        return String.join("|",
+                "shadow-event",
+                scope,
+                originId == null ? "NA" : originId,
+                eventType == null ? "NA" : eventType,
+                typeOperation == null ? "NA" : typeOperation,
+                eventTime == null ? "NA" : eventTime.toInstant().toString()
+        );
+    }
+
+    private ShadowCopyOperationEntity upsertOpenShadowOperation(
+            ShadowCopyAllocationEntity allocation,
+            OperacionDto op,
+            HyperliquidDeltaType deltaType,
+            OffsetDateTime eventTime,
+            String originId,
+            String typeOperation,
+            BigDecimal qty,
+            BigDecimal notional,
+            BigDecimal price,
+            BigDecimal slippageUsd
+    ) {
+        boolean lifecycleStart = deltaType == HyperliquidDeltaType.OPEN
+                || deltaType == HyperliquidDeltaType.FLIP
+                || deltaType == HyperliquidDeltaType.UNKNOWN;
+        ShadowCopyOperationEntity shadowOperation = findOpenShadowOperationByOrigin(allocation, originId, typeOperation)
+                .or(() -> findOpenShadowOperationForPosition(allocation, op.getParSymbol(), typeOperation))
+                .orElseGet(() -> ShadowCopyOperationEntity.builder()
+                        .idOperation(UUID.randomUUID())
+                        .shadowAllocationId(allocation.getId())
+                        .linkedLiveAllocationId(allocation.getLinkedLiveAllocationId())
+                        .walletProfileId(allocation.getWalletProfileId())
+                        .shadowValidationId(allocation.getShadowValidationId())
+                        .idUser(allocation.getIdUser().toString())
+                        .idOrderOrigin(originId)
+                        .idWalletOrigin(allocation.getWalletId())
+                        .copyStrategyCode(allocation.getCopyStrategyCode())
+                        .scopeType(allocation.getScopeType())
+                        .scopeValue(allocation.getScopeValue())
+                        .strategyKey(allocation.getStrategyKey())
+                        .parsymbol(op.getParSymbol())
+                        .typeOperation(typeOperation)
+                        .dateCreation(eventTime)
+                        .active(true)
+                        .status(lifecycleStart ? "OPEN" : "OPEN_RECOVERED")
+                        .build());
+        shadowOperation.setSizePar(qty);
+        shadowOperation.setSizeUsd(notional);
+        if (shadowOperation.getPriceEntry() == null || lifecycleStart) {
+            shadowOperation.setPriceEntry(price);
+        }
+        shadowOperation.setSimulatedSlippageUsd(firstNonNull(shadowOperation.getSimulatedSlippageUsd(), ZERO).add(slippageUsd));
+        shadowOperation.setSimulatedFeeUsd(ZERO);
+        shadowOperation.setActive(true);
+        if (shadowOperation.getStatus() == null || shadowOperation.getStatus().isBlank()) {
+            shadowOperation.setStatus("OPEN");
+        }
+        return shadowOperationRepository.save(shadowOperation);
+    }
+
+    private ShadowCopyOperationEntity closeShadowOperation(
+            ShadowCopyAllocationEntity allocation,
+            OperacionDto op,
+            OffsetDateTime eventTime,
+            String originId,
+            String typeOperation,
+            BigDecimal price,
+            BigDecimal realizedPnlUsd
+    ) {
+        ShadowCopyOperationEntity shadowOperation = findOpenShadowOperationForPosition(allocation, op.getParSymbol(), typeOperation)
+                .or(() -> findOpenShadowOperationByOrigin(allocation, originId, typeOperation))
+                .orElse(null);
+        if (shadowOperation == null) {
+            log.info("event=shadow_operation_close_missing originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} reasonCode=SHADOW_OPERATION_NOT_FOUND shadowImpact=POSITION_CLOSED_WITHOUT_OPERATION",
+                    originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), typeOperation);
+            return null;
+        }
+        shadowOperation.setActive(false);
+        shadowOperation.setStatus("CLOSED");
+        shadowOperation.setDateClose(eventTime);
+        shadowOperation.setPriceClose(price);
+        shadowOperation.setRealizedPnlUsd(realizedPnlUsd);
+        return shadowOperationRepository.save(shadowOperation);
+    }
+
+    private Optional<ShadowCopyOperationEntity> findOpenShadowOperationByOrigin(
+            ShadowCopyAllocationEntity allocation,
+            String originId,
+            String typeOperation
+    ) {
+        Optional<ShadowCopyOperationEntity> byProfile = allocation.getWalletProfileId() == null
+                ? Optional.empty()
+                : shadowOperationRepository.findFirstByWalletProfileIdAndIdOrderOriginAndTypeOperationAndActiveTrue(allocation.getWalletProfileId(), originId, typeOperation);
+        return byProfile.or(() -> shadowOperationRepository.findFirstByShadowAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrue(allocation.getId(), originId, typeOperation));
+    }
+
+    private Optional<ShadowCopyOperationEntity> findOpenShadowOperationForPosition(
+            ShadowCopyAllocationEntity allocation,
+            String symbol,
+            String typeOperation
+    ) {
+        Optional<ShadowCopyOperationEntity> byProfile = allocation.getWalletProfileId() == null
+                ? Optional.empty()
+                : shadowOperationRepository.findFirstByWalletProfileIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc(
+                allocation.getWalletProfileId(),
+                symbol,
+                typeOperation
+        );
+        return byProfile.or(() -> shadowOperationRepository.findFirstByShadowAllocationIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc(
+                allocation.getId(),
+                symbol,
+                typeOperation
+        ));
+    }
+
+    private Optional<ShadowPositionStateEntity> latestClosedShadowPosition(
+            ShadowCopyAllocationEntity allocation,
+            String symbol,
+            String positionSide
+    ) {
+        Optional<ShadowPositionStateEntity> byProfile = allocation.getWalletProfileId() == null
+                ? Optional.empty()
+                : shadowPositionStateRepository.findFirstByWalletProfileIdAndParsymbolAndPositionSideAndStatusOrderByClosedAtDesc(
+                allocation.getWalletProfileId(),
+                symbol,
+                positionSide,
+                "CLOSED"
+        );
+        return byProfile.or(() -> shadowPositionStateRepository.findFirstByShadowAllocationIdAndParsymbolAndPositionSideAndStatusOrderByClosedAtDesc(
+                allocation.getId(),
+                symbol,
+                positionSide,
+                "CLOSED"
+        ));
+    }
+
+    private boolean isWarmupEvent(ShadowCopyAllocationEntity allocation, OffsetDateTime eventTime) {
+        if (allocation == null || eventTime == null || shadowWarmupMinutes <= 0) {
+            return false;
+        }
+        OffsetDateTime startedAt = firstNonNull(allocation.getCreatedAt(), allocation.getLastSeenAt());
+        return startedAt != null && !eventTime.isAfter(startedAt.plusMinutes(shadowWarmupMinutes));
+    }
+
+    private void updateRuntimeActivity(
+            ShadowCopyAllocationEntity allocation,
+            String eventType,
+            ShadowPositionImpact impact,
+            OffsetDateTime eventTime
+    ) {
+        if (allocation == null) {
+            return;
+        }
+        OffsetDateTime effectiveTime = eventTime == null ? OffsetDateTime.now(ZoneOffset.UTC) : eventTime;
+        allocation.setWalletLastActivityAt(maxTime(allocation.getWalletLastActivityAt(), effectiveTime));
+        allocation.setStrategyLastActivityAt(maxTime(allocation.getStrategyLastActivityAt(), effectiveTime));
+        if (impact != null && impact.positionUpdated()) {
+            if ("OPEN".equals(eventType) || "FLIP".equals(eventType)) {
+                allocation.setWalletLastOpenedAt(maxTime(allocation.getWalletLastOpenedAt(), effectiveTime));
+                allocation.setStrategyLastOpenedAt(maxTime(allocation.getStrategyLastOpenedAt(), effectiveTime));
+            }
+            if ("CLOSE".equals(eventType)) {
+                allocation.setWalletLastClosedAt(maxTime(allocation.getWalletLastClosedAt(), effectiveTime));
+                allocation.setStrategyLastClosedAt(maxTime(allocation.getStrategyLastClosedAt(), effectiveTime));
+            }
+        }
+        allocation.setLastSeenAt(maxTime(allocation.getLastSeenAt(), effectiveTime));
+        allocation.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        shadowAllocationRepository.save(allocation);
+
+        if (allocation.getWalletProfileId() == null) {
+            return;
+        }
+        copyWalletProfileRepository.findById(allocation.getWalletProfileId()).ifPresent(profile -> {
+            profile.setWalletLastActivityAt(maxTime(profile.getWalletLastActivityAt(), effectiveTime));
+            profile.setStrategyLastActivityAt(maxTime(profile.getStrategyLastActivityAt(), effectiveTime));
+            if (impact != null && impact.positionUpdated()) {
+                if ("OPEN".equals(eventType) || "FLIP".equals(eventType)) {
+                    profile.setWalletLastOpenedAt(maxTime(profile.getWalletLastOpenedAt(), effectiveTime));
+                    profile.setStrategyLastOpenedAt(maxTime(profile.getStrategyLastOpenedAt(), effectiveTime));
+                }
+                if ("CLOSE".equals(eventType)) {
+                    profile.setWalletLastClosedAt(maxTime(profile.getWalletLastClosedAt(), effectiveTime));
+                    profile.setStrategyLastClosedAt(maxTime(profile.getStrategyLastClosedAt(), effectiveTime));
+                }
+            }
+            profile.setLastSeenAt(maxTime(profile.getLastSeenAt(), effectiveTime));
+            profile.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+            copyWalletProfileRepository.save(profile);
+        });
+    }
+
+    private void refreshProfileValidationAfterEvent(
+            ShadowCopyAllocationEntity allocation,
+            String eventType,
+            ShadowPositionImpact impact,
+            OffsetDateTime eventTime
+    ) {
+        if (allocation == null || allocation.getWalletProfileId() == null) {
+            return;
+        }
+        if (!shouldRefreshProfileValidation(eventType, impact)) {
+            return;
+        }
+        String status = profileStatus(allocation.getStatus(), false);
+        String reason = "shadow_runtime_event:" + (impact == null ? "UNKNOWN" : impact.reasonCode());
+        upsertProfileValidation(allocation.getWalletProfileId(), status, reason, eventTime == null ? OffsetDateTime.now(ZoneOffset.UTC) : eventTime);
+    }
+
+    private boolean shouldRefreshProfileValidation(String eventType, ShadowPositionImpact impact) {
+        if (impact == null || !impact.positionUpdated()) {
+            return false;
+        }
+        return "OPEN".equals(eventType) || "CLOSE".equals(eventType) || "FLIP".equals(eventType);
+    }
+
+    private static OffsetDateTime maxTime(OffsetDateTime current, OffsetDateTime candidate) {
+        if (current == null) {
+            return candidate;
+        }
+        if (candidate == null) {
+            return current;
+        }
+        return candidate.isAfter(current) ? candidate : current;
     }
 
     private ShadowPositionImpact updateShadowPositionState(
@@ -748,8 +965,13 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .orElse(null);
         if (action == CopyJobAction.CLOSE) {
             if (state == null) {
-                log.info("event=shadow_close_without_open originId={} shadowAllocationId={} walletId={} copyProfileCode={} symbol={} side={} reasonCode=CLOSE_WITHOUT_SHADOW_OPEN shadowImpact=NO_VALID_PNL",
-                        originId, allocation.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide);
+                if (isWarmupEvent(allocation, eventTime)) {
+                    log.info("event=shadow_warmup_close_without_open originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} warmupMinutes={} reasonCode=WARMUP_CLOSE_WITHOUT_SHADOW_OPEN shadowImpact=WARMUP_NO_VALID_PNL",
+                            originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, shadowWarmupMinutes);
+                    return ShadowPositionImpact.warmupCloseWithoutOpen();
+                }
+                log.info("event=shadow_close_without_open originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} reasonCode=CLOSE_WITHOUT_SHADOW_OPEN shadowImpact=NO_VALID_PNL",
+                        originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide);
                 return ShadowPositionImpact.closeWithoutOpen();
             }
             BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(slippageUsd);
@@ -768,13 +990,24 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             state.setRealizedPnlUsd(realizedPnl);
             state.setLastSourceEventId(originId);
             shadowPositionStateRepository.save(state);
-            log.info("event=shadow_position_closed originId={} shadowAllocationId={} walletId={} copyProfileCode={} symbol={} side={} realizedPnlUsd={} reasonCode=SHADOW_POSITION_CLOSED shadowImpact=POSITION_CLOSED",
-                    originId, allocation.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, realizedPnl);
-            return ShadowPositionImpact.closed(realizedPnl);
+            log.info("event=shadow_position_closed originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} realizedPnlUsd={} reasonCode=SHADOW_POSITION_CLOSED shadowImpact=POSITION_CLOSED",
+                    originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, realizedPnl);
+            return ShadowPositionImpact.closed(realizedPnl, state.getId());
         }
         if (state == null && (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE)) {
-            log.info("event=shadow_resize_without_open originId={} shadowAllocationId={} walletId={} copyProfileCode={} symbol={} side={} deltaType={} reasonCode=RESIZE_WITHOUT_SHADOW_OPEN shadowImpact=NO_VALID_POSITION",
-                    originId, allocation.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, deltaType);
+            Optional<ShadowPositionStateEntity> latestClosed = latestClosedShadowPosition(allocation, op.getParSymbol(), positionSide);
+            if (latestClosed.isPresent()) {
+                log.info("event=shadow_resize_after_closed originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} deltaType={} reasonCode=RESIZE_AFTER_SHADOW_CLOSED shadowImpact=NO_VALID_POSITION",
+                        originId, allocation.getId(), allocation.getWalletProfileId(), latestClosed.get().getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, deltaType);
+                return ShadowPositionImpact.resizeAfterClosed(latestClosed.get().getId());
+            }
+            if (isWarmupEvent(allocation, eventTime)) {
+                log.info("event=shadow_warmup_resize_without_open originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} deltaType={} warmupMinutes={} reasonCode=WARMUP_RESIZE_WITHOUT_SHADOW_OPEN shadowImpact=WARMUP_NO_VALID_POSITION",
+                        originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, deltaType, shadowWarmupMinutes);
+                return ShadowPositionImpact.warmupResizeWithoutOpen();
+            }
+            log.info("event=shadow_resize_without_open originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} deltaType={} reasonCode=RESIZE_WITHOUT_SHADOW_OPEN shadowImpact=NO_VALID_POSITION",
+                    originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, deltaType);
             return ShadowPositionImpact.resizeWithoutOpen();
         }
         boolean opened = false;
@@ -806,13 +1039,13 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         state.setLastSourceEventId(originId);
         shadowPositionStateRepository.save(state);
         if (opened) {
-            log.info("event=shadow_position_opened originId={} shadowAllocationId={} walletId={} copyProfileCode={} symbol={} side={} qty={} price={} reasonCode=SHADOW_POSITION_OPENED shadowImpact=POSITION_OPENED",
-                    originId, allocation.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, qty, price);
-            return ShadowPositionImpact.opened();
+            log.info("event=shadow_position_opened originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} qty={} price={} reasonCode=SHADOW_POSITION_OPENED shadowImpact=POSITION_OPENED",
+                    originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, qty, price);
+            return ShadowPositionImpact.opened(state.getId());
         }
-        log.info("event=shadow_position_resized originId={} shadowAllocationId={} walletId={} copyProfileCode={} symbol={} side={} qty={} price={} reasonCode=SHADOW_POSITION_RESIZED shadowImpact=POSITION_RESIZED",
-                originId, allocation.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, qty, price);
-        return ShadowPositionImpact.resized();
+        log.info("event=shadow_position_resized originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} qty={} price={} reasonCode=SHADOW_POSITION_RESIZED shadowImpact=POSITION_RESIZED",
+                originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, qty, price);
+        return ShadowPositionImpact.resized(state.getId());
     }
 
     private void closeOtherOpenShadowSides(

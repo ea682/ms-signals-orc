@@ -60,6 +60,7 @@ public interface CopyTradingMapper {
                     .userId(userDetail.getUser().getId().toString())
                     .walletId(copyOperation.getIdWalletOrigin())
                     .reduceOnly(true)
+                    .configureAccountSettings(false)
                     .apiKey(userDetail.getUserApiKey().getApiKey())
                     .secret(userDetail.getUserApiKey().getApiSecret())
                     .build();
@@ -81,6 +82,7 @@ public interface CopyTradingMapper {
                     .userId(userDetail.getUser().getId().toString())
                     .walletId(copyOperation.getIdWalletOrigin())
                     .reduceOnly(true)
+                    .configureAccountSettings(false)
                     .apiKey(userDetail.getUserApiKey().getApiKey())
                     .secret(userDetail.getUserApiKey().getApiSecret())
                     .build();

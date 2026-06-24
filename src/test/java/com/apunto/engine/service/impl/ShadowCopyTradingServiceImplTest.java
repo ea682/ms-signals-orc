@@ -4,6 +4,7 @@ import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.CopyWalletProfileEntity;
 import com.apunto.engine.entity.ShadowCopyAllocationEntity;
+import com.apunto.engine.entity.ShadowCopyOperationEntity;
 import com.apunto.engine.entity.ShadowCopyOperationEventEntity;
 import com.apunto.engine.entity.ShadowPositionStateEntity;
 import com.apunto.engine.entity.ShadowWalletProfileValidationEntity;
@@ -142,6 +143,185 @@ class ShadowCopyTradingServiceImplTest {
     }
 
     @Test
+    void resizeWithoutOpenRecordsSkippedEventWithoutShadowOperation() throws Exception {
+        ShadowCopyAllocationEntity allocation = shadowAllocation(10L, UUID.randomUUID(), "MOVEMENT_ALL", "MOVEMENT_ALL", 100L);
+        allocation.setCreatedAt(OffsetDateTime.parse("2026-06-22T08:00:00Z"));
+        allocation.setLastSeenAt(OffsetDateTime.parse("2026-06-22T08:00:00Z"));
+        List<ShadowCopyOperationEventEntity> recordedEvents = new ArrayList<>();
+        List<ShadowPositionStateEntity> openedPositions = new ArrayList<>();
+
+        ShadowCopyTradingServiceImpl service = serviceForRuntime(List.of(allocation), recordedEvents, openedPositions);
+
+        OperacionEvent event = new OperacionEvent(
+                OperacionEvent.Tipo.ABIERTA,
+                OperacionDto.builder()
+                        .idOperacion(UUID.randomUUID())
+                        .idCuenta("0xabc")
+                        .parSymbol("BTCUSDT")
+                        .tipoOperacion(PositionSide.LONG)
+                        .sizeQty(new BigDecimal("0.2"))
+                        .notionalUsd(new BigDecimal("2000"))
+                        .precioMercado(new BigDecimal("100500"))
+                        .fechaCreacion(Instant.parse("2026-06-22T10:00:00Z"))
+                        .build()
+        );
+        event.setDeltaType("RESIZE");
+
+        assertEquals(1, service.recordShadowEvent(event));
+        assertEquals(1, recordedEvents.size());
+        assertEquals("RESIZE_WITHOUT_SHADOW_OPEN", recordedEvents.get(0).getReasonCode());
+        assertEquals("SKIPPED", recordedEvents.get(0).getDecision());
+        assertNull(recordedEvents.get(0).getShadowOperationId());
+        assertNull(recordedEvents.get(0).getShadowPositionId());
+        assertTrue(openedPositions.isEmpty());
+    }
+
+    @Test
+    void closeFindsOpenShadowOperationByProfilePositionWhenOriginIdDiffers() throws Exception {
+        ShadowCopyAllocationEntity allocation = shadowAllocation(10L, UUID.randomUUID(), "MOVEMENT_ALL", "MOVEMENT_ALL", 100L);
+        UUID shadowPositionId = UUID.randomUUID();
+        UUID shadowOperationId = UUID.randomUUID();
+        ShadowPositionStateEntity openState = ShadowPositionStateEntity.builder()
+                .id(shadowPositionId)
+                .shadowAllocationId(allocation.getId())
+                .walletProfileId(allocation.getWalletProfileId())
+                .idUser(allocation.getIdUser().toString())
+                .walletId(allocation.getWalletId())
+                .copyStrategyCode(allocation.getCopyStrategyCode())
+                .scopeType(allocation.getScopeType())
+                .scopeValue(allocation.getScopeValue())
+                .strategyKey(allocation.getStrategyKey())
+                .parsymbol("BTCUSDT")
+                .positionSide("LONG")
+                .qty(BigDecimal.ONE)
+                .entryPrice(new BigDecimal("100"))
+                .status("OPEN")
+                .openedAt(OffsetDateTime.parse("2026-06-22T09:00:00Z"))
+                .build();
+        ShadowCopyOperationEntity openOperation = ShadowCopyOperationEntity.builder()
+                .idOperation(shadowOperationId)
+                .shadowAllocationId(allocation.getId())
+                .walletProfileId(allocation.getWalletProfileId())
+                .idUser(allocation.getIdUser().toString())
+                .idOrderOrigin(UUID.randomUUID().toString())
+                .idWalletOrigin(allocation.getWalletId())
+                .copyStrategyCode(allocation.getCopyStrategyCode())
+                .scopeType(allocation.getScopeType())
+                .scopeValue(allocation.getScopeValue())
+                .strategyKey(allocation.getStrategyKey())
+                .parsymbol("BTCUSDT")
+                .typeOperation("LONG")
+                .dateCreation(OffsetDateTime.parse("2026-06-22T09:00:00Z"))
+                .active(true)
+                .status("OPEN")
+                .simulatedFeeUsd(BigDecimal.ZERO)
+                .simulatedSlippageUsd(BigDecimal.ZERO)
+                .build();
+        List<ShadowCopyOperationEventEntity> recordedEvents = new ArrayList<>();
+
+        ShadowCopyTradingServiceImpl service = new ShadowCopyTradingServiceImpl(
+                proxy(ShadowCopyAllocationRepository.class, (method, args) -> {
+                    if ("findRuntimeProfileRepresentativesByWallet".equals(method.getName())) {
+                        return List.of(allocation);
+                    }
+                    if ("save".equals(method.getName())) {
+                        return args[0];
+                    }
+                    return unexpected(method);
+                }),
+                proxy(ShadowCopyOperationRepository.class, (method, args) -> {
+                    if ("findFirstByWalletProfileIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc".equals(method.getName())) {
+                        return Optional.of(openOperation);
+                    }
+                    if ("findFirstByWalletProfileIdAndIdOrderOriginAndTypeOperationAndActiveTrue".equals(method.getName())
+                            || "findFirstByShadowAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrue".equals(method.getName())
+                            || "findFirstByShadowAllocationIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc".equals(method.getName())) {
+                        return Optional.empty();
+                    }
+                    if ("save".equals(method.getName())) {
+                        return args[0];
+                    }
+                    return unexpected(method);
+                }),
+                proxy(ShadowCopyOperationEventRepository.class, (method, args) -> {
+                    if ("lockShadowEventIdempotency".equals(method.getName())) {
+                        return null;
+                    }
+                    if ("existsByWalletProfileIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime".equals(method.getName())) {
+                        return false;
+                    }
+                    if ("existsByShadowAllocationIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime".equals(method.getName())) {
+                        return false;
+                    }
+                    if ("save".equals(method.getName())) {
+                        recordedEvents.add((ShadowCopyOperationEventEntity) args[0]);
+                        return args[0];
+                    }
+                    return unexpected(method);
+                }),
+                proxy(ShadowPositionStateRepository.class, (method, args) -> {
+                    if ("findFirstByWalletProfileIdAndParsymbolAndPositionSideAndStatus".equals(method.getName())) {
+                        return Optional.of(openState);
+                    }
+                    if ("findAllByWalletProfileIdAndParsymbolAndStatus".equals(method.getName())
+                            || "findAllByShadowAllocationIdAndParsymbolAndStatus".equals(method.getName())) {
+                        return List.of();
+                    }
+                    if ("sumClosedRealizedPnlUsdByWalletProfileId".equals(method.getName())
+                            || "sumSlippageUsdByWalletProfileId".equals(method.getName())) {
+                        return BigDecimal.ZERO;
+                    }
+                    if ("countClosedPositionsByWalletProfileId".equals(method.getName())
+                            || "countOpenPositionsByWalletProfileId".equals(method.getName())) {
+                        return 0L;
+                    }
+                    if ("save".equals(method.getName())) {
+                        return args[0];
+                    }
+                    return unexpected(method);
+                }),
+                proxy(CopyWalletProfileRepository.class, (method, args) -> {
+                    if ("findById".equals(method.getName())) {
+                        return Optional.empty();
+                    }
+                    if ("save".equals(method.getName())) {
+                        return args[0];
+                    }
+                    return unexpected(method);
+                }),
+                shadowProfileValidationRepository(),
+                new CopyStrategyRuntimeRouter()
+        );
+        setField(service, "separateShadowEnabled", true);
+        setField(service, "shadowVersion", 1);
+        setField(service, "shadowSlippageBps", 0.0d);
+        setField(service, "shadowWarmupMinutes", 60L);
+
+        OperacionEvent event = new OperacionEvent(
+                OperacionEvent.Tipo.CERRADA,
+                OperacionDto.builder()
+                        .idOperacion(UUID.randomUUID())
+                        .idCuenta("0xabc")
+                        .parSymbol("BTCUSDT")
+                        .tipoOperacion(PositionSide.LONG)
+                        .sizeQty(BigDecimal.ONE)
+                        .notionalUsd(new BigDecimal("110"))
+                        .precioCierre(new BigDecimal("110"))
+                        .fechaCierre(Instant.parse("2026-06-22T10:00:00Z"))
+                        .build()
+        );
+        event.setDeltaType("CLOSE");
+
+        assertEquals(1, service.recordShadowEvent(event));
+        assertEquals("CLOSED", openOperation.getStatus());
+        assertFalse(openOperation.isActive());
+        assertEquals(new BigDecimal("10.000000000000"), openOperation.getRealizedPnlUsd());
+        assertEquals("SHADOW_POSITION_CLOSED", recordedEvents.get(0).getReasonCode());
+        assertEquals(shadowOperationId, recordedEvents.get(0).getShadowOperationId());
+        assertEquals(shadowPositionId, recordedEvents.get(0).getShadowPositionId());
+    }
+
+    @Test
     void syncShadowActivityDoesNotFallbackStrategyOpenedAtToWalletOpenedAt() throws Exception {
         UUID user = UUID.randomUUID();
         OffsetDateTime walletOpened = OffsetDateTime.parse("2026-06-22T10:00:00Z");
@@ -241,6 +421,9 @@ class ShadowCopyTradingServiceImplTest {
                     if ("findRuntimeProfileRepresentativesByWallet".equals(method.getName())) {
                         return activeProfiles;
                     }
+                    if ("save".equals(method.getName())) {
+                        return args[0];
+                    }
                     return unexpected(method);
                 }),
                 proxy(ShadowCopyOperationRepository.class, (method, args) -> {
@@ -250,12 +433,21 @@ class ShadowCopyTradingServiceImplTest {
                     if ("findFirstByShadowAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrue".equals(method.getName())) {
                         return Optional.empty();
                     }
+                    if ("findFirstByWalletProfileIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc".equals(method.getName())) {
+                        return Optional.empty();
+                    }
+                    if ("findFirstByShadowAllocationIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc".equals(method.getName())) {
+                        return Optional.empty();
+                    }
                     if ("save".equals(method.getName())) {
                         return args[0];
                     }
                     return unexpected(method);
                 }),
                 proxy(ShadowCopyOperationEventRepository.class, (method, args) -> {
+                    if ("lockShadowEventIdempotency".equals(method.getName())) {
+                        return null;
+                    }
                     if ("existsByWalletProfileIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime".equals(method.getName())) {
                         return false;
                     }
@@ -275,11 +467,25 @@ class ShadowCopyTradingServiceImplTest {
                     if ("findFirstByShadowAllocationIdAndParsymbolAndPositionSideAndStatus".equals(method.getName())) {
                         return Optional.empty();
                     }
+                    if ("findFirstByWalletProfileIdAndParsymbolAndPositionSideAndStatusOrderByClosedAtDesc".equals(method.getName())) {
+                        return Optional.empty();
+                    }
+                    if ("findFirstByShadowAllocationIdAndParsymbolAndPositionSideAndStatusOrderByClosedAtDesc".equals(method.getName())) {
+                        return Optional.empty();
+                    }
                     if ("findAllByWalletProfileIdAndParsymbolAndStatus".equals(method.getName())) {
                         return List.of();
                     }
                     if ("findAllByShadowAllocationIdAndParsymbolAndStatus".equals(method.getName())) {
                         return List.of();
+                    }
+                    if ("sumClosedRealizedPnlUsdByWalletProfileId".equals(method.getName())
+                            || "sumSlippageUsdByWalletProfileId".equals(method.getName())) {
+                        return BigDecimal.ZERO;
+                    }
+                    if ("countClosedPositionsByWalletProfileId".equals(method.getName())
+                            || "countOpenPositionsByWalletProfileId".equals(method.getName())) {
+                        return 0L;
                     }
                     if ("save".equals(method.getName())) {
                         openedPositions.add((ShadowPositionStateEntity) args[0]);
@@ -287,13 +493,22 @@ class ShadowCopyTradingServiceImplTest {
                     }
                     return unexpected(method);
                 }),
-                proxy(CopyWalletProfileRepository.class, (method, args) -> unexpected(method)),
-                proxy(ShadowWalletProfileValidationRepository.class, (method, args) -> unexpected(method)),
+                proxy(CopyWalletProfileRepository.class, (method, args) -> {
+                    if ("findById".equals(method.getName())) {
+                        return Optional.empty();
+                    }
+                    if ("save".equals(method.getName())) {
+                        return args[0];
+                    }
+                    return unexpected(method);
+                }),
+                shadowProfileValidationRepository(),
                 new CopyStrategyRuntimeRouter()
         );
         setField(service, "separateShadowEnabled", true);
         setField(service, "shadowVersion", 1);
         setField(service, "shadowSlippageBps", 0.0d);
+        setField(service, "shadowWarmupMinutes", 60L);
         return service;
     }
 

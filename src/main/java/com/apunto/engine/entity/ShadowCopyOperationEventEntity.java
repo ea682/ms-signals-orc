@@ -29,6 +29,9 @@ public class ShadowCopyOperationEventEntity {
     @Column(name = "shadow_operation_id", columnDefinition = "uuid")
     private UUID shadowOperationId;
 
+    @Column(name = "shadow_position_id", columnDefinition = "uuid")
+    private UUID shadowPositionId;
+
     @Column(name = "shadow_allocation_id", nullable = false)
     private Long shadowAllocationId;
 
