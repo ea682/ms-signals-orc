@@ -583,6 +583,12 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                     ? CopyStrategyGuardDecision.blocked("SIMULATION_MISSING", "copySimulation is missing")
                     : CopyStrategyGuardDecision.allow();
         }
+        if (simulationAuditFailed(dto)) {
+            return CopyStrategyGuardDecision.blocked(
+                    "SIMULATION_AUDIT_FAILED",
+                    "simulationAudit.valid=false errors=" + simulationAuditErrors(dto)
+            );
+        }
 
         Double totalNet = simulation.getPnlCopyTotalNetUSDT();
         if (totalNet != null && totalNet < copyGuardMinTotalPnlUsdt) {
@@ -593,6 +599,13 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         }
 
         for (String window : copyGuardWindows) {
+            Boolean complete = windowComplete(simulation, window);
+            if (Boolean.FALSE.equals(complete) && copyGuardRequireWindowData) {
+                return CopyStrategyGuardDecision.blocked(
+                        "INCOMPLETE_REQUIRED_WINDOW_" + windowReasonCode(window),
+                        "window=" + window + " complete=false"
+                );
+            }
             Double pnl = windowNetPnl(simulation, window);
             if (pnl == null) {
                 if (copyGuardRequireWindowData) {
@@ -612,18 +625,18 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                     return CopyStrategyGuardDecision.reduce("NEGATIVE_1W_NET_PNL", detail, copyGuardOneWeekCapitalMultiplier);
                 }
                 if ("2w".equals(normalizedWindow)) {
-                    log.warn("event=guard_2w_pause_open walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_2W_NET_PNL action=PAUSE_OPEN copyImpact=no_new_live_open",
+                    log.warn("event=guard_2w_pause_open walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_REQUIRED_WINDOW_2W action=PAUSE_OPEN copyImpact=no_new_live_open",
                             walletId, strategyCode, window, pnl);
-                    return CopyStrategyGuardDecision.blocked("NEGATIVE_2W_NET_PNL", detail);
+                    return CopyStrategyGuardDecision.blocked("NEGATIVE_REQUIRED_WINDOW_2W", detail);
                 }
                 if ("1mo".equals(normalizedWindow)) {
-                    log.warn("event=guard_1mo_shadow_only walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_1MO_NET_PNL action=SHADOW_ONLY copyImpact=shadow_only",
+                    log.warn("event=guard_1mo_shadow_only walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_REQUIRED_WINDOW_1MO action=SHADOW_ONLY copyImpact=shadow_only",
                             walletId, strategyCode, window, pnl);
-                    return CopyStrategyGuardDecision.shadowOnly("NEGATIVE_1MO_NET_PNL", detail, copyGuardOneMonthCapitalMultiplier);
+                    return CopyStrategyGuardDecision.shadowOnly("NEGATIVE_REQUIRED_WINDOW_1MO", detail, copyGuardOneMonthCapitalMultiplier);
                 }
                 return pnl <= copyGuardPauseWindowPnlUsdt
-                        ? CopyStrategyGuardDecision.blocked("NEGATIVE_WINDOW_NET_PNL", detail)
-                        : CopyStrategyGuardDecision.reduce("NEGATIVE_WINDOW_NET_PNL", detail, 0.5);
+                        ? CopyStrategyGuardDecision.blocked("NEGATIVE_REQUIRED_WINDOW_" + windowReasonCode(window), detail)
+                        : CopyStrategyGuardDecision.reduce("NEGATIVE_REQUIRED_WINDOW_" + windowReasonCode(window), detail, 0.5);
             }
         }
 
@@ -658,7 +671,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         if ("WARNING".equals(action) || "WATCHLIST".equals(status) || "DATA_RISK".equals(status)) {
             return CopyStrategyGuardDecision.warn("METRIC_COPY_GUARD_WARNING", detail, multiplier);
         }
-        return CopyStrategyGuardDecision.allow();
+        return null;
     }
 
     private static MetricaWalletDto.CopyGuardDto metricCopyGuard(MetricaWalletDto dto) {
@@ -761,6 +774,53 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return null;
     }
 
+    private static boolean simulationAuditFailed(MetricaWalletDto dto) {
+        Map<String, Object> audit = simulationAudit(dto);
+        if (audit == null || audit.isEmpty()) return false;
+        Object valid = audit.get("valid");
+        return Boolean.FALSE.equals(valid) || "false".equalsIgnoreCase(String.valueOf(valid));
+    }
+
+    private static String simulationAuditErrors(MetricaWalletDto dto) {
+        Map<String, Object> audit = simulationAudit(dto);
+        if (audit == null) return "";
+        Object errors = audit.get("errors");
+        return errors == null ? "" : String.valueOf(errors);
+    }
+
+    private static Map<String, Object> simulationAudit(MetricaWalletDto dto) {
+        if (dto == null) return null;
+        if (dto.getSimulationAudit() != null) return dto.getSimulationAudit();
+        MetricaWalletDto.CopySimulationDto simulation = dto.getCopySimulation();
+        if (simulation != null) {
+            if (simulation.getSimulationAudit() != null) return simulation.getSimulationAudit();
+            MetricaWalletDto.CopySizingDto sizing = simulation.getCopySizing();
+            if (sizing != null && sizing.getSimulationAudit() != null) return sizing.getSimulationAudit();
+        }
+        return null;
+    }
+
+    private static Boolean windowComplete(MetricaWalletDto.CopySimulationDto simulation, String window) {
+        Map<String, Object> meta = windowMeta(simulation);
+        if (meta == null || meta.isEmpty() || window == null || window.isBlank()) return null;
+        Object item = meta.get(window.trim());
+        if (item == null) item = meta.get(window.trim().toLowerCase(java.util.Locale.ROOT));
+        if (!(item instanceof Map<?, ?> itemMap)) return null;
+        Object complete = itemMap.get("complete");
+        if (complete instanceof Boolean b) return b;
+        if (complete == null) return null;
+        if ("true".equalsIgnoreCase(String.valueOf(complete))) return true;
+        if ("false".equalsIgnoreCase(String.valueOf(complete))) return false;
+        return null;
+    }
+
+    private static Map<String, Object> windowMeta(MetricaWalletDto.CopySimulationDto simulation) {
+        if (simulation == null) return null;
+        if (simulation.getWindowMeta() != null) return simulation.getWindowMeta();
+        MetricaWalletDto.CopySizingDto sizing = simulation.getCopySizing();
+        return sizing == null ? null : sizing.getWindowMeta();
+    }
+
     private static Double windowNetPnl(MetricaWalletDto.CopySimulationDto simulation, String window) {
         if (simulation == null || window == null) return null;
 
@@ -785,6 +845,11 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             return simulation.getPnlCopyDayUSDT();
         }
         return null;
+    }
+
+    private static String windowReasonCode(String window) {
+        if (window == null || window.isBlank()) return "UNKNOWN";
+        return window.trim().toUpperCase(java.util.Locale.ROOT).replaceAll("[^A-Z0-9]+", "_");
     }
 
     private static List<String> parseGuardWindows(String raw) {

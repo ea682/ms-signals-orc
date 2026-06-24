@@ -26,6 +26,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -493,6 +494,44 @@ public class HyperliquidOriginPositionStoreService {
                     elapsedMs(startedNs),
                     queue.size(),
                     copySkipDiagnostic);
+        } catch (DataIntegrityViolationException ex) {
+            if (isDuplicateKey(ex)) {
+                skipped.incrementAndGet();
+                recoverActiveOriginAfterDuplicate(mapped);
+                meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "duplicate_origin_position").increment();
+                log.info("event=futures_position.origin_duplicate_ignored reasonCode=duplicate_origin_position originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={} copyImpact=idempotent_duplicate_ignored",
+                        originId(mapped),
+                        safeLog(mapped.idempotencyKey()),
+                        safeLog(mapped.positionKey()),
+                        safeLog(mapped.wallet()),
+                        safeLog(mapped.symbol()),
+                        safeLog(mapped.side()),
+                        safeLog(mapped.deltaType()),
+                        ex.getClass().getSimpleName(),
+                        safeLog(ex.getMessage()),
+                        queueDelayMs,
+                        elapsedMs(startedNs),
+                        queue.size());
+                return;
+            }
+            failed.incrementAndGet();
+            MDC.put("traceId", originTraceId(mapped));
+            meterRegistry.timer("signals.hyperliquid.origin_store.persist.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
+                    .record(Duration.ofNanos(System.nanoTime() - startedNs));
+            log.error("event=futures_position.origin_upsert_failed reasonCode=origin_upsert_failed originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={} {}",
+                    originId(mapped),
+                    safeLog(mapped.idempotencyKey()),
+                    safeLog(mapped.positionKey()),
+                    safeLog(mapped.wallet()),
+                    safeLog(mapped.symbol()),
+                    safeLog(mapped.side()),
+                    safeLog(mapped.deltaType()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()),
+                    queueDelayMs,
+                    elapsedMs(startedNs),
+                    queue.size(),
+                    CopyLogAdvice.fields("origin_upsert_failed", CopyLogAdvice.context(task.dispatchResult() == null ? null : task.dispatchResult().eligibleUsers(), task.dispatchResult() == null ? null : task.dispatchResult().eligibleUsers(), task.dispatchResult() == null ? null : task.dispatchResult().submittedTasks(), task.dispatchResult() == null ? null : task.dispatchResult().businessSkipped(), queue.size(), null, activeOriginIds.size(), "origin_store_upsert")));
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
             failed.incrementAndGet();
             MDC.put("traceId", originTraceId(mapped));
@@ -517,6 +556,45 @@ public class HyperliquidOriginPositionStoreService {
         }
     }
 
+
+    private boolean isDuplicateKey(Throwable ex) {
+        Throwable current = ex;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase(Locale.ROOT);
+                if (lower.contains("duplicate key")
+                        || lower.contains("unique constraint")
+                        || lower.contains("futures_position_pkey")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private void recoverActiveOriginAfterDuplicate(HyperliquidMappedDelta mapped) {
+        UUID id = originId(mapped);
+        if (id == null) {
+            return;
+        }
+        try {
+            repository.findByIdFuturesPosition(id).ifPresent(entity -> {
+                String key = mapped == null || mapped.positionKey() == null || mapped.positionKey().isBlank()
+                        ? "origin-id:" + id
+                        : mapped.positionKey();
+                if (entity.getStatus() == PositionStatus.OPEN) {
+                    activeOriginIds.put(key, id);
+                } else {
+                    activeOriginIds.remove(key, id);
+                }
+            });
+        } catch (RuntimeException recoverEx) {
+            log.warn("event=hyperliquid.origin_store.duplicate_recover_failed originId={} positionKey={} errClass={} errMsg=\"{}\"",
+                    id, mapped == null ? "NA" : safeLog(mapped.positionKey()), recoverEx.getClass().getSimpleName(), safeLog(recoverEx.getMessage()));
+        }
+    }
 
     private void registerMetrics() {
         Gauge.builder("signals.hyperliquid.origin_store.queue.depth", queue, BlockingQueue::size)

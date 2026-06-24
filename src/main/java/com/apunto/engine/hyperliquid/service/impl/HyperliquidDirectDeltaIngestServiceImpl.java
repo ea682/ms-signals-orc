@@ -22,6 +22,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -67,6 +68,23 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final AtomicLong workerStops = new AtomicLong(0);
     private final AtomicLong queueHighWaterMark = new AtomicLong(0);
     private final Cache<String, Boolean> recentKeys;
+    private final boolean shadowAsyncEnabled;
+    private final int shadowWorkerCount;
+    private final long shadowEnqueueTimeoutMs;
+    private final long shadowSlowLogMs;
+    private final BlockingQueue<ShadowTask>[] shadowLanes;
+    private final ExecutorService shadowWorkers;
+    private final AtomicBoolean[] shadowWorkerSlots;
+    private final AtomicBoolean shadowRunning = new AtomicBoolean(false);
+    private final AtomicInteger activeShadowWorkers = new AtomicInteger(0);
+    private final AtomicLong shadowEnqueued = new AtomicLong(0);
+    private final AtomicLong shadowRecorded = new AtomicLong(0);
+    private final AtomicLong shadowDuplicates = new AtomicLong(0);
+    private final AtomicLong shadowDropped = new AtomicLong(0);
+    private final AtomicLong shadowFailed = new AtomicLong(0);
+    private final AtomicLong shadowWorkerRestarts = new AtomicLong(0);
+    private final AtomicLong shadowWorkerStops = new AtomicLong(0);
+    private final AtomicLong shadowQueueHighWaterMark = new AtomicLong(0);
 
     public HyperliquidDirectDeltaIngestServiceImpl(
             HyperliquidDirectIngestProperties properties,
@@ -75,7 +93,12 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             HyperliquidOriginPositionStoreService originPositionStoreService,
             OperationMovementEventService operationMovementEventService,
             ShadowCopyTradingService shadowCopyTradingService,
-            MeterRegistry meterRegistry
+            MeterRegistry meterRegistry,
+            @Value("${copy.shadow.async.enabled:true}") boolean shadowAsyncEnabled,
+            @Value("${copy.shadow.queue-capacity:10000}") int shadowQueueCapacity,
+            @Value("${copy.shadow.worker-threads:2}") int shadowWorkerThreads,
+            @Value("${copy.shadow.enqueue-timeout-ms:2}") long shadowEnqueueTimeoutMs,
+            @Value("${copy.shadow.log-slow-ms:100}") long shadowSlowLogMs
     ) {
         this.properties = properties;
         this.directCopyDispatchService = directCopyDispatchService;
@@ -100,6 +123,20 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                 .expireAfterWrite(Duration.ofSeconds(Math.max(1L, properties.getDedupeTtlSeconds())))
                 .maximumSize(Math.max(1000L, properties.getQueueCapacity() * 2L))
                 .build();
+        this.shadowAsyncEnabled = shadowAsyncEnabled;
+        this.shadowWorkerCount = Math.max(1, shadowWorkerThreads);
+        this.shadowEnqueueTimeoutMs = Math.max(0L, shadowEnqueueTimeoutMs);
+        this.shadowSlowLogMs = Math.max(1L, shadowSlowLogMs);
+        int perShadowLaneCapacity = Math.max(1, (Math.max(1, shadowQueueCapacity) + this.shadowWorkerCount - 1) / this.shadowWorkerCount);
+        this.shadowLanes = new BlockingQueue[this.shadowWorkerCount];
+        for (int i = 0; i < this.shadowLanes.length; i++) {
+            this.shadowLanes[i] = new ArrayBlockingQueue<>(perShadowLaneCapacity);
+        }
+        this.shadowWorkers = Executors.newFixedThreadPool(this.shadowWorkerCount, new NamedThreadFactory("hl-shadow-ingest-"));
+        this.shadowWorkerSlots = new AtomicBoolean[this.shadowWorkerCount];
+        for (int i = 0; i < this.shadowWorkerSlots.length; i++) {
+            this.shadowWorkerSlots[i] = new AtomicBoolean(false);
+        }
         registerMetrics();
     }
 
@@ -114,17 +151,22 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         for (int i = 0; i < laneCount; i++) {
             startWorker(i, "startup");
         }
-        log.info("event=hyperliquid.direct_ingest.started queueCapacity={} workerThreads={} dedupeEnabled={} dedupeTtlSeconds={} distributedDedupeEnabled={} dedupeLeaseTtlMs={} failOpenOnDedupeError={} humanMessage=direct_ingest_listo_con_idempotencia_para_varias_instancias",
+        startShadowWorkers("startup");
+        log.info("event=hyperliquid.direct_ingest.started queueCapacity={} workerThreads={} dedupeEnabled={} dedupeTtlSeconds={} distributedDedupeEnabled={} dedupeLeaseTtlMs={} failOpenOnDedupeError={} shadowAsyncEnabled={} shadowQueueCapacity={} shadowWorkerThreads={} shadowEnqueueTimeoutMs={} humanMessage=direct_ingest_listo_con_idempotencia_para_varias_instancias",
                 properties.getQueueCapacity(), properties.getWorkerThreads(), properties.isDedupeEnabled(), properties.getDedupeTtlSeconds(),
-                properties.isDistributedDedupeEnabled(), properties.getDedupeLeaseTtlMs(), properties.isFailOpenOnDedupeError());
+                properties.isDistributedDedupeEnabled(), properties.getDedupeLeaseTtlMs(), properties.isFailOpenOnDedupeError(),
+                shadowAsyncEnabled, shadowQueueCapacity(), shadowWorkerCount, shadowEnqueueTimeoutMs);
     }
 
     @PreDestroy
     public void stop() {
         running.set(false);
+        shadowRunning.set(false);
         workers.shutdownNow();
-        log.info("event=hyperliquid.direct_ingest.stopped queueDepth={} accepted={} processed={} failed={} duplicates={}",
-                queueDepth(), accepted.get(), processed.get(), failed.get(), duplicates.get());
+        shadowWorkers.shutdownNow();
+        log.info("event=hyperliquid.direct_ingest.stopped queueDepth={} accepted={} processed={} failed={} duplicates={} shadowQueueDepth={} shadowEnqueued={} shadowRecorded={} shadowDuplicates={} shadowDropped={} shadowFailed={}",
+                queueDepth(), accepted.get(), processed.get(), failed.get(), duplicates.get(),
+                shadowQueueDepth(), shadowEnqueued.get(), shadowRecorded.get(), shadowDuplicates.get(), shadowDropped.get(), shadowFailed.get());
     }
 
     @Scheduled(fixedDelayString = "${hyperliquid.direct-ingest.log-interval-ms:10000}")
@@ -133,12 +175,20 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             return;
         }
         ensureWorkersHealthy("metrics");
+        ensureShadowWorkersHealthy("metrics");
         int queueDepth = queueDepth();
-        log.info("event=hyperliquid.direct_ingest.metrics queueDepth={} queueCapacity={} activeWorkers={} expectedWorkers={} workerRestarts={} workerStops={} workerUncaughtFailures={} accepted={} processed={} failed={} duplicates={} queueHighWaterMark={}",
-                queueDepth, properties.getQueueCapacity(), activeWorkers.get(), laneCount, workerRestarts.get(), workerStops.get(), workerUncaughtFailures.get(), accepted.get(), processed.get(), failed.get(), duplicates.get(), queueHighWaterMark.get());
+        int shadowQueueDepth = shadowQueueDepth();
+        int shadowQueueCapacity = shadowQueueCapacity();
+        log.info("event=hyperliquid.direct_ingest.metrics queueDepth={} queueCapacity={} activeWorkers={} expectedWorkers={} workerRestarts={} workerStops={} workerUncaughtFailures={} accepted={} processed={} failed={} duplicates={} queueHighWaterMark={} shadowAsyncEnabled={} shadowQueueDepth={} shadowQueueCapacity={} activeShadowWorkers={} expectedShadowWorkers={} shadowWorkerRestarts={} shadowWorkerStops={} shadowEnqueued={} shadowRecorded={} shadowDuplicates={} shadowDropped={} shadowFailed={} shadowQueueHighWaterMark={}",
+                queueDepth, properties.getQueueCapacity(), activeWorkers.get(), laneCount, workerRestarts.get(), workerStops.get(), workerUncaughtFailures.get(), accepted.get(), processed.get(), failed.get(), duplicates.get(), queueHighWaterMark.get(),
+                shadowAsyncEnabled, shadowQueueDepth, shadowQueueCapacity, activeShadowWorkers.get(), shadowWorkerCount, shadowWorkerRestarts.get(), shadowWorkerStops.get(), shadowEnqueued.get(), shadowRecorded.get(), shadowDuplicates.get(), shadowDropped.get(), shadowFailed.get(), shadowQueueHighWaterMark.get());
         if (properties.getQueueCapacity() > 0 && queueDepth >= Math.max(1, (int) (properties.getQueueCapacity() * 0.80d))) {
             log.warn("event=hyperliquid.direct_ingest.queue_pressure reasonCode=direct_ingest_queue_pressure queueDepth={} queueCapacity={} activeWorkers={} expectedWorkers={} failed={} duplicates={} action=scale_workers_or_check_downstream",
                     queueDepth, properties.getQueueCapacity(), activeWorkers.get(), laneCount, failed.get(), duplicates.get());
+        }
+        if (shadowQueueCapacity > 0 && shadowQueueDepth >= Math.max(1, (int) (shadowQueueCapacity * 0.80d))) {
+            log.warn("event=shadow_async_queue_pressure reasonCode=shadow_async_queue_pressure queueDepth={} queueCapacity={} activeShadowWorkers={} expectedShadowWorkers={} shadowDropped={} shadowFailed={} liveImpact=LIVE_NOT_BLOCKED action=scale_shadow_workers_or_check_shadow_db",
+                    shadowQueueDepth, shadowQueueCapacity, activeShadowWorkers.get(), shadowWorkerCount, shadowDropped.get(), shadowFailed.get());
         }
     }
 
@@ -349,9 +399,11 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", originTraceId(mapped))) {
             copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
             MDC.put("traceId", originTraceId(copyReady));
-            int shadowRecorded = recordShadowBeforeLive(copyReady);
+            ShadowEnqueueResult shadowEnqueue = enqueueShadowBeforeLive(copyReady);
+            long liveDispatchStartNs = System.nanoTime();
             HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady);
-            logShadowLiveSeparation(copyReady, dispatchResult, shadowRecorded);
+            long liveDispatchElapsedMs = elapsedMs(liveDispatchStartNs);
+            logShadowLiveSeparation(copyReady, dispatchResult, shadowEnqueue);
             operationMovementEventService.recordAsync(copyReady, dispatchResult, dispatchResult.reasonCode());
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
             idempotencyGuard.markProcessed(copyReady, dispatchResult.reasonCode());
@@ -369,6 +421,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
                     dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), dispatchResult.businessSkipped(), dispatchResult.fallbackJobs(), dispatchResult.fallbackUsed(), safeLog(copySkipReasonCode),
                     queueDelayMs, elapsedMs, queueDepth(), copySkipDiagnostic);
+            log.info("event=hyperliquid.direct_ingest.hot_path_completed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} liveDispatchElapsedMs={} shadowEnqueued={} shadowReasonCode={} shadowEnqueueLatencyMs={} shadowQueueDepth={} shadowQueueRemainingCapacity={} totalElapsedMs={} liveImpact=LIVE_DISPATCH_NOT_BLOCKED_BY_SHADOW",
+                    task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
+                    liveDispatchElapsedMs, shadowEnqueue.enqueued(), safeLog(shadowEnqueue.reasonCode()), shadowEnqueue.enqueueLatencyMs(), shadowEnqueue.queueDepth(), shadowEnqueue.remainingCapacity(), elapsedMs);
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
             idempotencyGuard.markFailed(copyReady, "direct_ingest_processing_failed", ex);
@@ -383,31 +438,202 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         }
     }
 
-    private int recordShadowBeforeLive(HyperliquidMappedDelta mappedDelta) {
+    private ShadowEnqueueResult enqueueShadowBeforeLive(HyperliquidMappedDelta mappedDelta) {
+        long startedNs = System.nanoTime();
+        if (mappedDelta == null || mappedDelta.event() == null) {
+            return new ShadowEnqueueResult(false, "SHADOW_PAYLOAD_EMPTY", elapsedMs(startedNs), shadowQueueDepth(), shadowRemainingCapacity());
+        }
+        if (!shadowAsyncEnabled) {
+            int recorded = recordShadowSynchronously(mappedDelta, startedNs);
+            return new ShadowEnqueueResult(recorded > 0, recorded > 0 ? "SHADOW_SYNC_RECORDED" : "SHADOW_SYNC_SKIPPED", elapsedMs(startedNs), shadowQueueDepth(), shadowRemainingCapacity());
+        }
+        ShadowTask task = new ShadowTask(mappedDelta, System.nanoTime(), originTraceId(mappedDelta));
+        BlockingQueue<ShadowTask> lane = shadowLanes[shadowLaneFor(mappedDelta)];
+        boolean offered;
+        try {
+            offered = shadowEnqueueTimeoutMs <= 0
+                    ? lane.offer(task)
+                    : lane.offer(task, shadowEnqueueTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            shadowDropped.incrementAndGet();
+            meterRegistry.counter("signals.copy.shadow.async.dropped.total", "reason", "enqueue_interrupted").increment();
+            long elapsedMs = elapsedMs(startedNs);
+            log.warn("event=shadow_enqueue_failed reasonCode=SHADOW_ENQUEUE_INTERRUPTED idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} enqueueLatencyMs={} queueDepth={} remainingCapacity={} liveImpact=LIVE_NOT_BLOCKED",
+                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), elapsedMs, shadowQueueDepth(), shadowRemainingCapacity());
+            return new ShadowEnqueueResult(false, "SHADOW_ENQUEUE_INTERRUPTED", elapsedMs, shadowQueueDepth(), shadowRemainingCapacity());
+        }
+
+        long elapsedMs = elapsedMs(startedNs);
+        if (!offered) {
+            shadowDropped.incrementAndGet();
+            meterRegistry.counter("signals.copy.shadow.async.dropped.total", "reason", "queue_full").increment();
+            log.warn("event=shadow_enqueue_failed reasonCode=SHADOW_QUEUE_FULL idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} enqueueLatencyMs={} queueDepth={} remainingCapacity={} liveImpact=LIVE_NOT_BLOCKED",
+                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), elapsedMs, shadowQueueDepth(), shadowRemainingCapacity());
+            return new ShadowEnqueueResult(false, "SHADOW_QUEUE_FULL", elapsedMs, shadowQueueDepth(), shadowRemainingCapacity());
+        }
+
+        shadowEnqueued.incrementAndGet();
+        recordShadowQueueHighWater(shadowQueueDepth());
+        ensureShadowWorkersHealthy("enqueue");
+        meterRegistry.counter("signals.copy.shadow.async.enqueued.total", "deltaType", safeTag(mappedDelta.deltaType())).increment();
+        meterRegistry.timer("signals.copy.shadow.async.enqueue.duration", Tags.of("result", "ok", "deltaType", safeTag(mappedDelta.deltaType())))
+                .record(Duration.ofNanos(System.nanoTime() - startedNs));
+        log.info("event=shadow_enqueue_before_live idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} reasonCode=SHADOW_ENQUEUED_BEFORE_LIVE shadowImpact=SHADOW_QUEUED liveImpact=LIVE_NOT_BLOCKED enqueueLatencyMs={} queueDepth={} remainingCapacity={}",
+                mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), elapsedMs, shadowQueueDepth(), shadowRemainingCapacity());
+        return new ShadowEnqueueResult(true, "SHADOW_ENQUEUED_BEFORE_LIVE", elapsedMs, shadowQueueDepth(), shadowRemainingCapacity());
+    }
+
+    private int recordShadowSynchronously(HyperliquidMappedDelta mappedDelta, long startedNs) {
         if (mappedDelta == null || mappedDelta.event() == null) {
             return 0;
         }
         try {
             int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event());
             if (recorded > 0) {
-                log.info("event=shadow_processed_before_live idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} recorded={} reasonCode=SHADOW_INDEPENDENT_FROM_LIVE reasonMessage=\"El evento fue registrado en SHADOW antes de evaluar LIVE\" shadowImpact=SHADOW_EVENT_RECORDED",
-                        mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), recorded);
+                log.warn("event=shadow_processed_sync_before_live idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} recorded={} reasonCode=SHADOW_SYNC_DEBUG_PATH reasonMessage=\"SHADOW async esta desactivado; LIVE puede esperar este write\" shadowImpact=SHADOW_EVENT_RECORDED elapsedMs={}",
+                        mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), recorded, elapsedMs(startedNs));
             }
             return recorded;
         } catch (RuntimeException ex) {
-            log.error("event=shadow_ingest_failed idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} reasonCode=SHADOW_INGEST_FAILED copyImpact=LIVE_NOT_BLOCKED errClass={} errMsg=\"{}\"",
-                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            log.warn("event=shadow_ingest_failed idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} reasonCode=SHADOW_INGEST_FAILED copyImpact=LIVE_NOT_BLOCKED errClass={} errMsg=\"{}\" elapsedMs={}",
+                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
             return 0;
         }
     }
 
-    private void logShadowLiveSeparation(HyperliquidMappedDelta mappedDelta, HyperliquidDirectCopyDispatchResult dispatchResult, int shadowRecorded) {
-        if (mappedDelta == null || dispatchResult == null || shadowRecorded <= 0) {
+    private void logShadowLiveSeparation(HyperliquidMappedDelta mappedDelta, HyperliquidDirectCopyDispatchResult dispatchResult, ShadowEnqueueResult shadowEnqueue) {
+        if (mappedDelta == null || dispatchResult == null || shadowEnqueue == null) {
+            return;
+        }
+        if (!shadowEnqueue.enqueued()) {
+            log.warn("event=live_continued_after_shadow_enqueue_failed idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} eligibleUsers={} submitted={} shadowReasonCode={} shadowEnqueueLatencyMs={} shadowQueueDepth={} shadowRemainingCapacity={} reasonCode=SHADOW_NOT_IN_HOT_PATH liveImpact=LIVE_CONTINUED_WITHOUT_SHADOW_BLOCK",
+                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(),
+                    safeLog(shadowEnqueue.reasonCode()), shadowEnqueue.enqueueLatencyMs(), shadowEnqueue.queueDepth(), shadowEnqueue.remainingCapacity());
             return;
         }
         if (dispatchResult.eligibleUsers() == 0 && dispatchResult.submittedTasks() == 0) {
-            log.info("event=live_skipped_but_shadow_recorded idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} eligibleUsers={} submitted={} shadowRecorded={} reasonCode=SHADOW_INDEPENDENT_FROM_LIVE reasonMessage=\"El evento fue registrado en SHADOW aunque no existen usuarios LIVE\" shadowImpact=SHADOW_EVENT_RECORDED liveImpact=NO_LIVE_USERS",
-                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), shadowRecorded);
+            log.info("event=live_skipped_but_shadow_enqueued idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} eligibleUsers={} submitted={} shadowReasonCode={} reasonCode=SHADOW_INDEPENDENT_FROM_LIVE reasonMessage=\"El evento fue encolado en SHADOW aunque no existen usuarios LIVE\" shadowImpact=SHADOW_EVENT_QUEUED liveImpact=NO_LIVE_USERS",
+                    mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), dispatchResult.eligibleUsers(), dispatchResult.submittedTasks(), safeLog(shadowEnqueue.reasonCode()));
+        }
+    }
+
+    private void startShadowWorkers(String reason) {
+        if (!shadowAsyncEnabled || !properties.isEnabled()) {
+            log.info("event=shadow_async.disabled enabled={} directIngestEnabled={} queueCapacity={} workerThreads={}",
+                    shadowAsyncEnabled, properties.isEnabled(), shadowQueueCapacity(), shadowWorkerCount);
+            return;
+        }
+        shadowRunning.set(true);
+        for (int i = 0; i < shadowWorkerCount; i++) {
+            startShadowWorker(i, reason);
+        }
+    }
+
+    private void startShadowWorker(int workerIndex, String reason) {
+        if (!shadowAsyncEnabled || !shadowRunning.get()) {
+            return;
+        }
+        if (workerIndex < 0 || workerIndex >= shadowWorkerSlots.length) {
+            return;
+        }
+        AtomicBoolean slot = shadowWorkerSlots[workerIndex];
+        if (!slot.compareAndSet(false, true)) {
+            return;
+        }
+        if (!"startup".equals(reason)) {
+            shadowWorkerRestarts.incrementAndGet();
+        }
+        try {
+            shadowWorkers.execute(() -> shadowWorkerLoop(workerIndex, shadowLanes[workerIndex], reason));
+        } catch (RuntimeException ex) {
+            slot.set(false);
+            shadowFailed.incrementAndGet();
+            log.error("event=shadow_worker_start_failed reasonCode=SHADOW_WORKER_START_FAILED workerIndex={} reason={} errClass={} errMsg=\"{}\" queueDepth={} activeShadowWorkers={}",
+                    workerIndex, safeLog(reason), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), shadowQueueDepth(), activeShadowWorkers.get(), ex);
+        }
+    }
+
+    private void ensureShadowWorkersHealthy(String reason) {
+        if (!shadowAsyncEnabled || !shadowRunning.get()) {
+            return;
+        }
+        for (int i = 0; i < shadowWorkerSlots.length; i++) {
+            if (!shadowWorkerSlots[i].get()) {
+                log.warn("event=shadow_worker_missing reasonCode=SHADOW_WORKER_MISSING workerIndex={} reason={} queueDepth={} activeShadowWorkers={} expectedShadowWorkers={} liveImpact=LIVE_NOT_BLOCKED action=restart_worker",
+                        i, safeLog(reason), shadowQueueDepth(), activeShadowWorkers.get(), shadowWorkerCount);
+                startShadowWorker(i, reason);
+            }
+        }
+    }
+
+    private void shadowWorkerLoop(int workerIndex, BlockingQueue<ShadowTask> lane, String startReason) {
+        activeShadowWorkers.incrementAndGet();
+        log.info("event=shadow_worker_started workerIndex={} startReason={} queueDepth={} activeShadowWorkers={} expectedShadowWorkers={}",
+                workerIndex, safeLog(startReason), shadowQueueDepth(), activeShadowWorkers.get(), shadowWorkerCount);
+        try {
+            while (shadowRunning.get() || !lane.isEmpty()) {
+                ShadowTask task = lane.poll(250, TimeUnit.MILLISECONDS);
+                if (task != null) {
+                    processShadowTask(task, workerIndex);
+                }
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            log.info("event=shadow_worker_interrupted workerIndex={} queueDepth={} activeShadowWorkers={}",
+                    workerIndex, shadowQueueDepth(), activeShadowWorkers.get());
+        } finally {
+            shadowWorkerStops.incrementAndGet();
+            int remaining = activeShadowWorkers.decrementAndGet();
+            shadowWorkerSlots[workerIndex].set(false);
+            log.warn("event=shadow_worker_stopped workerIndex={} queueDepth={} activeShadowWorkers={} expectedShadowWorkers={} running={}",
+                    workerIndex, shadowQueueDepth(), remaining, shadowWorkerCount, shadowRunning.get());
+        }
+    }
+
+    private void processShadowTask(ShadowTask task, int workerIndex) {
+        long startedNs = System.nanoTime();
+        HyperliquidMappedDelta mappedDelta = task.mappedDelta();
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", task.traceId())) {
+            int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event());
+            if (recorded > 0) {
+                shadowRecorded.addAndGet(recorded);
+            } else {
+                shadowDuplicates.incrementAndGet();
+            }
+            long elapsedMs = elapsedMs(startedNs);
+            long queueDelayMs = elapsedMs(task.acceptedNs());
+            meterRegistry.timer("signals.copy.shadow.async.worker.duration", Tags.of("result", "ok", "deltaType", safeTag(mappedDelta.deltaType())))
+                    .record(Duration.ofNanos(System.nanoTime() - startedNs));
+            if (elapsedMs >= shadowSlowLogMs) {
+                log.warn("event=shadow_worker_slow reasonCode=SHADOW_WORKER_SLOW workerIndex={} idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} recorded={} queueDelayMs={} elapsedMs={} queueDepth={} liveImpact=LIVE_NOT_BLOCKED",
+                        workerIndex, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), recorded, queueDelayMs, elapsedMs, shadowQueueDepth());
+            }
+            log.info("event=shadow_worker_completed workerIndex={} idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} recorded={} reasonCode={} shadowImpact={} queueDelayMs={} elapsedMs={} queueDepth={} liveImpact=LIVE_NOT_BLOCKED",
+                    workerIndex, mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), recorded,
+                    recorded > 0 ? "SHADOW_EVENT_RECORDED" : "DUPLICATE_OR_NO_SHADOW_EVENT",
+                    recorded > 0 ? "SHADOW_EVENT_RECORDED" : "NO_SHADOW_EVENT",
+                    queueDelayMs, elapsedMs, shadowQueueDepth());
+        } catch (RuntimeException ex) {
+            shadowFailed.incrementAndGet();
+            meterRegistry.timer("signals.copy.shadow.async.worker.duration", Tags.of("result", "error", "deltaType", safeTag(mappedDelta == null ? null : mappedDelta.deltaType())))
+                    .record(Duration.ofNanos(System.nanoTime() - startedNs));
+            log.warn("event=shadow_worker_failed reasonCode=SHADOW_WORKER_FAILED workerIndex={} idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={} liveImpact=LIVE_NOT_BLOCKED",
+                    workerIndex,
+                    mappedDelta == null ? "NA" : safeLog(mappedDelta.idempotencyKey()),
+                    mappedDelta == null ? "NA" : safeLog(mappedDelta.positionKey()),
+                    mappedDelta == null ? "NA" : safeLog(mappedDelta.wallet()),
+                    mappedDelta == null ? "NA" : safeLog(mappedDelta.symbol()),
+                    mappedDelta == null ? "NA" : safeLog(mappedDelta.side()),
+                    mappedDelta == null ? "NA" : safeLog(mappedDelta.deltaType()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()),
+                    elapsedMs(task.acceptedNs()),
+                    elapsedMs(startedNs),
+                    shadowQueueDepth(),
+                    ex);
+        } finally {
+            MDC.remove("traceId");
         }
     }
 
@@ -491,11 +717,38 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         Gauge.builder("signals.hyperliquid.direct_ingest.workers.restarts", workerRestarts, AtomicLong::get)
                 .description("Hyperliquid direct ingest self-healed worker restarts")
                 .register(meterRegistry);
+        Gauge.builder("signals.copy.shadow.async.queue.depth", this, svc -> svc.shadowQueueDepth())
+                .description("Async SHADOW queue depth")
+                .register(meterRegistry);
+        Gauge.builder("signals.copy.shadow.async.queue.high_water_mark", shadowQueueHighWaterMark, AtomicLong::get)
+                .description("Async SHADOW queue high-water mark")
+                .register(meterRegistry);
+        Gauge.builder("signals.copy.shadow.async.workers.active", activeShadowWorkers, AtomicInteger::get)
+                .description("Async SHADOW active worker loops")
+                .register(meterRegistry);
+        Gauge.builder("signals.copy.shadow.async.enqueued.total.gauge", shadowEnqueued, AtomicLong::get)
+                .description("Async SHADOW enqueued counter gauge")
+                .register(meterRegistry);
+        Gauge.builder("signals.copy.shadow.async.recorded.total.gauge", shadowRecorded, AtomicLong::get)
+                .description("Async SHADOW recorded counter gauge")
+                .register(meterRegistry);
+        Gauge.builder("signals.copy.shadow.async.dropped.total.gauge", shadowDropped, AtomicLong::get)
+                .description("Async SHADOW dropped counter gauge")
+                .register(meterRegistry);
+        Gauge.builder("signals.copy.shadow.async.failed.total.gauge", shadowFailed, AtomicLong::get)
+                .description("Async SHADOW failed counter gauge")
+                .register(meterRegistry);
     }
 
     private void recordQueueHighWater(int depth) {
         if (depth > 0) {
             queueHighWaterMark.accumulateAndGet(depth, Math::max);
+        }
+    }
+
+    private void recordShadowQueueHighWater(int depth) {
+        if (depth > 0) {
+            shadowQueueHighWaterMark.accumulateAndGet(depth, Math::max);
         }
     }
 
@@ -520,6 +773,38 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         return total;
     }
 
+    private int shadowQueueDepth() {
+        int total = 0;
+        for (BlockingQueue<ShadowTask> lane : shadowLanes) {
+            total += lane.size();
+        }
+        return total;
+    }
+
+    private int shadowRemainingCapacity() {
+        int total = 0;
+        for (BlockingQueue<ShadowTask> lane : shadowLanes) {
+            total += lane.remainingCapacity();
+        }
+        return total;
+    }
+
+    private int shadowQueueCapacity() {
+        return shadowQueueDepth() + shadowRemainingCapacity();
+    }
+
+    private int shadowLaneFor(HyperliquidMappedDelta mappedDelta) {
+        String key = firstNonBlank(
+                mappedDelta == null ? null : mappedDelta.positionKey(),
+                mappedDelta == null ? null : String.join("|",
+                        normalizeKey(mappedDelta.wallet()),
+                        normalizeKey(mappedDelta.symbol()),
+                        normalizeKey(mappedDelta.side())),
+                firstNonBlank(mappedDelta == null ? null : mappedDelta.idempotencyKey(), null, "shadow:missing")
+        );
+        return Math.floorMod(key.hashCode(), shadowWorkerCount);
+    }
+
     private long elapsedMs(long startedNs) {
         return Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
     }
@@ -540,6 +825,12 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     }
 
     private record QueuedDelta(HyperliquidMappedDelta mappedDelta, String dedupeKey, long acceptedNs) {
+    }
+
+    private record ShadowTask(HyperliquidMappedDelta mappedDelta, long acceptedNs, String traceId) {
+    }
+
+    private record ShadowEnqueueResult(boolean enqueued, String reasonCode, long enqueueLatencyMs, int queueDepth, int remainingCapacity) {
     }
 
     private static class NamedThreadFactory implements ThreadFactory {

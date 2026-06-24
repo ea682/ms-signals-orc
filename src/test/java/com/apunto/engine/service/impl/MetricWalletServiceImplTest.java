@@ -11,6 +11,7 @@ import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -80,6 +81,84 @@ class MetricWalletServiceImplTest {
         assertFalse(decision.allowed());
         assertEquals("PAUSE_OPEN", decision.action());
         assertEquals("PAUSED_BY_NEGATIVE_PNL", decision.statusWhenBlocked());
+    }
+
+    @Test
+    void metricCopyGuardAllowDoesNotBypassNegativeRequiredOneMonthWindow() throws Exception {
+        MetricWalletServiceImpl service = service();
+        MetricaWalletDto.CopyGuardDto allowGuard = MetricaWalletDto.CopyGuardDto.builder()
+                .status("OK")
+                .action("ALLOW")
+                .allowNewEntries(true)
+                .allowReductions(true)
+                .allowCloses(true)
+                .capitalMultiplier(1.0)
+                .build();
+        MetricaWalletDto metric = MetricaWalletDto.builder()
+                .wallet(MetricaWalletDto.WalletDto.builder().idWallet("0xabc").build())
+                .strategy(MetricaWalletDto.StrategyDto.builder().strategyCode("MOVEMENT_ALL").build())
+                .realJewel(MetricaWalletDto.RealJewelDto.builder()
+                        .status("OK")
+                        .copyGuard(allowGuard)
+                        .build())
+                .copySimulation(MetricaWalletDto.CopySimulationDto.builder()
+                        .pnlCopyTotalNetUSDT(10.0)
+                        .pnlCopyNet(Map.of("1w", 1.0, "2w", 2.0, "1mo", -1.0))
+                        .build())
+                .build();
+
+        CopyStrategyGuardDecision decision = evaluate(service, metric);
+
+        assertTrue(decision.allowed());
+        assertEquals("SHADOW_ONLY", decision.action());
+        assertEquals("NEGATIVE_REQUIRED_WINDOW_1MO", decision.reason());
+    }
+
+    @Test
+    void incompleteRequiredWindowBlocksLiveOpenings() throws Exception {
+        MetricWalletServiceImpl service = service();
+        MetricaWalletDto metric = MetricaWalletDto.builder()
+                .wallet(MetricaWalletDto.WalletDto.builder().idWallet("0xabc").build())
+                .strategy(MetricaWalletDto.StrategyDto.builder().strategyCode("MOVEMENT_ALL").build())
+                .copySimulation(MetricaWalletDto.CopySimulationDto.builder()
+                        .pnlCopyTotalNetUSDT(10.0)
+                        .pnlCopyNet(Map.of("1w", 1.0, "2w", 2.0, "1mo", 3.0))
+                        .windowMeta(Map.<String, Object>of(
+                                "1w", Map.of("complete", true),
+                                "2w", Map.of("complete", true),
+                                "1mo", Map.of("complete", false)
+                        ))
+                        .build())
+                .build();
+
+        CopyStrategyGuardDecision decision = evaluate(service, metric);
+
+        assertFalse(decision.allowed());
+        assertEquals("INCOMPLETE_REQUIRED_WINDOW_1MO", decision.reason());
+        assertEquals("PAUSE_OPEN", decision.action());
+    }
+
+    @Test
+    void simulationAuditFailureBlocksLiveOpenings() throws Exception {
+        MetricWalletServiceImpl service = service();
+        MetricaWalletDto metric = MetricaWalletDto.builder()
+                .wallet(MetricaWalletDto.WalletDto.builder().idWallet("0xabc").build())
+                .strategy(MetricaWalletDto.StrategyDto.builder().strategyCode("MOVEMENT_ALL").build())
+                .copySimulation(MetricaWalletDto.CopySimulationDto.builder()
+                        .pnlCopyTotalNetUSDT(10.0)
+                        .pnlCopyNet(Map.of("1w", 1.0, "2w", 2.0, "1mo", 3.0))
+                        .simulationAudit(Map.of(
+                                "valid", false,
+                                "errors", List.of("WINDOW_SUM_RECONCILIATION_FAILED")
+                        ))
+                        .build())
+                .build();
+
+        CopyStrategyGuardDecision decision = evaluate(service, metric);
+
+        assertFalse(decision.allowed());
+        assertEquals("SIMULATION_AUDIT_FAILED", decision.reason());
+        assertEquals("PAUSE_OPEN", decision.action());
     }
 
     private static MetricWalletServiceImpl service() {

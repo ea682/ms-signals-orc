@@ -21,4 +21,16 @@ public interface ShadowCopyOperationRepository extends JpaRepository<ShadowCopyO
             String idOrderOrigin,
             String typeOperation
     );
+
+    Optional<ShadowCopyOperationEntity> findFirstByShadowAllocationIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc(
+            Long shadowAllocationId,
+            String parsymbol,
+            String typeOperation
+    );
+
+    Optional<ShadowCopyOperationEntity> findFirstByWalletProfileIdAndParsymbolAndTypeOperationAndActiveTrueOrderByDateCreationDesc(
+            Long walletProfileId,
+            String parsymbol,
+            String typeOperation
+    );
 }

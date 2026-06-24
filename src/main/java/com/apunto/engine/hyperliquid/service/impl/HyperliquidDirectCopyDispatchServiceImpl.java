@@ -94,6 +94,17 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         AtomicInteger businessSkipped = new AtomicInteger(0);
         AtomicReference<String> firstReasonCode = new AtomicReference<>();
 
+        if (eligibleUsers.isEmpty() && candidates.reasonCode() != null && !candidates.reasonCode().isBlank()
+                && !(action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy())
+                && action != CopyJobAction.CLOSE) {
+            businessSkipped.incrementAndGet();
+            firstReasonCode.compareAndSet(null, candidates.reasonCode());
+            String traceId = originTraceId(originId, wallet, symbol);
+            log.info("event=hyperliquid.direct_copy.business_skip category=copy reasonAlias=allocation_empty friendlyReason=sin_asignacion_live explanation=no_se_envio_orden_porque_no_hay_usuarios_live_asignados_a_este_wallet copyImpact=no_copy_order traceId={} originId={} userId=NA wallet={} symbol={} action={} engineAction={} copyIntent={} deltaType={} reasonCode={} cacheActive=false activeCacheSize={} source={} {}",
+                    traceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, copyIntent(action, deltaType), deltaType, candidates.reasonCode(), activeCopyOperationCache.activeSize(), candidates.source(),
+                    CopyLogAdvice.fields(candidates.reasonCode(), CopyLogAdvice.context(eligibleUsers.size(), eligibleUsers.size(), submitted.get(), businessSkipped.get(), null, false, activeCopyOperationCache.activeSize(), candidates.source())));
+        }
+
         if (eligibleUsers.isEmpty() && action == CopyJobAction.OPEN && deltaType.canAdjustExistingCopy()) {
             businessSkipped.incrementAndGet();
             firstReasonCode.compareAndSet(null, adjustmentReason(deltaType));

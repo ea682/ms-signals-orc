@@ -10,10 +10,10 @@ spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://192.168.1.123:5432/trading_futuros?currentSchema=futuros_operaciones}
     username: ${DB_USER:postgres}
-    password: ${DB_PASSWORD:postgres}
+    password: ${DB_PASSWORD:5450940}
 
   flyway:
-    enabled: ${SPRING_FLYWAY_ENABLED:false}
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
     schemas: ${DB_SCHEMA:futuros_operaciones}
     default-schema: ${DB_SCHEMA:futuros_operaciones}
 

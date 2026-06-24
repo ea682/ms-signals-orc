@@ -34,6 +34,20 @@ public interface ShadowPositionStateRepository extends JpaRepository<ShadowPosit
             String status
     );
 
+    Optional<ShadowPositionStateEntity> findFirstByShadowAllocationIdAndParsymbolAndPositionSideAndStatusOrderByClosedAtDesc(
+            Long shadowAllocationId,
+            String parsymbol,
+            String positionSide,
+            String status
+    );
+
+    Optional<ShadowPositionStateEntity> findFirstByWalletProfileIdAndParsymbolAndPositionSideAndStatusOrderByClosedAtDesc(
+            Long walletProfileId,
+            String parsymbol,
+            String positionSide,
+            String status
+    );
+
     List<ShadowPositionStateEntity> findAllByWalletProfileIdAndParsymbolAndStatus(
             Long walletProfileId,
             String parsymbol,
