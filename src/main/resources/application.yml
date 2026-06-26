@@ -13,6 +13,8 @@ rest-client:
     info-base: ${URL_METRIC:http://ms-metrica-cuenta:4102/}
   binance-service:
     info-base: ${URL_BINANCE:http://ms-binance-engine:4106}
+    close-connect-ms: ${BINANCE_CLOSE_CONNECT_TIMEOUT_MS:1000}
+    close-read-ms: ${BINANCE_CLOSE_READ_TIMEOUT_MS:8000}
 
 logging:
   pattern:
@@ -104,6 +106,13 @@ app:
       topic: ${KAFKA_TOPIC_OPERACIONES:futures-position-eventos}
 
 binance:
+  trading-config-preconfigure:
+    enabled: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_ENABLED:true}
+    initial-delay-ms: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_INITIAL_DELAY_MS:60000}
+    fixed-delay-ms: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_FIXED_DELAY_MS:600000}
+    recent-lookback-days: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_LOOKBACK_DAYS:14}
+    max-symbols-per-allocation: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_MAX_SYMBOLS_PER_ALLOCATION:20}
+    margin-type: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_MARGIN_TYPE:CROSSED}
   dispatch:
     delay-ms: ${BINANCE_DISPATCH_DELAY_MS:0}
     pool-size: ${BINANCE_DISPATCH_POOL_SIZE:8}
@@ -131,6 +140,9 @@ copy:
       max-batch: ${COPY_JOB_WORKER_MAX_BATCH:500}
       poll-ms: ${COPY_JOB_WORKER_POLL_MS:50}
       max-attempts: ${COPY_JOB_WORKER_MAX_ATTEMPTS:12}
+    priority-worker:
+      pool-size: ${COPY_JOB_PRIORITY_WORKER_POOL_SIZE:16}
+      queue: ${COPY_JOB_PRIORITY_WORKER_QUEUE:20000}
   operation:
     active-cache:
       refresh-ms: ${COPY_OPERATION_ACTIVE_CACHE_REFRESH_MS:60000}
@@ -151,6 +163,9 @@ operation:
       max-batch: ${COPY_JOB_WORKER_MAX_BATCH:500}
       poll-ms: ${COPY_JOB_WORKER_POLL_MS:50}
       max-attempts: ${COPY_JOB_WORKER_MAX_ATTEMPTS:12}
+    priority-worker:
+      pool-size: ${COPY_JOB_PRIORITY_WORKER_POOL_SIZE:16}
+      queue: ${COPY_JOB_PRIORITY_WORKER_QUEUE:20000}
 
 engine:
   copy:
@@ -278,6 +293,8 @@ hyperliquid:
       fail-copy-on-bind-error: ${HYPERLIQUID_ORIGIN_STORE_FAIL_COPY_ON_BIND_ERROR:false}
       skip-late-adjustments: ${HYPERLIQUID_ORIGIN_STORE_SKIP_LATE_ADJUSTMENTS:true}
       binance-price-enabled: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_ENABLED:true}
+      binance-price-engine-enabled: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_ENGINE_ENABLED:true}
+      binance-price-engine-allow-stale: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_ENGINE_ALLOW_STALE:true}
       binance-price-base-url: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_BASE_URL:https://fapi.binance.com}
       binance-price-timeout-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_TIMEOUT_MS:300}
       binance-price-cache-ttl-ms: ${HYPERLIQUID_ORIGIN_STORE_BINANCE_PRICE_CACHE_TTL_MS:5000}

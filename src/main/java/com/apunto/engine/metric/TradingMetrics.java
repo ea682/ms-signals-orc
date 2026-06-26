@@ -21,7 +21,8 @@ public class TradingMetrics {
     public TradingMetrics(
             MeterRegistry registry,
             CopyExecutionJobRepository repository,
-            @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor executor
+            @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor executor,
+            @Qualifier("copyPriorityJobExecutor") ThreadPoolTaskExecutor priorityExecutor
     ) {
         this.registry = registry;
 
@@ -41,6 +42,16 @@ public class TradingMetrics {
         Gauge.builder("signals.copy.executor.queue.size", executor,
                         e -> threadPool(e) == null ? 0 : threadPool(e).getQueue().size())
                 .description("Tamano de la cola del executor")
+                .register(registry);
+
+        Gauge.builder("signals.copy.priority_executor.active", priorityExecutor,
+                        e -> threadPool(e) == null ? 0 : threadPool(e).getActiveCount())
+                .description("Hilos activos del executor prioritario de copy")
+                .register(registry);
+
+        Gauge.builder("signals.copy.priority_executor.queue.size", priorityExecutor,
+                        e -> threadPool(e) == null ? 0 : threadPool(e).getQueue().size())
+                .description("Tamano de la cola prioritaria del executor de copy")
                 .register(registry);
     }
 

@@ -13,4 +13,5 @@ public class CloseOperationClientRequest {
     private String symbol;
     private BigDecimal operationQty;
     private PositionSide positionSide;
+    private String clientOrderId;
 }
