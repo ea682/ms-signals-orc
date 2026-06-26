@@ -76,11 +76,6 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
 
     @Scheduled(fixedDelayString = "${binance.symbols.cache-ttl-ms:60000}")
     public void scheduledRefresh() {
-        if (!hasSymbolsApiKey()) {
-            log.warn("event=binance.symbol_catalog.refresh_skipped phase=scheduled reasonCode=api_key_missing action=keep_stale_or_empty cacheSize={}",
-                    snapshot.bySymbol().size());
-            return;
-        }
         refreshAsync("scheduled");
     }
 
@@ -145,10 +140,6 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
                 refreshAsync("post_lock_stale_hit");
                 return locked.withStale(locked.expiresAtMs() <= System.currentTimeMillis());
             }
-            if (!hasSymbolsApiKey()) {
-                log.warn("event=binance.symbol_catalog.empty_cache_skipped reasonCode=api_key_missing action=return_empty_catalog cacheSize=0");
-                return CatalogSnapshot.empty().withStale(true);
-            }
             return refreshSync("empty_cache");
         }
     }
@@ -161,7 +152,7 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
             try {
                 refreshSync(phase);
             } catch (RuntimeException ex) {
-                log.warn("event=binance.symbol_catalog.refresh_failed phase={} action=keep_stale cacheSize={} errClass={} errMsg=\"{}\"",
+                log.warn("event=binance.symbol_catalog.refresh_failed phase={} reasonCode=BINANCE_ENGINE_UNAVAILABLE action=use_stale_cache_if_available cacheSize={} errClass={} errMsg=\"{}\"",
                         safeLog(phase), snapshot.bySymbol().size(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
             } finally {
                 refreshInFlight.set(false);
@@ -171,27 +162,24 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
 
     private CatalogSnapshot refreshSync(String phase) {
         long startedNs = System.nanoTime();
-        if (!hasSymbolsApiKey()) {
-            CatalogSnapshot stale = snapshot;
-            log.warn("event=binance.symbol_catalog.refresh_skipped phase={} reasonCode=api_key_missing action={} cacheSize={} elapsedMs={}",
-                    safeLog(phase), stale.bySymbol().isEmpty() ? "use_empty_catalog" : "use_stale", stale.bySymbol().size(), elapsedMs(startedNs));
-            return stale.bySymbol().isEmpty() ? CatalogSnapshot.empty().withStale(true) : stale.withStale(true);
-        }
+        boolean apiKeyConfigured = hasSymbolsApiKey();
+        log.info("event=binance.symbol_catalog.refresh_started phase={} apiKeyConfigured={} authMode=PUBLIC_OR_OPTIONAL_HEADER cacheSize={}",
+                safeLog(phase), apiKeyConfigured, snapshot.bySymbol().size());
         try {
             List<BinanceFuturesSymbolInfoClientDto> symbols = procesBinanceService.getSymbols(symbolsApiKey);
             CatalogSnapshot loaded = buildSnapshot(symbols, System.currentTimeMillis() + ttlMs);
             snapshot = loaded;
-            log.info("event=binance.symbol_catalog.refresh_ok phase={} symbols={} aliases={} ambiguousAliases={} ttlMs={} elapsedMs={}",
-                    safeLog(phase), loaded.bySymbol().size(), loaded.aliasToCanonical().size(), loaded.ambiguousAliases().size(), ttlMs, elapsedMs(startedNs));
+            log.info("event=binance.symbol_catalog.refresh_ok phase={} apiKeyConfigured={} authMode=PUBLIC_OR_OPTIONAL_HEADER symbols={} aliases={} ambiguousAliases={} ttlMs={} elapsedMs={}",
+                    safeLog(phase), apiKeyConfigured, loaded.bySymbol().size(), loaded.aliasToCanonical().size(), loaded.ambiguousAliases().size(), ttlMs, elapsedMs(startedNs));
             return loaded;
         } catch (RuntimeException ex) {
             CatalogSnapshot stale = snapshot;
             if (!stale.bySymbol().isEmpty()) {
-                log.warn("event=binance.symbol_catalog.refresh_failed phase={} action=use_stale cacheSize={} errClass={} errMsg=\"{}\" elapsedMs={}",
+                log.warn("event=binance.symbol_catalog.refresh_failed phase={} reasonCode=BINANCE_ENGINE_UNAVAILABLE action=use_stale_cache_if_available cacheSize={} errClass={} errMsg=\"{}\" elapsedMs={}",
                         safeLog(phase), stale.bySymbol().size(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
                 return stale.withStale(true);
             }
-            log.warn("event=binance.symbol_catalog.refresh_failed phase={} action=use_empty_catalog cacheSize=0 errClass={} errMsg=\"{}\" elapsedMs={}",
+            log.warn("event=binance.symbol_catalog.unavailable phase={} reasonCode=SYMBOL_CATALOG_UNAVAILABLE copyImpact=shadow_price_resolution_limited action=return_unavailable_empty_catalog cacheSize=0 errClass={} errMsg=\"{}\" elapsedMs={}",
                     safeLog(phase), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
             return CatalogSnapshot.empty().withStale(true);
         }

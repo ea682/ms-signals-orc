@@ -57,50 +57,80 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             String shadowImpact,
             BigDecimal realizedPnlUsd,
             UUID shadowPositionId,
-            boolean positionUpdated
+            boolean positionUpdated,
+            BigDecimal previousQty,
+            BigDecimal resultingQty,
+            BigDecimal qtyExecuted,
+            BigDecimal eventNotionalUsd,
+            BigDecimal eventSlippageUsd
     ) {
+        private static ShadowPositionImpact of(
+                String reasonCode,
+                String shadowImpact,
+                BigDecimal realizedPnlUsd,
+                UUID shadowPositionId,
+                boolean positionUpdated
+        ) {
+            return new ShadowPositionImpact(reasonCode, shadowImpact, realizedPnlUsd, shadowPositionId, positionUpdated, null, null, null, null, null);
+        }
+
+        private ShadowPositionImpact withAccounting(
+                BigDecimal previousQty,
+                BigDecimal resultingQty,
+                BigDecimal qtyExecuted,
+                BigDecimal eventNotionalUsd,
+                BigDecimal eventSlippageUsd
+        ) {
+            return new ShadowPositionImpact(reasonCode, shadowImpact, realizedPnlUsd, shadowPositionId, positionUpdated,
+                    previousQty, resultingQty, qtyExecuted, eventNotionalUsd, eventSlippageUsd);
+        }
+
         static ShadowPositionImpact opened(UUID shadowPositionId) {
-            return new ShadowPositionImpact("SHADOW_POSITION_OPENED", "POSITION_OPENED", null, shadowPositionId, true);
+            return of("SHADOW_POSITION_OPENED", "POSITION_OPENED", null, shadowPositionId, true);
         }
 
         static ShadowPositionImpact openedByFlip(UUID shadowPositionId) {
-            return new ShadowPositionImpact("SHADOW_POSITION_OPENED_BY_FLIP", "POSITION_OPENED_BY_FLIP", null, shadowPositionId, true);
+            return of("SHADOW_POSITION_OPENED_BY_FLIP", "POSITION_OPENED_BY_FLIP", null, shadowPositionId, true);
         }
 
         static ShadowPositionImpact resized(UUID shadowPositionId) {
-            return new ShadowPositionImpact("SHADOW_POSITION_RESIZED", "POSITION_RESIZED", null, shadowPositionId, true);
+            return of("SHADOW_POSITION_RESIZED", "POSITION_RESIZED", null, shadowPositionId, true);
         }
 
         static ShadowPositionImpact closed(BigDecimal pnl, UUID shadowPositionId) {
-            return new ShadowPositionImpact("SHADOW_POSITION_CLOSED", "POSITION_CLOSED", pnl, shadowPositionId, true);
+            return of("SHADOW_POSITION_CLOSED", "POSITION_CLOSED", pnl, shadowPositionId, true);
         }
 
         static ShadowPositionImpact resizeWithoutOpen() {
-            return new ShadowPositionImpact("RESIZE_WITHOUT_SHADOW_OPEN", "NO_VALID_POSITION", null, null, false);
+            return of("RESIZE_WITHOUT_SHADOW_OPEN", "NO_VALID_POSITION", null, null, false);
         }
 
         static ShadowPositionImpact warmupResizeWithoutOpen() {
-            return new ShadowPositionImpact("WARMUP_RESIZE_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_POSITION", null, null, false);
+            return of("WARMUP_RESIZE_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_POSITION", null, null, false);
         }
 
         static ShadowPositionImpact resizeAfterClosed(UUID shadowPositionId) {
-            return new ShadowPositionImpact("RESIZE_AFTER_SHADOW_CLOSED", "NO_VALID_POSITION", null, shadowPositionId, false);
+            return of("RESIZE_AFTER_SHADOW_CLOSED", "NO_VALID_POSITION", null, shadowPositionId, false);
         }
 
         static ShadowPositionImpact closeWithoutOpen() {
-            return new ShadowPositionImpact("CLOSE_WITHOUT_SHADOW_OPEN", "NO_VALID_PNL", null, null, false);
+            return of("CLOSE_WITHOUT_SHADOW_OPEN", "NO_VALID_PNL", null, null, false);
         }
 
         static ShadowPositionImpact warmupCloseWithoutOpen() {
-            return new ShadowPositionImpact("WARMUP_CLOSE_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_PNL", null, null, false);
+            return of("WARMUP_CLOSE_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_PNL", null, null, false);
         }
 
         static ShadowPositionImpact flipWithoutOpen() {
-            return new ShadowPositionImpact("FLIP_WITHOUT_SHADOW_OPEN", "NO_VALID_POSITION", null, null, false);
+            return of("FLIP_WITHOUT_SHADOW_OPEN", "NO_VALID_POSITION", null, null, false);
         }
 
         static ShadowPositionImpact warmupFlipWithoutOpen() {
-            return new ShadowPositionImpact("WARMUP_FLIP_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_POSITION", null, null, false);
+            return of("WARMUP_FLIP_WITHOUT_SHADOW_OPEN", "WARMUP_NO_VALID_POSITION", null, null, false);
+        }
+
+        static ShadowPositionImpact priceMissing(String reasonCode) {
+            return of(reasonCode, "PRICE_MISSING", null, null, false);
         }
     }
 
@@ -651,9 +681,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         String typeOperation = op.getTipoOperacion() == null ? "BOTH" : op.getTipoOperacion().name();
         OffsetDateTime eventTime = eventTime(op, action);
         BigDecimal qty = firstNonNull(op.getSizeQty(), op.getSize(), ZERO).abs();
-        BigDecimal notional = firstNonNull(op.getNotionalUsd(), op.getMarginUsedUsd(), ZERO).abs();
-        BigDecimal price = firstNonNull(op.getPrecioEntrada(), op.getPrecioMercado(), op.getPrecioCierre());
-        BigDecimal slippageUsd = slippageUsd(notional);
+        BigDecimal price = resolveShadowExecutionPrice(op, action, deltaType);
+        BigDecimal notional = resolveShadowNotional(op, qty, price);
         String eventType = shadowEventType(action, deltaType);
 
         shadowEventRepository.lockShadowEventIdempotency(shadowEventIdempotencyKey(allocation, originId, eventType, typeOperation, eventTime));
@@ -676,13 +705,45 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return false;
         }
 
-        ShadowPositionImpact impact = updateShadowPositionState(allocation, op, action, deltaType, eventTime, qty, notional, price, slippageUsd, originId, typeOperation);
+        ShadowPositionImpact impact;
+        if (requiresValidShadowPrice(action, deltaType) && !isPositive(price)) {
+            String reasonCode = missingPriceReason(action, deltaType);
+            impact = ShadowPositionImpact.priceMissing(reasonCode);
+            log.warn("event=shadow_price_missing reasonCode={} wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} usage={} copyImpact={} sourceEventId={}",
+                    reasonCode,
+                    allocation.getWalletId(),
+                    allocation.getWalletProfileId(),
+                    allocation.getId(),
+                    allocation.getShadowValidationId(),
+                    op.getParSymbol(),
+                    shadowPriceUsage(action, deltaType),
+                    copyImpactForMissingPrice(action, deltaType),
+                    originId);
+            if ("PRICE_CLOSE_MISSING".equals(reasonCode)) {
+                log.warn("event=shadow_close_rejected_missing_price reasonCode=PRICE_CLOSE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} deltaType={} sourceEventId={} copyImpact=shadow_close_skipped",
+                        allocation.getWalletId(),
+                        allocation.getWalletProfileId(),
+                        allocation.getId(),
+                        allocation.getShadowValidationId(),
+                        op.getParSymbol(),
+                        typeOperation,
+                        deltaType,
+                        originId);
+            }
+        } else {
+            log.debug("event=shadow_price_resolved source=OPERATION symbol={} price={} usage={}",
+                    op.getParSymbol(), price, shadowPriceUsage(action, deltaType));
+            impact = updateShadowPositionState(allocation, op, action, deltaType, eventTime, qty, notional, price, originId, typeOperation);
+        }
+        BigDecimal eventQtyExecuted = firstNonNull(impact.qtyExecuted(), qty);
+        BigDecimal eventNotional = firstNonNull(impact.eventNotionalUsd(), notional);
+        BigDecimal eventSlippageUsd = firstNonNull(impact.eventSlippageUsd(), ZERO);
         ShadowCopyOperationEntity shadowOperation = null;
         if (impact.positionUpdated()) {
             if (action == CopyJobAction.CLOSE) {
                 shadowOperation = closeShadowOperation(allocation, op, eventTime, originId, typeOperation, price, impact.realizedPnlUsd());
             } else {
-                shadowOperation = upsertOpenShadowOperation(allocation, op, deltaType, eventTime, originId, typeOperation, qty, notional, price, slippageUsd);
+                shadowOperation = upsertOpenShadowOperation(allocation, op, deltaType, eventTime, originId, typeOperation, qty, notional, price, eventSlippageUsd);
             }
         }
 
@@ -705,14 +766,15 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .eventType(eventType)
                 .positionSide(typeOperation)
                 .qtyRequested(qty)
-                .qtyExecuted(qty)
+                .qtyExecuted(eventQtyExecuted)
                 .price(price)
-                .notionalUsd(notional)
-                .resultingQty(action == CopyJobAction.CLOSE ? ZERO : qty)
+                .notionalUsd(eventNotional)
+                .previousQty(impact.previousQty())
+                .resultingQty(firstNonNull(impact.resultingQty(), action == CopyJobAction.CLOSE ? ZERO : qty))
                 .realizedPnlUsd(impact.realizedPnlUsd())
                 .feeUsd(ZERO)
                 .slippageBps(BigDecimal.valueOf(shadowSlippageBps).setScale(6, RoundingMode.HALF_UP))
-                .slippageUsd(slippageUsd)
+                .slippageUsd(eventSlippageUsd)
                 .decision(impact.positionUpdated() ? "SIMULATED" : "SKIPPED")
                 .decisionReason("shadow_separate_table")
                 .source("shadow_copy")
@@ -739,8 +801,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 shadowEvent.getReasonCode(),
                 impact.shadowImpact(),
                 qty,
-                notional,
-                slippageUsd);
+                eventNotional,
+                eventSlippageUsd);
         return true;
     }
 
@@ -829,6 +891,11 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         if (shadowOperation == null) {
             log.info("event=shadow_operation_close_missing originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} reasonCode=SHADOW_OPERATION_NOT_FOUND shadowImpact=POSITION_CLOSED_WITHOUT_OPERATION",
                     originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), typeOperation);
+            return null;
+        }
+        if (!isPositive(price)) {
+            log.warn("event=shadow_close_rejected_missing_price reasonCode=PRICE_CLOSE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} deltaType=CLOSE sourceEventId={} copyImpact=shadow_close_skipped",
+                    allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), typeOperation, originId);
             return null;
         }
         shadowOperation.setActive(false);
@@ -994,7 +1061,6 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             BigDecimal qty,
             BigDecimal notional,
             BigDecimal price,
-            BigDecimal slippageUsd,
             String originId,
             String positionSide
     ) {
@@ -1043,10 +1109,13 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                         originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide);
                 return ShadowPositionImpact.closeWithoutOpen();
             }
-            BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(slippageUsd);
+            BigDecimal previousQty = firstNonNull(state.getQty(), qty, ZERO).abs();
+            BigDecimal closeNotional = positiveOrFallback(previousQty.multiply(price), notional);
+            BigDecimal closeSlippageUsd = slippageUsd(closeNotional);
+            BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(closeSlippageUsd);
             BigDecimal realizedPnl = shadowRealizedPnl(
                     state.getPositionSide(),
-                    firstNonNull(state.getQty(), qty),
+                    previousQty,
                     firstNonNull(state.getEntryPrice(), op.getPrecioEntrada()),
                     price
             ).subtract(firstNonNull(state.getFeesUsd(), ZERO))
@@ -1061,7 +1130,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             shadowPositionStateRepository.save(state);
             log.info("event=shadow_position_closed originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} realizedPnlUsd={} reasonCode=SHADOW_POSITION_CLOSED shadowImpact=POSITION_CLOSED",
                     originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, realizedPnl);
-            return ShadowPositionImpact.closed(realizedPnl, state.getId());
+            return ShadowPositionImpact.closed(realizedPnl, state.getId())
+                    .withAccounting(previousQty, ZERO, previousQty, closeNotional, closeSlippageUsd);
         }
         if (state == null && (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE)) {
             Optional<ShadowPositionStateEntity> latestClosed = latestClosedShadowPosition(allocation, op.getParSymbol(), positionSide);
@@ -1100,11 +1170,19 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                     .status("OPEN")
                     .build();
         }
-        state.setQty(qty);
+        BigDecimal previousQty = firstNonNull(state.getQty(), ZERO).abs();
+        BigDecimal resultingQty = qty.abs();
+        boolean resizeLike = !opened && (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE);
+        BigDecimal eventQtyExecuted = resizeLike ? resultingQty.subtract(previousQty).abs() : resultingQty;
+        BigDecimal eventNotional = resizeLike ? eventQtyExecuted.multiply(price).abs() : notional;
+        eventNotional = positiveOrFallback(eventNotional, resizeLike ? ZERO : notional);
+        BigDecimal eventSlippageUsd = slippageUsd(eventNotional);
+
+        state.setQty(resultingQty);
         state.setEntryPrice(price);
         state.setMarkPrice(firstNonNull(op.getPrecioMercado(), price));
         state.setNotionalUsd(notional);
-        state.setSlippageUsd(firstNonNull(state.getSlippageUsd(), ZERO).add(slippageUsd));
+        state.setSlippageUsd(firstNonNull(state.getSlippageUsd(), ZERO).add(eventSlippageUsd));
         state.setLastSourceEventId(originId);
         shadowPositionStateRepository.save(state);
         if (opened) {
@@ -1117,12 +1195,18 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             log.info("event={} originId={} shadowAllocationId={} walletProfileId={} shadowValidationId={} shadowPositionId={} wallet={} copyProfileCode={} symbol={} side={} qty={} price={} reasonCode={} copyImpact={}",
                     logEvent, originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getShadowValidationId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, qty, price, reasonCode, deltaType == HyperliquidDeltaType.FLIP ? "shadow_position_opened" : "POSITION_OPENED");
             return deltaType == HyperliquidDeltaType.FLIP
-                    ? ShadowPositionImpact.openedByFlip(state.getId())
-                    : ShadowPositionImpact.opened(state.getId());
+                    ? ShadowPositionImpact.openedByFlip(state.getId()).withAccounting(ZERO, resultingQty, eventQtyExecuted, eventNotional, eventSlippageUsd)
+                    : ShadowPositionImpact.opened(state.getId()).withAccounting(ZERO, resultingQty, eventQtyExecuted, eventNotional, eventSlippageUsd);
+        }
+        if (resizeLike) {
+            log.info("event=shadow_resize_delta_cost_applied reasonCode=SHADOW_POSITION_RESIZED wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} previousQty={} resultingQty={} deltaQty={} executionPrice={} deltaNotional={} feeUsd={} slippageUsd={} costBasis=DELTA_NOTIONAL",
+                    allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), positionSide,
+                    previousQty, resultingQty, eventQtyExecuted, price, eventNotional, ZERO, eventSlippageUsd);
         }
         log.info("event=shadow_position_resized originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} qty={} price={} reasonCode=SHADOW_POSITION_RESIZED shadowImpact=POSITION_RESIZED",
                 originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, qty, price);
-        return ShadowPositionImpact.resized(state.getId());
+        return ShadowPositionImpact.resized(state.getId())
+                .withAccounting(previousQty, resultingQty, eventQtyExecuted, eventNotional, eventSlippageUsd);
     }
 
     private boolean closeOtherOpenShadowSides(
@@ -1140,10 +1224,15 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             if (state == null || Objects.equals(state.getPositionSide(), newPositionSide)) {
                 continue;
             }
+            BigDecimal closePrice = resolveShadowExecutionPrice(op, CopyJobAction.OPEN, HyperliquidDeltaType.FLIP);
+            if (!isPositive(closePrice)) {
+                log.warn("event=shadow_close_rejected_missing_price reasonCode=PRICE_CLOSE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} deltaType=FLIP sourceEventId={} copyImpact=shadow_close_skipped",
+                        allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), state.getPositionSide(), originId);
+                continue;
+            }
             closedAny = true;
-            BigDecimal closePrice = firstNonNull(op.getPrecioMercado(), op.getPrecioEntrada(), op.getPrecioCierre());
             BigDecimal previousQty = firstNonNull(state.getQty(), ZERO).abs();
-            BigDecimal previousNotional = firstNonNull(state.getNotionalUsd(), op.getNotionalUsd(), op.getMarginUsedUsd(), ZERO).abs();
+            BigDecimal previousNotional = positiveOrFallback(previousQty.multiply(closePrice), firstNonNull(state.getNotionalUsd(), op.getNotionalUsd(), op.getMarginUsedUsd(), ZERO).abs());
             BigDecimal realizedPnl = shadowRealizedPnl(
                     state.getPositionSide(),
                     state.getQty(),
@@ -1203,6 +1292,11 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         if (shadowOperation == null) {
             log.info("event=shadow_flip_operation_close_missing originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} reasonCode=SHADOW_OPERATION_NOT_FOUND_BY_FLIP shadowImpact=POSITION_CLOSED_WITHOUT_OPERATION",
                     originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), symbol, typeOperation);
+            return null;
+        }
+        if (!isPositive(price)) {
+            log.warn("event=shadow_close_rejected_missing_price reasonCode=PRICE_CLOSE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} deltaType=FLIP sourceEventId={} copyImpact=shadow_close_skipped",
+                    allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), symbol, typeOperation, originId);
             return null;
         }
         shadowOperation.setActive(false);
@@ -1845,6 +1939,86 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return OffsetDateTime.now();
         }
         return OffsetDateTime.ofInstant(instant, ZoneOffset.UTC);
+    }
+
+    private static BigDecimal resolveShadowExecutionPrice(OperacionDto op, CopyJobAction action, HyperliquidDeltaType deltaType) {
+        if (op == null) {
+            return null;
+        }
+        if (action == CopyJobAction.CLOSE || deltaType == HyperliquidDeltaType.CLOSE) {
+            return firstPositive(op.getPrecioCierre(), op.getPrecioMercado(), op.getPrecioEntrada());
+        }
+        if (deltaType == HyperliquidDeltaType.FLIP) {
+            return firstPositive(op.getPrecioMercado(), op.getPrecioEntrada(), op.getPrecioCierre());
+        }
+        if (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE) {
+            return firstPositive(op.getPrecioMercado(), op.getPrecioEntrada(), op.getPrecioCierre());
+        }
+        return firstPositive(op.getPrecioEntrada(), op.getPrecioMercado(), op.getPrecioCierre());
+    }
+
+    private static BigDecimal resolveShadowNotional(OperacionDto op, BigDecimal qty, BigDecimal price) {
+        BigDecimal explicit = op == null ? null : firstPositive(op.getNotionalUsd(), op.getMarginUsedUsd(), op.getSize());
+        if (isPositive(explicit)) {
+            return explicit.abs();
+        }
+        BigDecimal safeQty = qty == null ? ZERO : qty.abs();
+        return isPositive(price) && safeQty.signum() > 0 ? safeQty.multiply(price).abs() : ZERO;
+    }
+
+    private static boolean requiresValidShadowPrice(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        return action == CopyJobAction.CLOSE
+                || deltaType == HyperliquidDeltaType.CLOSE
+                || deltaType == HyperliquidDeltaType.FLIP
+                || deltaType == HyperliquidDeltaType.OPEN
+                || deltaType == HyperliquidDeltaType.RESIZE
+                || deltaType == HyperliquidDeltaType.UPDATE;
+    }
+
+    private static String missingPriceReason(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        if (action == CopyJobAction.CLOSE || deltaType == HyperliquidDeltaType.CLOSE || deltaType == HyperliquidDeltaType.FLIP) {
+            return "PRICE_CLOSE_MISSING";
+        }
+        return "PRICE_SOURCE_UNAVAILABLE";
+    }
+
+    private static String shadowPriceUsage(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        if (action == CopyJobAction.CLOSE || deltaType == HyperliquidDeltaType.CLOSE) {
+            return "CLOSE";
+        }
+        if (deltaType == HyperliquidDeltaType.FLIP) {
+            return "FLIP";
+        }
+        if (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE) {
+            return "RESIZE";
+        }
+        return "OPEN";
+    }
+
+    private static String copyImpactForMissingPrice(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        return "PRICE_CLOSE_MISSING".equals(missingPriceReason(action, deltaType))
+                ? "shadow_close_rejected_missing_price"
+                : "shadow_price_resolution_limited";
+    }
+
+    private static BigDecimal positiveOrFallback(BigDecimal value, BigDecimal fallback) {
+        return isPositive(value) ? value.abs() : (fallback == null ? ZERO : fallback.abs());
+    }
+
+    private static boolean isPositive(BigDecimal value) {
+        return value != null && value.compareTo(ZERO) > 0;
+    }
+
+    private static BigDecimal firstPositive(BigDecimal... values) {
+        if (values == null) {
+            return null;
+        }
+        for (BigDecimal value : values) {
+            if (isPositive(value)) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private BigDecimal slippageUsd(BigDecimal notional) {

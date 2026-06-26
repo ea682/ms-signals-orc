@@ -367,6 +367,86 @@ class ShadowCopyTradingServiceImplTest {
     }
 
     @Test
+    void closeWithMissingPriceDoesNotCloseOrCalculatePnl() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+
+        assertEquals(1, runtime.service().recordShadowEvent(closeEvent(UUID.randomUUID(), PositionSide.LONG, BigDecimal.ZERO)));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("PRICE_CLOSE_MISSING", event.getReasonCode());
+        assertEquals("SKIPPED", event.getDecision());
+        assertNull(event.getPrice());
+        assertNull(event.getRealizedPnlUsd());
+        assertEquals("OPEN", runtime.previousState().getStatus());
+        assertEquals("OPEN", runtime.previousOperation().getStatus());
+        assertTrue(runtime.previousOperation().isActive());
+        assertNull(runtime.previousOperation().getPriceClose());
+        assertNull(runtime.previousOperation().getRealizedPnlUsd());
+    }
+
+    @Test
+    void flipWithMissingPriceDoesNotClosePreviousSideOrOpenNewSide() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.SHORT);
+        int initialStates = runtime.states().size();
+        int initialOperations = runtime.operations().size();
+
+        assertEquals(1, runtime.service().recordShadowEvent(flipEvent(UUID.randomUUID(), PositionSide.LONG, BigDecimal.ZERO)));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("PRICE_CLOSE_MISSING", event.getReasonCode());
+        assertEquals("SKIPPED", event.getDecision());
+        assertEquals("FLIP", event.getEventType());
+        assertNull(event.getPrice());
+        assertEquals("OPEN", runtime.previousState().getStatus());
+        assertEquals("OPEN", runtime.previousOperation().getStatus());
+        assertTrue(runtime.previousOperation().isActive());
+        assertEquals(initialStates, runtime.states().size());
+        assertEquals(initialOperations, runtime.operations().size());
+    }
+
+    @Test
+    void resizeUsesDeltaNotionalForCostsAndEventAccounting() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("100"));
+        runtime.previousState().setNotionalUsd(new BigDecimal("200"));
+        runtime.previousOperation().setSizePar(new BigDecimal("100"));
+        runtime.previousOperation().setSizeUsd(new BigDecimal("200"));
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("150"), new BigDecimal("2"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("SHADOW_POSITION_RESIZED", event.getReasonCode());
+        assertEquals("SIMULATED", event.getDecision());
+        assertEquals(new BigDecimal("100"), event.getPreviousQty());
+        assertEquals(new BigDecimal("150"), event.getResultingQty());
+        assertEquals(new BigDecimal("50"), event.getQtyExecuted());
+        assertEquals(new BigDecimal("100"), event.getNotionalUsd());
+        assertEquals(new BigDecimal("0.020000000000"), event.getSlippageUsd());
+        assertEquals(BigDecimal.ZERO, event.getFeeUsd());
+        assertEquals(new BigDecimal("150"), runtime.previousState().getQty());
+        assertEquals(new BigDecimal("300"), runtime.previousOperation().getSizeUsd());
+    }
+
+    @Test
+    void resizeNoopDoesNotAddCosts() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("100"));
+        runtime.previousState().setNotionalUsd(new BigDecimal("200"));
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("100"), new BigDecimal("2"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("SHADOW_POSITION_RESIZED", event.getReasonCode());
+        assertEquals(new BigDecimal("100"), event.getPreviousQty());
+        assertEquals(new BigDecimal("100"), event.getResultingQty());
+        assertEquals(BigDecimal.ZERO, event.getQtyExecuted());
+        assertEquals(BigDecimal.ZERO, event.getNotionalUsd());
+        assertEquals(BigDecimal.ZERO, event.getSlippageUsd());
+    }
+
+    @Test
     void flipWithoutPreviousShadowOpenRecordsSkippedWithoutOpeningNewSide() throws Exception {
         ShadowCopyAllocationEntity allocation = shadowAllocation(10L, UUID.randomUUID(), "MOVEMENT_ALL", "MOVEMENT_ALL", 100L);
         allocation.setCreatedAt(OffsetDateTime.parse("2026-06-22T08:00:00Z"));
@@ -607,6 +687,42 @@ class ShadowCopyTradingServiceImplTest {
                         .build()
         );
         event.setDeltaType("FLIP");
+        return event;
+    }
+
+    private static OperacionEvent closeEvent(UUID originId, PositionSide side, BigDecimal price) {
+        OperacionEvent event = new OperacionEvent(
+                OperacionEvent.Tipo.CERRADA,
+                OperacionDto.builder()
+                        .idOperacion(originId)
+                        .idCuenta("0xabc")
+                        .parSymbol("BTCUSDT")
+                        .tipoOperacion(side)
+                        .sizeQty(BigDecimal.ONE)
+                        .notionalUsd(new BigDecimal("100"))
+                        .precioCierre(price)
+                        .fechaCierre(Instant.parse("2026-06-22T10:00:00Z"))
+                        .build()
+        );
+        event.setDeltaType("CLOSE");
+        return event;
+    }
+
+    private static OperacionEvent resizeEvent(UUID originId, PositionSide side, BigDecimal resultingQty, BigDecimal price) {
+        OperacionEvent event = new OperacionEvent(
+                OperacionEvent.Tipo.ABIERTA,
+                OperacionDto.builder()
+                        .idOperacion(originId)
+                        .idCuenta("0xabc")
+                        .parSymbol("BTCUSDT")
+                        .tipoOperacion(side)
+                        .sizeQty(resultingQty)
+                        .notionalUsd(resultingQty.multiply(price))
+                        .precioMercado(price)
+                        .fechaCreacion(Instant.parse("2026-06-22T10:00:00Z"))
+                        .build()
+        );
+        event.setDeltaType("RESIZE");
         return event;
     }
 
