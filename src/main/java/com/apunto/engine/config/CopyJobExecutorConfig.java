@@ -17,11 +17,23 @@ public class CopyJobExecutorConfig {
             @Value("${operation.job.worker.pool-size:${copy.job.worker.pool-size:16}}") int threads,
             @Value("${operation.job.worker.queue:${copy.job.worker.queue:5000}}") int queueCapacity
     ) {
+        return buildExecutor(threads, queueCapacity, "copy-job-");
+    }
+
+    @Bean(name = "copyPriorityJobExecutor")
+    public ThreadPoolTaskExecutor copyPriorityJobExecutor(
+            @Value("${operation.job.priority-worker.pool-size:${copy.job.priority-worker.pool-size:16}}") int threads,
+            @Value("${operation.job.priority-worker.queue:${copy.job.priority-worker.queue:20000}}") int queueCapacity
+    ) {
+        return buildExecutor(threads, queueCapacity, "copy-priority-");
+    }
+
+    private ThreadPoolTaskExecutor buildExecutor(int threads, int queueCapacity, String threadNamePrefix) {
         ThreadPoolTaskExecutor exec = new ThreadPoolTaskExecutor();
         exec.setCorePoolSize(threads);
         exec.setMaxPoolSize(threads);
         exec.setQueueCapacity(queueCapacity);
-        exec.setThreadNamePrefix("copy-job-");
+        exec.setThreadNamePrefix(threadNamePrefix);
 
 
         exec.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
@@ -46,4 +58,3 @@ public class CopyJobExecutorConfig {
         return exec;
     }
 }
-

@@ -34,12 +34,33 @@ public interface BinanceClient {
     ApiResponse<BinanceFuturesOrderClientResponse> closePosition(
             @RequestHeader("X-BINANCE-APIKEY") String apiKey,
             @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestHeader(value = "X-COPY-ORIGIN-ID", required = false) String originId,
+            @RequestHeader(value = "X-COPY-USER-ID", required = false) String userId,
+            @RequestHeader(value = "X-COPY-WALLET-ID", required = false) String walletId,
+            @RequestHeader(value = "X-COPY-TRACE-ID", required = false) String traceId,
             @RequestBody CloseOperationClientRequest request
+    );
+
+    @PostExchange("/settings/preconfigure")
+    ApiResponse<TradingConfigPreconfigureClientResponse> preconfigureTradingSettings(
+            @RequestHeader("X-BINANCE-APIKEY") String apiKey,
+            @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestHeader(value = "X-COPY-USER-ID", required = false) String userId,
+            @RequestHeader(value = "X-COPY-WALLET-ID", required = false) String walletId,
+            @RequestHeader(value = "X-COPY-TRACE-ID", required = false) String traceId,
+            @RequestBody TradingConfigPreconfigureClientRequest request
     );
 
     @GetExchange("/symbols")
     ApiResponse<List<BinanceFuturesSymbolInfoClientDto>> symbols(
-            @RequestHeader("X-BINANCE-APIKEY") String apiKey
+            @RequestHeader(value = "X-BINANCE-APIKEY", required = false) String apiKey
+    );
+
+    @GetExchange("/market/price")
+    ApiResponse<BinanceFuturesMarketPriceClientDto> marketPrice(
+            @RequestParam("symbol") String symbol,
+            @RequestParam("usage") String usage,
+            @RequestParam("allowStale") boolean allowStale
     );
 
     @GetExchange("/wallet/asset-balance")

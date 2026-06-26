@@ -38,6 +38,42 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     List<CopyOperationEntity> findAllByActiveTrue();
 
+    @Query(value = """
+            SELECT DISTINCT UPPER(c.parsymbol)
+            FROM futuros_operaciones.copy_operation c
+            WHERE c.id_user = :idUser
+              AND c.parsymbol IS NOT NULL
+              AND trim(c.parsymbol) <> ''
+              AND COALESCE(c.execution_mode, 'LIVE') = 'LIVE'
+              AND COALESCE(c.is_shadow, false) = false
+              AND c.date_creation >= now() - (:lookbackDays * interval '1 day')
+            ORDER BY UPPER(c.parsymbol)
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<String> findRecentLiveSymbolsForUser(
+            @Param("idUser") String idUser,
+            @Param("lookbackDays") int lookbackDays,
+            @Param("limit") int limit
+    );
+
+    @Query(value = """
+            SELECT DISTINCT UPPER(c.parsymbol)
+            FROM futuros_operaciones.copy_operation c
+            WHERE c.user_copy_allocation_id = :allocationId
+              AND c.parsymbol IS NOT NULL
+              AND trim(c.parsymbol) <> ''
+              AND COALESCE(c.execution_mode, 'LIVE') = 'LIVE'
+              AND COALESCE(c.is_shadow, false) = false
+              AND c.date_creation >= now() - (:lookbackDays * interval '1 day')
+            ORDER BY UPPER(c.parsymbol)
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<String> findRecentLiveSymbolsForAllocation(
+            @Param("allocationId") Long allocationId,
+            @Param("lookbackDays") int lookbackDays,
+            @Param("limit") int limit
+    );
+
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("""
             UPDATE CopyOperationEntity c

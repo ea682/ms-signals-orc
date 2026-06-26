@@ -39,6 +39,7 @@ public class HyperliquidDeltaOperacionMapper {
         final BigDecimal sizeQty = abs(defaultZero(firstNonNull(request.sizeQty(), request.signedSizeQty())));
         final BigDecimal notionalUsd = resolveNotionalUsd(request, sizeQty, eventType);
         final BigDecimal marginUsedUsd = resolveMarginUsedUsd(request, eventType);
+        final BigDecimal entryPriceRef = firstNonNull(request.effectiveEntryPrice(), request.entryPrice());
         final BigDecimal closePriceRef = resolveClosePrice(request);
         final BigDecimal marketPriceRef = resolveMarketPrice(request);
         final Instant eventTime = resolveEventTime(request);
@@ -52,7 +53,7 @@ public class HyperliquidDeltaOperacionMapper {
                 .sizeQty(sizeQty)
                 .notionalUsd(notionalUsd)
                 .marginUsedUsd(marginUsedUsd)
-                .precioEntrada(request.entryPrice())
+                .precioEntrada(entryPriceRef)
                 .precioCierre(active ? null : closePriceRef)
                 .precioMercado(marketPriceRef)
                 .fechaCreacion(eventTime)
@@ -133,11 +134,11 @@ public class HyperliquidDeltaOperacionMapper {
     }
 
     private BigDecimal resolveClosePrice(HyperliquidDeltaRequest request) {
-        return firstNonNull(request.effectiveExitPrice(), firstNonNull(request.markPrice(), request.entryPrice()));
+        return firstNonNull(request.effectiveExitPrice(), firstNonNull(request.markPrice(), firstNonNull(request.effectiveEntryPrice(), request.entryPrice())));
     }
 
     private BigDecimal resolveMarketPrice(HyperliquidDeltaRequest request) {
-        return firstNonNull(request.markPrice(), firstNonNull(request.effectiveExitPrice(), request.entryPrice()));
+        return firstNonNull(request.markPrice(), firstNonNull(request.effectiveExitPrice(), firstNonNull(request.effectiveEntryPrice(), request.entryPrice())));
     }
 
     private BigDecimal resolveMarginUsedUsd(HyperliquidDeltaRequest request, OperacionEvent.Tipo eventType) {

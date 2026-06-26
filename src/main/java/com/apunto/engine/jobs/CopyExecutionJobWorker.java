@@ -71,6 +71,7 @@ public class CopyExecutionJobWorker {
     private final UserDetailCachedService userDetailCachedService;
     private final ObjectMapper objectMapper;
     private final ThreadPoolTaskExecutor executor;
+    private final ThreadPoolTaskExecutor priorityExecutor;
     private final TradingMetrics tradingMetrics;
     private final String workerId;
 
@@ -91,6 +92,7 @@ public class CopyExecutionJobWorker {
             UserDetailCachedService userDetailCachedService,
             ObjectMapper objectMapper,
             @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor executor,
+            @Qualifier("copyPriorityJobExecutor") ThreadPoolTaskExecutor priorityExecutor,
             TradingMetrics tradingMetrics
     ) {
         this.jobService = jobService;
@@ -100,6 +102,7 @@ public class CopyExecutionJobWorker {
         this.userDetailCachedService = userDetailCachedService;
         this.objectMapper = objectMapper;
         this.executor = executor;
+        this.priorityExecutor = priorityExecutor;
         this.tradingMetrics = tradingMetrics;
         this.workerId = buildWorkerId();
     }
@@ -221,8 +224,10 @@ public class CopyExecutionJobWorker {
     }
 
     private void submitOrRescheduleOnReject(CopyExecutionJobEntity job) {
+        ThreadPoolTaskExecutor selectedExecutor = executorFor(job);
+        String executorLane = executorLane(job);
         try {
-            executor.execute(() -> process(job));
+            selectedExecutor.execute(() -> process(job));
         } catch (RejectedExecutionException rej) {
             // IMPORTANT: si el executor rechaza, el job ya está en PROCESSING.
             // Lo volvemos a PENDING inmediatamente para no dejarlo pegado esperando el stale TTL.
@@ -231,11 +236,11 @@ public class CopyExecutionJobWorker {
 
             jobService.reschedule(job, nextRunAt, CopyJobErrorCategory.REJECTED.name(), "executor_rejected");
 
-            ExecSnapshot s = execSnapshot();
-            log.warn("event=copy.job.rejected id={} originId={} userId={} action={} attempts={} category={} retryable=true nextRunAt={} workerId={} execPool={} execActive={} execQueue={} execQueueRemaining={} errClass={} errMsg=\"{}\"",
+            ExecSnapshot s = execSnapshot(selectedExecutor);
+            log.warn("event=copy.job.rejected id={} originId={} userId={} action={} attempts={} category={} retryable=true nextRunAt={} workerId={} executorLane={} execPool={} execActive={} execQueue={} execQueueRemaining={} errClass={} errMsg=\"{}\"",
                     job.getId(), job.getOriginId(), job.getUserId(), job.getAction(), job.getAttempt() + 1,
                     CopyJobErrorCategory.REJECTED,
-                    nextRunAt, workerId,
+                    nextRunAt, workerId, executorLane,
                     s.poolSize(), s.activeCount(), s.queueSize(), s.queueRemaining(),
                     rej.getClass().getSimpleName(), safeMsgForLog(safeMsg(rej)));
         }
@@ -714,8 +719,12 @@ public class CopyExecutionJobWorker {
     }
 
     private ExecSnapshot execSnapshot() {
+        return execSnapshot(executor);
+    }
+
+    private ExecSnapshot execSnapshot(ThreadPoolTaskExecutor selectedExecutor) {
         try {
-            ThreadPoolExecutor tpe = executor.getThreadPoolExecutor();
+            ThreadPoolExecutor tpe = selectedExecutor.getThreadPoolExecutor();
             if (tpe == null) return new ExecSnapshot(-1, -1, -1, -1);
             int pool = tpe.getPoolSize();
             int active = tpe.getActiveCount();
@@ -725,6 +734,14 @@ public class CopyExecutionJobWorker {
         } catch (IllegalStateException ex) {
             return new ExecSnapshot(-1, -1, -1, -1);
         }
+    }
+
+    private ThreadPoolTaskExecutor executorFor(CopyExecutionJobEntity job) {
+        return job != null && job.getAction() == CopyJobAction.CLOSE ? priorityExecutor : executor;
+    }
+
+    private String executorLane(CopyExecutionJobEntity job) {
+        return job != null && job.getAction() == CopyJobAction.CLOSE ? "priority" : "standard";
     }
 
     private record ExecSnapshot(int poolSize, int activeCount, int queueSize, int queueRemaining) {}

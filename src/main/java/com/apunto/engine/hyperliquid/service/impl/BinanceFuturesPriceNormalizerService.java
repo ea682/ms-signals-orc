@@ -1,5 +1,7 @@
 package com.apunto.engine.hyperliquid.service.impl;
 
+import com.apunto.engine.dto.client.BinanceFuturesMarketPriceClientDto;
+import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.service.binance.BinanceFuturesSymbolCatalog;
 import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -19,6 +21,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -43,13 +46,19 @@ public class BinanceFuturesPriceNormalizerService {
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final BinanceFuturesSymbolCatalog symbolCatalog;
+    private final ProcesBinanceService procesBinanceService;
+    private final boolean enginePriceEnabled;
+    private final boolean enginePriceAllowStale;
     private final Cache<String, BinancePriceReference> cache;
     private final Cache<String, Boolean> missCache;
 
     public BinanceFuturesPriceNormalizerService(
             ObjectMapper objectMapper,
             BinanceFuturesSymbolCatalog symbolCatalog,
+            ProcesBinanceService procesBinanceService,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-enabled:true}") boolean enabled,
+            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-engine-enabled:true}") boolean enginePriceEnabled,
+            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-engine-allow-stale:true}") boolean enginePriceAllowStale,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-base-url:https://fapi.binance.com}") String baseUrl,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-timeout-ms:350}") int timeoutMs,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-cache-ttl-ms:750}") long cacheTtlMs,
@@ -59,7 +68,10 @@ public class BinanceFuturesPriceNormalizerService {
     ) {
         this.objectMapper = objectMapper;
         this.symbolCatalog = symbolCatalog;
+        this.procesBinanceService = procesBinanceService;
         this.enabled = enabled;
+        this.enginePriceEnabled = enginePriceEnabled;
+        this.enginePriceAllowStale = enginePriceAllowStale;
         this.cacheTtlMs = Math.max(1L, cacheTtlMs);
         HttpClient httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofMillis(Math.max(50, timeoutMs)))
@@ -78,8 +90,8 @@ public class BinanceFuturesPriceNormalizerService {
                 .expireAfterWrite(Duration.ofMillis(Math.max(1000L, missCacheTtlMs)))
                 .maximumSize(Math.max(128L, missCacheSize))
                 .build();
-        log.info("event=hyperliquid.origin_store.price_normalizer.config enabled={} baseUrl={} timeoutMs={} cacheTtlMs={} cacheSize={} missCacheTtlMs={} missCacheSize={}",
-                enabled, safeLog(baseUrl), Math.max(50, timeoutMs), this.cacheTtlMs, Math.max(128L, cacheSize), Math.max(1000L, missCacheTtlMs), Math.max(128L, missCacheSize));
+        log.info("event=hyperliquid.origin_store.price_normalizer.config enabled={} enginePriceEnabled={} enginePriceAllowStale={} baseUrl={} timeoutMs={} cacheTtlMs={} cacheSize={} missCacheTtlMs={} missCacheSize={}",
+                enabled, enginePriceEnabled, enginePriceAllowStale, safeLog(baseUrl), Math.max(50, timeoutMs), this.cacheTtlMs, Math.max(128L, cacheSize), Math.max(1000L, missCacheTtlMs), Math.max(128L, missCacheSize));
     }
 
     /**
@@ -131,8 +143,6 @@ public class BinanceFuturesPriceNormalizerService {
             cache.put(cacheKey, price);
             return Optional.of(price);
         }
-        missCache.put(canonical, Boolean.TRUE);
-        missCache.put(cacheKey, Boolean.TRUE);
         return Optional.empty();
     }
 
@@ -146,6 +156,10 @@ public class BinanceFuturesPriceNormalizerService {
 
     private Optional<BinancePriceReference> fetch(String canonicalSymbol, String rawSymbol, BigDecimal contractMultiplier) {
         long startedNs = System.nanoTime();
+        Optional<BinancePriceReference> enginePrice = fetchFromEngine(canonicalSymbol, rawSymbol, contractMultiplier, startedNs);
+        if (enginePrice.isPresent()) {
+            return enginePrice;
+        }
         try {
             String body = restClient.get()
                     .uri(uriBuilder -> uriBuilder.path("/fapi/v1/ticker/price")
@@ -195,6 +209,60 @@ public class BinanceFuturesPriceNormalizerService {
             log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=origin_metrics_only errClass={} errMsg=\"{}\" elapsedMs={} {}",
                     safeLog(canonicalSymbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs),
                     CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
+            return Optional.empty();
+        }
+    }
+
+    private Optional<BinancePriceReference> fetchFromEngine(String canonicalSymbol,
+                                                            String rawSymbol,
+                                                            BigDecimal contractMultiplier,
+                                                            long startedNs) {
+        if (!enginePriceEnabled) {
+            return Optional.empty();
+        }
+        try {
+            Optional<BinanceFuturesMarketPriceClientDto> response =
+                    procesBinanceService.getMarketPrice(canonicalSymbol, "PNL", enginePriceAllowStale);
+            if (response.isEmpty()) {
+                return Optional.empty();
+            }
+            BinanceFuturesMarketPriceClientDto marketPrice = response.get();
+            BigDecimal contractPrice = marketPrice.getPrice();
+            if (!marketPrice.isAvailable() || contractPrice == null || contractPrice.compareTo(ZERO) <= 0) {
+                log.debug("event=hyperliquid.origin_store.binance_price.engine_unavailable rawSymbol={} canonicalSymbol={} available={} reasonCode={} source={} ageMs={}",
+                        safeLog(rawSymbol), safeLog(canonicalSymbol), marketPrice.isAvailable(), safeLog(marketPrice.getReasonCode()), safeLog(marketPrice.getSource()), marketPrice.getAgeMs());
+                return Optional.empty();
+            }
+
+            BigDecimal safeMultiplier = contractMultiplier == null || contractMultiplier.compareTo(ZERO) <= 0 ? ONE : contractMultiplier;
+            BigDecimal unitPrice = contractPrice.divide(safeMultiplier, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
+            OffsetDateTime ts = marketPrice.getReceivedAtMs() == null
+                    ? OffsetDateTime.now(ZoneOffset.UTC)
+                    : OffsetDateTime.ofInstant(Instant.ofEpochMilli(marketPrice.getReceivedAtMs()), ZoneOffset.UTC);
+            long elapsedMs = elapsedMs(startedNs);
+            long referenceDiffMs = marketPrice.getAgeMs() == null ? 0L : Math.max(0L, marketPrice.getAgeMs());
+            String source = marketPrice.getSource() == null || marketPrice.getSource().isBlank()
+                    ? "binance_engine_market_price"
+                    : "binance_engine_" + marketPrice.getSource();
+
+            log.debug("event=hyperliquid.origin_store.binance_price.engine_ok rawSymbol={} canonicalSymbol={} contractMultiplier={} contractPrice={} unitPrice={} source={} ageMs={} elapsedMs={}",
+                    safeLog(rawSymbol), safeLog(canonicalSymbol), safeMultiplier.toPlainString(), contractPrice.toPlainString(), unitPrice.toPlainString(), safeLog(source), referenceDiffMs, elapsedMs);
+
+            return Optional.of(new BinancePriceReference(
+                    canonicalSymbol,
+                    unitPrice,
+                    source,
+                    ts,
+                    elapsedMs,
+                    referenceDiffMs,
+                    contractPrice,
+                    safeMultiplier,
+                    rawSymbol,
+                    canonicalSymbol
+            ));
+        } catch (RuntimeException ex) {
+            log.warn("event=hyperliquid.origin_store.binance_price.engine_failed symbol={} fallback=rest_public_ticker errClass={} errMsg=\"{}\" elapsedMs={}",
+                    safeLog(canonicalSymbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
             return Optional.empty();
         }
     }

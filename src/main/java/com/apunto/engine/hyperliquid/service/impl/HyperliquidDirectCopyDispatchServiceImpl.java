@@ -48,6 +48,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
     private final HyperliquidCopyCandidateResolver candidateResolver;
     private final OperacionEventIngestService fallbackIngestService;
     private final ThreadPoolTaskExecutor copyJobExecutor;
+    private final ThreadPoolTaskExecutor copyPriorityJobExecutor;
     private final TradingMetrics tradingMetrics;
 
     @Value("${hyperliquid.direct-ingest.fallback-db-on-direct-failure:true}")
@@ -60,6 +61,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
             HyperliquidCopyCandidateResolver candidateResolver,
             OperacionEventIngestService fallbackIngestService,
             @Qualifier("copyJobExecutor") ThreadPoolTaskExecutor copyJobExecutor,
+            @Qualifier("copyPriorityJobExecutor") ThreadPoolTaskExecutor copyPriorityJobExecutor,
             TradingMetrics tradingMetrics
     ) {
         this.binanceCopyExecutionService = binanceCopyExecutionService;
@@ -68,6 +70,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         this.candidateResolver = candidateResolver;
         this.fallbackIngestService = fallbackIngestService;
         this.copyJobExecutor = copyJobExecutor;
+        this.copyPriorityJobExecutor = copyPriorityJobExecutor;
         this.tradingMetrics = tradingMetrics;
     }
 
@@ -143,13 +146,14 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
                         CopyLogAdvice.fields(decision.reasonCode(), CopyLogAdvice.context(eligibleUsers.size(), eligibleUsers.size(), submitted.get(), businessSkipped.get(), null, decision.cacheActive(), activeCopyOperationCache.activeSize(), candidates.source())));
                 continue;
             }
+            String executorLane = executorLane(action, deltaType);
             try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", userTraceId)) {
-                copyJobExecutor.execute(() -> executeCopy(event, user, action, fallbackSubmitted, fallbackJobs));
+                executorFor(action, deltaType).execute(() -> executeCopy(event, user, action, fallbackSubmitted, fallbackJobs));
                 submitted.incrementAndGet();
             } catch (RejectedExecutionException rejected) {
                 tradingMetrics.directCopyRejected(copyIntent(action, deltaType), "executor_rejected");
-                log.warn("event=hyperliquid.direct_copy.rejected traceId={} originId={} wallet={} symbol={} action={} engineAction={} deltaType={} eligibleUsers={} submitted={} reasonCode=executor_rejected errClass={} errMsg=\"{}\" humanMessage=no_hay_espacio_en_la_cola_para_enviar_esta_copia_ahora {}",
-                        userTraceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, deltaType, eligibleUsers.size(), submitted.get(),
+                log.warn("event=hyperliquid.direct_copy.rejected traceId={} originId={} wallet={} symbol={} action={} engineAction={} deltaType={} executorLane={} eligibleUsers={} submitted={} reasonCode=executor_rejected errClass={} errMsg=\"{}\" humanMessage=no_hay_espacio_en_la_cola_para_enviar_esta_copia_ahora {}",
+                        userTraceId, originId, safeLog(wallet), safeLog(symbol), actionLabel, action, deltaType, executorLane, eligibleUsers.size(), submitted.get(),
                         rejected.getClass().getSimpleName(), safeLog(rejected.getMessage()),
                         CopyLogAdvice.fields("executor_rejected", CopyLogAdvice.context(eligibleUsers.size(), eligibleUsers.size(), submitted.get(), businessSkipped.get(), null, null, activeCopyOperationCache.activeSize(), candidates.source())));
                 fallbackJobs.addAndGet(submitFallbackOnce(event, fallbackSubmitted, "executor_rejected"));
@@ -197,6 +201,23 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
     private String originTraceId(String originId, String wallet, String symbol) {
         return activeCopyOperationCache.traceId(originId, "origin", wallet, symbol);
+    }
+
+    private ThreadPoolTaskExecutor executorFor(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        return latencyCritical(action, deltaType) ? copyPriorityJobExecutor : copyJobExecutor;
+    }
+
+    private String executorLane(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        return latencyCritical(action, deltaType) ? "priority" : "standard";
+    }
+
+    private boolean latencyCritical(CopyJobAction action, HyperliquidDeltaType deltaType) {
+        if (action == CopyJobAction.CLOSE) {
+            return true;
+        }
+        return deltaType == HyperliquidDeltaType.FLIP
+                || deltaType == HyperliquidDeltaType.RESIZE
+                || deltaType == HyperliquidDeltaType.UPDATE;
     }
 
     private HyperliquidCopyLifecycleDecision businessDecision(

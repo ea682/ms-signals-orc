@@ -16,9 +16,9 @@ import com.apunto.engine.shared.util.LogFmt;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
@@ -32,13 +32,20 @@ import java.util.UUID;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class BinanceFuturesWalletServiceImpl implements BinanceFuturesWalletService {
 
     private static final String ASSET_BNB = "BNB";
 
     private final BinanceClient binanceClient;
     private final ObjectMapper objectMapper;
+
+    public BinanceFuturesWalletServiceImpl(
+            @Qualifier("binanceInfoClient") BinanceClient binanceClient,
+            ObjectMapper objectMapper
+    ) {
+        this.binanceClient = binanceClient;
+        this.objectMapper = objectMapper;
+    }
 
     @Override
     public FuturesAssetBalanceClientResponse getAssetBalance(UserDetailDto userDetail, String asset) {
