@@ -8,6 +8,7 @@ import com.apunto.engine.dto.client.FuturesConvertToBnbClientResponse;
 import com.apunto.engine.service.futures.BinanceFuturesWalletService;
 import com.apunto.engine.shared.dto.ApiResponse;
 import com.apunto.engine.shared.enums.FuturesCapitalAsset;
+import com.apunto.engine.shared.exception.BinanceApiReadinessException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.FuturesWalletClientException;
@@ -72,6 +73,11 @@ public class BinanceFuturesWalletServiceImpl implements BinanceFuturesWalletServ
             Map<String, Object> details = walletDetails(userId, normalizedAsset, err);
             log.warn("event=futures.wallet.balance.fail userId={} asset={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\" friendlyStep=no_pude_leer_el_saldo_en_binance",
                     userId, normalizedAsset, err.httpStatus(), safeNull(err.errorCode()), safeNull(err.binanceCode()), safeLog(err.binanceMsg()));
+            if (isBinanceApiReadinessFailure(err)) {
+                log.warn("event=copy_live_api_readiness_failed reasonCode=BINANCE_API_KEY_INVALID_OR_FORBIDDEN userId={} binanceCode={} liveImpact=LIVE_BLOCKED shadowImpact=UNAFFECTED",
+                        userId, safeNull(err.binanceCode()));
+                throw new BinanceApiReadinessException("Binance API key/IP/permisos Futures invalidos al consultar saldo", ex, details);
+            }
             throw new FuturesWalletClientException("No se pudo consultar saldo Futures de " + normalizedAsset, ex, details);
         } catch (ResourceAccessException ex) {
             Map<String, Object> details = walletDetails(userId, normalizedAsset, null);
@@ -232,6 +238,21 @@ public class BinanceFuturesWalletServiceImpl implements BinanceFuturesWalletServ
             details.put("path", safeNull(err.path()));
         }
         return details;
+    }
+
+    private boolean isBinanceApiReadinessFailure(BinanceHttpError err) {
+        if (err == null) {
+            return false;
+        }
+        if ("-2015".equals(err.binanceCode())) {
+            return true;
+        }
+        String msg = err.binanceMsg() == null ? "" : err.binanceMsg().toLowerCase(Locale.ROOT);
+        return (err.httpStatus() == 401 || err.httpStatus() == 403)
+                && (msg.contains("invalid api-key")
+                || msg.contains("ip")
+                || msg.contains("permission")
+                || msg.contains("permissions"));
     }
 
     private String userId(UserDetailDto userDetail) {

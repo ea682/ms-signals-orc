@@ -50,6 +50,7 @@ public class BinanceFuturesPriceNormalizerService {
     private final boolean enginePriceEnabled;
     private final boolean enginePriceAllowStale;
     private final Cache<String, BinancePriceReference> cache;
+    private final Cache<String, BinancePriceReference> lastGoodCache;
     private final Cache<String, Boolean> missCache;
 
     public BinanceFuturesPriceNormalizerService(
@@ -63,6 +64,8 @@ public class BinanceFuturesPriceNormalizerService {
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-timeout-ms:350}") int timeoutMs,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-cache-ttl-ms:750}") long cacheTtlMs,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-cache-size:2048}") long cacheSize,
+            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-last-good-cache-ttl-ms:300000}") long lastGoodCacheTtlMs,
+            @Value("${hyperliquid.direct-ingest.origin-store.binance-price-last-good-cache-size:4096}") long lastGoodCacheSize,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-miss-cache-ttl-ms:60000}") long missCacheTtlMs,
             @Value("${hyperliquid.direct-ingest.origin-store.binance-price-miss-cache-size:4096}") long missCacheSize
     ) {
@@ -86,12 +89,16 @@ public class BinanceFuturesPriceNormalizerService {
                 .expireAfterWrite(Duration.ofMillis(Math.max(1L, cacheTtlMs)))
                 .maximumSize(Math.max(128L, cacheSize))
                 .build();
+        this.lastGoodCache = Caffeine.newBuilder()
+                .expireAfterWrite(Duration.ofMillis(Math.max(this.cacheTtlMs, lastGoodCacheTtlMs)))
+                .maximumSize(Math.max(128L, lastGoodCacheSize))
+                .build();
         this.missCache = Caffeine.newBuilder()
                 .expireAfterWrite(Duration.ofMillis(Math.max(1000L, missCacheTtlMs)))
                 .maximumSize(Math.max(128L, missCacheSize))
                 .build();
-        log.info("event=hyperliquid.origin_store.price_normalizer.config enabled={} enginePriceEnabled={} enginePriceAllowStale={} baseUrl={} timeoutMs={} cacheTtlMs={} cacheSize={} missCacheTtlMs={} missCacheSize={}",
-                enabled, enginePriceEnabled, enginePriceAllowStale, safeLog(baseUrl), Math.max(50, timeoutMs), this.cacheTtlMs, Math.max(128L, cacheSize), Math.max(1000L, missCacheTtlMs), Math.max(128L, missCacheSize));
+        log.info("event=hyperliquid.origin_store.price_normalizer.config enabled={} enginePriceEnabled={} enginePriceAllowStale={} baseUrl={} timeoutMs={} cacheTtlMs={} cacheSize={} lastGoodCacheTtlMs={} lastGoodCacheSize={} missCacheTtlMs={} missCacheSize={}",
+                enabled, enginePriceEnabled, enginePriceAllowStale, safeLog(baseUrl), Math.max(50, timeoutMs), this.cacheTtlMs, Math.max(128L, cacheSize), Math.max(this.cacheTtlMs, lastGoodCacheTtlMs), Math.max(128L, lastGoodCacheSize), Math.max(1000L, missCacheTtlMs), Math.max(128L, missCacheSize));
     }
 
     /**
@@ -128,19 +135,27 @@ public class BinanceFuturesPriceNormalizerService {
         if (cached != null) {
             return Optional.of(cached.withSource("binance_cache"));
         }
+        BinancePriceReference lastGood = lastGoodCache.getIfPresent(cacheKey);
         if (Boolean.TRUE.equals(missCache.getIfPresent(cacheKey))) {
-            return Optional.empty();
+            return lastGood != null && isPositive(lastGood.price())
+                    ? Optional.of(lastGood.withSource("last_good_cache"))
+                    : Optional.empty();
         }
 
         if (Boolean.TRUE.equals(missCache.getIfPresent(canonical))) {
             missCache.put(cacheKey, Boolean.TRUE);
-            return Optional.empty();
+            return lastGood != null && isPositive(lastGood.price())
+                    ? Optional.of(lastGood.withSource("last_good_cache"))
+                    : Optional.empty();
         }
 
-        Optional<BinancePriceReference> fetched = fetch(canonical, symbol, contractMultiplier);
+        Optional<BinancePriceReference> fetched = fetch(canonical, symbol, contractMultiplier, lastGood);
         if (fetched.isPresent()) {
             BinancePriceReference price = fetched.get();
             cache.put(cacheKey, price);
+            if (isPositive(price.price())) {
+                lastGoodCache.put(cacheKey, price);
+            }
             return Optional.of(price);
         }
         return Optional.empty();
@@ -154,7 +169,10 @@ public class BinanceFuturesPriceNormalizerService {
         }
     }
 
-    private Optional<BinancePriceReference> fetch(String canonicalSymbol, String rawSymbol, BigDecimal contractMultiplier) {
+    private Optional<BinancePriceReference> fetch(String canonicalSymbol,
+                                                  String rawSymbol,
+                                                  BigDecimal contractMultiplier,
+                                                  BinancePriceReference lastGood) {
         long startedNs = System.nanoTime();
         Optional<BinancePriceReference> enginePrice = fetchFromEngine(canonicalSymbol, rawSymbol, contractMultiplier, startedNs);
         if (enginePrice.isPresent()) {
@@ -168,13 +186,13 @@ public class BinanceFuturesPriceNormalizerService {
                     .retrieve()
                     .body(String.class);
             if (body == null || body.isBlank()) {
-                return Optional.empty();
+                return fallbackLastGood(canonicalSymbol, lastGood, startedNs, null, null, "blank_body");
             }
             JsonNode node = objectMapper.readTree(body);
             String rawPrice = node.path("price").asText(null);
             BigDecimal contractPrice = rawPrice == null ? ZERO : new BigDecimal(rawPrice);
             if (contractPrice.compareTo(ZERO) <= 0) {
-                return Optional.empty();
+                return fallbackLastGood(canonicalSymbol, lastGood, startedNs, null, null, "non_positive_price");
             }
             BigDecimal safeMultiplier = contractMultiplier == null || contractMultiplier.compareTo(ZERO) <= 0 ? ONE : contractMultiplier;
             BigDecimal unitPrice = contractPrice.divide(safeMultiplier, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
@@ -199,18 +217,31 @@ public class BinanceFuturesPriceNormalizerService {
                 missCache.put(canonicalSymbol, Boolean.TRUE);
                 log.debug("event=hyperliquid.origin_store.binance_price.invalid_symbol symbol={} httpStatus={} elapsedMs={}",
                         safeLog(canonicalSymbol), ex.getStatusCode().value(), elapsedMs(startedNs));
-                return Optional.empty();
+                return fallbackLastGood(canonicalSymbol, lastGood, startedNs, ex.getClass().getSimpleName(), ex.getStatusCode().value(), ex.getMessage());
             }
-            log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=origin_metrics_only errClass={} httpStatus={} errMsg=\"{}\" elapsedMs={} {}",
-                    safeLog(canonicalSymbol), ex.getClass().getSimpleName(), ex.getStatusCode().value(), safeLog(ex.getMessage()), elapsedMs(startedNs),
-                    CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
-            return Optional.empty();
+            return fallbackLastGood(canonicalSymbol, lastGood, startedNs, ex.getClass().getSimpleName(), ex.getStatusCode().value(), ex.getMessage());
         } catch (RestClientException | IllegalStateException | IllegalArgumentException | ArithmeticException | JsonProcessingException ex) {
-            log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=origin_metrics_only errClass={} errMsg=\"{}\" elapsedMs={} {}",
-                    safeLog(canonicalSymbol), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs),
-                    CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
-            return Optional.empty();
+            return fallbackLastGood(canonicalSymbol, lastGood, startedNs, ex.getClass().getSimpleName(), null, ex.getMessage());
         }
+    }
+
+    private Optional<BinancePriceReference> fallbackLastGood(String canonicalSymbol,
+                                                             BinancePriceReference lastGood,
+                                                             long startedNs,
+                                                             String errClass,
+                                                             Integer httpStatus,
+                                                             String errMsg) {
+        if (lastGood != null && isPositive(lastGood.price())) {
+            BinancePriceReference fallback = lastGood.withSource("last_good_cache");
+            log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=true fallbackSource=last_good_cache priceUsed={} copyImpact=safe errClass={} httpStatus={} errMsg=\"{}\" elapsedMs={} {}",
+                    safeLog(canonicalSymbol), fallback.price(), safeLog(errClass), httpStatus, safeLog(errMsg), elapsedMs(startedNs),
+                    CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
+            return Optional.of(fallback);
+        }
+        log.warn("event=hyperliquid.origin_store.binance_price.failed reasonCode=binance_price_failed symbol={} fallbackUsed=false fallbackSource=none priceUsed=null copyImpact=price_unavailable errClass={} httpStatus={} errMsg=\"{}\" elapsedMs={} {}",
+                safeLog(canonicalSymbol), safeLog(errClass), httpStatus, safeLog(errMsg), elapsedMs(startedNs),
+                CopyLogAdvice.fields("binance_price_failed", CopyLogAdvice.context(null, null, null, null, null, null, null, "binance_price")));
+        return Optional.empty();
     }
 
     private Optional<BinancePriceReference> fetchFromEngine(String canonicalSymbol,
@@ -350,6 +381,10 @@ public class BinanceFuturesPriceNormalizerService {
 
     private long elapsedMs(long startedNs) {
         return Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
+    }
+
+    private boolean isPositive(BigDecimal value) {
+        return value != null && value.compareTo(ZERO) > 0;
     }
 
     private String safeLog(String value) {
