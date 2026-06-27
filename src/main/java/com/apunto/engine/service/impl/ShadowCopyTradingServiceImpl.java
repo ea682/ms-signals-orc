@@ -19,7 +19,13 @@ import com.apunto.engine.repository.ShadowCopyOperationRepository;
 import com.apunto.engine.repository.ShadowPositionStateRepository;
 import com.apunto.engine.repository.ShadowWalletProfileValidationRepository;
 import com.apunto.engine.service.ShadowCopyTradingService;
+import com.apunto.engine.service.copy.accounting.AccountingMode;
+import com.apunto.engine.service.copy.accounting.CopyAccountingInput;
+import com.apunto.engine.service.copy.accounting.CopyAccountingResult;
+import com.apunto.engine.service.copy.accounting.CopyPositionAccountingService;
+import com.apunto.engine.service.copy.accounting.PositionDeltaType;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.shared.enums.PositionSide;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -97,6 +103,14 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return of("SHADOW_POSITION_RESIZED", "POSITION_RESIZED", null, shadowPositionId, true);
         }
 
+        static ShadowPositionImpact reduced(BigDecimal pnl, UUID shadowPositionId) {
+            return of("SHADOW_POSITION_REDUCED", "POSITION_REDUCED", pnl, shadowPositionId, true);
+        }
+
+        static ShadowPositionImpact resizeNoop(UUID shadowPositionId) {
+            return of("SHADOW_RESIZE_NOOP", "NOOP", null, shadowPositionId, true);
+        }
+
         static ShadowPositionImpact closed(BigDecimal pnl, UUID shadowPositionId) {
             return of("SHADOW_POSITION_CLOSED", "POSITION_CLOSED", pnl, shadowPositionId, true);
         }
@@ -132,6 +146,10 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         static ShadowPositionImpact priceMissing(String reasonCode) {
             return of(reasonCode, "PRICE_MISSING", null, null, false);
         }
+
+        static ShadowPositionImpact entryPriceMissing(UUID shadowPositionId) {
+            return of("ENTRY_PRICE_MISSING", "ENTRY_PRICE_MISSING", null, shadowPositionId, false);
+        }
     }
 
     private final ShadowCopyAllocationRepository shadowAllocationRepository;
@@ -141,6 +159,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     private final CopyWalletProfileRepository copyWalletProfileRepository;
     private final ShadowWalletProfileValidationRepository shadowProfileValidationRepository;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
+    private final CopyPositionAccountingService copyPositionAccountingService;
 
     @Value("${metric-wallet.shadow.separate-enabled:true}")
     private boolean separateShadowEnabled;
@@ -740,10 +759,12 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         BigDecimal eventSlippageUsd = firstNonNull(impact.eventSlippageUsd(), ZERO);
         ShadowCopyOperationEntity shadowOperation = null;
         if (impact.positionUpdated()) {
-            if (action == CopyJobAction.CLOSE) {
+            if (isClosedImpact(impact)) {
                 shadowOperation = closeShadowOperation(allocation, op, eventTime, originId, typeOperation, price, impact.realizedPnlUsd());
+            } else if (isReducedImpact(impact)) {
+                shadowOperation = reduceShadowOperation(allocation, op, eventTime, originId, typeOperation, impact.resultingQty(), price, eventSlippageUsd, impact.realizedPnlUsd());
             } else {
-                shadowOperation = upsertOpenShadowOperation(allocation, op, deltaType, eventTime, originId, typeOperation, qty, notional, price, eventSlippageUsd);
+                shadowOperation = upsertOpenShadowOperation(allocation, op, deltaType, eventTime, originId, typeOperation, impact.resultingQty(), notional, price, eventSlippageUsd);
             }
         }
 
@@ -838,6 +859,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             BigDecimal price,
             BigDecimal slippageUsd
     ) {
+        BigDecimal resultingQty = firstNonNull(qty, ZERO).abs();
+        BigDecimal resultingNotional = positiveOrFallback(resultingQty.multiply(firstNonNull(price, ZERO)), notional);
         boolean lifecycleStart = deltaType == HyperliquidDeltaType.OPEN
                 || deltaType == HyperliquidDeltaType.FLIP
                 || deltaType == HyperliquidDeltaType.UNKNOWN;
@@ -862,16 +885,53 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                         .active(true)
                         .status(lifecycleStart ? "OPEN" : "OPEN_RECOVERED")
                         .build());
-        shadowOperation.setSizePar(qty);
-        shadowOperation.setSizeUsd(notional);
+        BigDecimal previousQty = firstNonNull(shadowOperation.getSizePar(), ZERO).abs();
+        BigDecimal previousEntryPrice = shadowOperation.getPriceEntry();
+        shadowOperation.setSizePar(resultingQty);
+        shadowOperation.setSizeUsd(resultingNotional);
         if (shadowOperation.getPriceEntry() == null || lifecycleStart) {
             shadowOperation.setPriceEntry(price);
+        } else if (resultingQty.compareTo(previousQty) > 0) {
+            shadowOperation.setPriceEntry(copyPositionAccountingService.weightedAverageEntryPrice(previousQty, previousEntryPrice, resultingQty.subtract(previousQty), price, resultingQty));
         }
         shadowOperation.setSimulatedSlippageUsd(firstNonNull(shadowOperation.getSimulatedSlippageUsd(), ZERO).add(slippageUsd));
-        shadowOperation.setSimulatedFeeUsd(ZERO);
+        shadowOperation.setSimulatedFeeUsd(firstNonNull(shadowOperation.getSimulatedFeeUsd(), ZERO));
         shadowOperation.setActive(true);
         if (shadowOperation.getStatus() == null || shadowOperation.getStatus().isBlank()) {
             shadowOperation.setStatus("OPEN");
+        }
+        return shadowOperationRepository.save(shadowOperation);
+    }
+
+    private ShadowCopyOperationEntity reduceShadowOperation(
+            ShadowCopyAllocationEntity allocation,
+            OperacionDto op,
+            OffsetDateTime eventTime,
+            String originId,
+            String typeOperation,
+            BigDecimal resultingQty,
+            BigDecimal price,
+            BigDecimal slippageUsd,
+            BigDecimal realizedPnlUsd
+    ) {
+        ShadowCopyOperationEntity shadowOperation = findOpenShadowOperationForPosition(allocation, op.getParSymbol(), typeOperation)
+                .or(() -> findOpenShadowOperationByOrigin(allocation, originId, typeOperation))
+                .orElse(null);
+        if (shadowOperation == null) {
+            log.info("event=shadow_reduce_operation_missing originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} reasonCode=SHADOW_OPERATION_NOT_FOUND shadowImpact=POSITION_REDUCED_WITHOUT_OPERATION",
+                    originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), typeOperation);
+            return null;
+        }
+        BigDecimal safeResultingQty = firstNonNull(resultingQty, ZERO).abs();
+        shadowOperation.setSizePar(safeResultingQty);
+        shadowOperation.setSizeUsd(positiveOrFallback(safeResultingQty.multiply(firstNonNull(price, ZERO)), ZERO));
+        shadowOperation.setSimulatedSlippageUsd(firstNonNull(shadowOperation.getSimulatedSlippageUsd(), ZERO).add(firstNonNull(slippageUsd, ZERO)));
+        shadowOperation.setSimulatedFeeUsd(firstNonNull(shadowOperation.getSimulatedFeeUsd(), ZERO));
+        shadowOperation.setRealizedPnlUsd(firstNonNull(shadowOperation.getRealizedPnlUsd(), ZERO).add(firstNonNull(realizedPnlUsd, ZERO)));
+        shadowOperation.setActive(true);
+        shadowOperation.setStatus("OPEN");
+        if (shadowOperation.getDateCreation() == null) {
+            shadowOperation.setDateCreation(eventTime);
         }
         return shadowOperationRepository.save(shadowOperation);
     }
@@ -902,7 +962,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         shadowOperation.setStatus("CLOSED");
         shadowOperation.setDateClose(eventTime);
         shadowOperation.setPriceClose(price);
-        shadowOperation.setRealizedPnlUsd(realizedPnlUsd);
+        shadowOperation.setRealizedPnlUsd(firstNonNull(shadowOperation.getRealizedPnlUsd(), ZERO).add(firstNonNull(realizedPnlUsd, ZERO)));
         return shadowOperationRepository.save(shadowOperation);
     }
 
@@ -957,6 +1017,35 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         ));
     }
 
+    private static boolean isClosedImpact(ShadowPositionImpact impact) {
+        return impact != null && "SHADOW_POSITION_CLOSED".equals(impact.reasonCode());
+    }
+
+    private static boolean isReducedImpact(ShadowPositionImpact impact) {
+        return impact != null && "SHADOW_POSITION_REDUCED".equals(impact.reasonCode());
+    }
+
+    private BigDecimal resolveAvgEntryPrice(
+            ShadowCopyAllocationEntity allocation,
+            OperacionDto op,
+            String originId,
+            String positionSide,
+            ShadowPositionStateEntity state
+    ) {
+        BigDecimal stateEntry = state == null ? null : firstPositive(state.getEntryPrice());
+        if (isPositive(stateEntry)) {
+            return stateEntry;
+        }
+        if (allocation == null || op == null) {
+            return null;
+        }
+        return findOpenShadowOperationForPosition(allocation, op.getParSymbol(), positionSide)
+                .or(() -> findOpenShadowOperationByOrigin(allocation, originId, positionSide))
+                .map(ShadowCopyOperationEntity::getPriceEntry)
+                .filter(ShadowCopyTradingServiceImpl::isPositive)
+                .orElse(null);
+    }
+
     private boolean isWarmupEvent(ShadowCopyAllocationEntity allocation, OffsetDateTime eventTime) {
         if (allocation == null || eventTime == null || shadowWarmupMinutes <= 0) {
             return false;
@@ -982,7 +1071,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 allocation.setWalletLastOpenedAt(maxTime(allocation.getWalletLastOpenedAt(), effectiveTime));
                 allocation.setStrategyLastOpenedAt(maxTime(allocation.getStrategyLastOpenedAt(), effectiveTime));
             }
-            if ("CLOSE".equals(eventType)) {
+            if ("CLOSE".equals(eventType) || isClosedImpact(impact)) {
                 allocation.setWalletLastClosedAt(maxTime(allocation.getWalletLastClosedAt(), effectiveTime));
                 allocation.setStrategyLastClosedAt(maxTime(allocation.getStrategyLastClosedAt(), effectiveTime));
             }
@@ -1002,7 +1091,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                     profile.setWalletLastOpenedAt(maxTime(profile.getWalletLastOpenedAt(), effectiveTime));
                     profile.setStrategyLastOpenedAt(maxTime(profile.getStrategyLastOpenedAt(), effectiveTime));
                 }
-                if ("CLOSE".equals(eventType)) {
+                if ("CLOSE".equals(eventType) || isClosedImpact(impact)) {
                     profile.setWalletLastClosedAt(maxTime(profile.getWalletLastClosedAt(), effectiveTime));
                     profile.setStrategyLastClosedAt(maxTime(profile.getStrategyLastClosedAt(), effectiveTime));
                 }
@@ -1112,25 +1201,33 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             BigDecimal previousQty = firstNonNull(state.getQty(), qty, ZERO).abs();
             BigDecimal closeNotional = positiveOrFallback(previousQty.multiply(price), notional);
             BigDecimal closeSlippageUsd = slippageUsd(closeNotional);
+            BigDecimal avgEntryPrice = resolveAvgEntryPrice(allocation, op, originId, positionSide, state);
+            CopyAccountingResult accounting = applyShadowAccounting(op.getParSymbol(), positionSide, previousQty, ZERO, avgEntryPrice, price, ZERO, closeSlippageUsd, eventTime, "SHADOW_POSITION_CLOSED");
+            if (!accounting.accepted()) {
+                log.warn("event=shadow_close_rejected_missing_entry_price reasonCode=ENTRY_PRICE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} previousQty={} resultingQty=0 copyImpact=shadow_close_skipped",
+                        allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), positionSide, previousQty);
+                return ShadowPositionImpact.entryPriceMissing(state.getId())
+                        .withAccounting(previousQty, previousQty, ZERO, ZERO, ZERO);
+            }
+            BigDecimal grossRealizedPnl = accounting.grossRealizedPnlUsd();
+            BigDecimal netRealizedPnl = accounting.netRealizedPnlUsd();
             BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(closeSlippageUsd);
-            BigDecimal realizedPnl = shadowRealizedPnl(
-                    state.getPositionSide(),
-                    previousQty,
-                    firstNonNull(state.getEntryPrice(), op.getPrecioEntrada()),
-                    price
-            ).subtract(firstNonNull(state.getFeesUsd(), ZERO))
-                    .subtract(totalSlippage);
+            BigDecimal totalRealizedPnl = firstNonNull(state.getRealizedPnlUsd(), ZERO).add(netRealizedPnl).setScale(12, RoundingMode.HALF_UP);
             state.setStatus("CLOSED");
             state.setClosedAt(eventTime);
             state.setQty(ZERO);
+            state.setEntryPrice(accounting.newAvgEntryPrice());
+            state.setNotionalUsd(ZERO);
             state.setMarkPrice(price);
             state.setSlippageUsd(totalSlippage);
-            state.setRealizedPnlUsd(realizedPnl);
+            state.setRealizedPnlUsd(totalRealizedPnl);
             state.setLastSourceEventId(originId);
             shadowPositionStateRepository.save(state);
+            log.info("event=shadow_realized_pnl_calculated reasonCode=SHADOW_POSITION_CLOSED symbol={} side={} qtyClosed={} avgEntryPrice={} executionPrice={} formula={} grossRealizedPnlUsd={} netRealizedPnlUsd={}",
+                    op.getParSymbol(), positionSide, accounting.deltaClosedQty(), accounting.newAvgEntryPrice(), price, pnlFormula(positionSide), grossRealizedPnl, netRealizedPnl);
             log.info("event=shadow_position_closed originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} realizedPnlUsd={} reasonCode=SHADOW_POSITION_CLOSED shadowImpact=POSITION_CLOSED",
-                    originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, realizedPnl);
-            return ShadowPositionImpact.closed(realizedPnl, state.getId())
+                    originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, netRealizedPnl);
+            return ShadowPositionImpact.closed(netRealizedPnl, state.getId())
                     .withAccounting(previousQty, ZERO, previousQty, closeNotional, closeSlippageUsd);
         }
         if (state == null && (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE)) {
@@ -1173,15 +1270,110 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         BigDecimal previousQty = firstNonNull(state.getQty(), ZERO).abs();
         BigDecimal resultingQty = qty.abs();
         boolean resizeLike = !opened && (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE);
+        if (resizeLike && resultingQty.compareTo(previousQty) == 0) {
+            state.setMarkPrice(price);
+            state.setNotionalUsd(positiveOrFallback(resultingQty.multiply(price), state.getNotionalUsd()));
+            state.setLastSourceEventId(originId);
+            shadowPositionStateRepository.save(state);
+            log.info("event=shadow_resize_noop originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} previousQty={} resultingQty={} reasonCode=SHADOW_RESIZE_NOOP shadowImpact=NOOP",
+                    originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, previousQty, resultingQty);
+            return ShadowPositionImpact.resizeNoop(state.getId())
+                    .withAccounting(previousQty, resultingQty, ZERO, ZERO, ZERO);
+        }
+        if (resizeLike && resultingQty.compareTo(previousQty) < 0) {
+            BigDecimal avgEntryPrice = resolveAvgEntryPrice(allocation, op, originId, positionSide, state);
+            BigDecimal deltaClosedQty = previousQty.subtract(resultingQty).abs();
+            BigDecimal eventNotional = positiveOrFallback(deltaClosedQty.multiply(price), ZERO);
+            BigDecimal eventSlippageUsd = slippageUsd(eventNotional);
+            CopyAccountingResult accounting = applyShadowAccounting(
+                    op.getParSymbol(),
+                    positionSide,
+                    previousQty,
+                    resultingQty,
+                    avgEntryPrice,
+                    price,
+                    ZERO,
+                    eventSlippageUsd,
+                    eventTime,
+                    resultingQty.signum() == 0 ? "SHADOW_POSITION_CLOSED" : "SHADOW_POSITION_REDUCED"
+            );
+            if (!accounting.accepted()) {
+                log.warn("event=shadow_reduce_rejected_missing_entry_price reasonCode=ENTRY_PRICE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} previousQty={} resultingQty={} copyImpact=shadow_reduce_skipped",
+                        allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), positionSide, previousQty, resultingQty);
+                return ShadowPositionImpact.entryPriceMissing(state.getId())
+                        .withAccounting(previousQty, resultingQty, ZERO, ZERO, ZERO);
+            }
+            BigDecimal grossRealizedPnl = accounting.grossRealizedPnlUsd();
+            BigDecimal netRealizedPnl = accounting.netRealizedPnlUsd();
+            BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(eventSlippageUsd);
+            BigDecimal totalRealizedPnl = firstNonNull(state.getRealizedPnlUsd(), ZERO).add(netRealizedPnl).setScale(12, RoundingMode.HALF_UP);
+            if (resultingQty.signum() == 0) {
+                state.setStatus("CLOSED");
+                state.setClosedAt(eventTime);
+                state.setQty(ZERO);
+                state.setEntryPrice(accounting.newAvgEntryPrice());
+                state.setNotionalUsd(ZERO);
+                state.setMarkPrice(price);
+                state.setSlippageUsd(totalSlippage);
+                state.setRealizedPnlUsd(totalRealizedPnl);
+                state.setLastSourceEventId(originId);
+                shadowPositionStateRepository.save(state);
+                log.info("event=shadow_realized_pnl_calculated reasonCode=SHADOW_POSITION_CLOSED symbol={} side={} qtyClosed={} avgEntryPrice={} executionPrice={} formula={} grossRealizedPnlUsd={} netRealizedPnlUsd={}",
+                        op.getParSymbol(), positionSide, accounting.deltaClosedQty(), accounting.newAvgEntryPrice(), price, pnlFormula(positionSide), grossRealizedPnl, netRealizedPnl);
+                log.info("event=shadow_position_closed originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} realizedPnlUsd={} reasonCode=SHADOW_POSITION_CLOSED shadowImpact=POSITION_CLOSED source=resize_to_zero",
+                        originId, allocation.getId(), allocation.getWalletProfileId(), state.getId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, netRealizedPnl);
+                return ShadowPositionImpact.closed(netRealizedPnl, state.getId())
+                        .withAccounting(previousQty, ZERO, deltaClosedQty, eventNotional, eventSlippageUsd);
+            }
+            state.setQty(resultingQty);
+            state.setEntryPrice(accounting.newAvgEntryPrice());
+            state.setMarkPrice(price);
+            state.setNotionalUsd(positiveOrFallback(resultingQty.multiply(price), ZERO));
+            state.setSlippageUsd(totalSlippage);
+            state.setRealizedPnlUsd(totalRealizedPnl);
+            state.setStatus("OPEN");
+            state.setLastSourceEventId(originId);
+            shadowPositionStateRepository.save(state);
+            log.info("event=shadow_realized_pnl_calculated reasonCode=SHADOW_POSITION_REDUCED symbol={} side={} qtyClosed={} avgEntryPrice={} executionPrice={} formula={} grossRealizedPnlUsd={} netRealizedPnlUsd={}",
+                    op.getParSymbol(), positionSide, accounting.deltaClosedQty(), accounting.newAvgEntryPrice(), price, pnlFormula(positionSide), grossRealizedPnl, netRealizedPnl);
+            log.info("event=shadow_position_reduced reasonCode=SHADOW_POSITION_REDUCED wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} previousQty={} resultingQty={} deltaClosedQty={} avgEntryPrice={} executionPrice={} grossRealizedPnlUsd={} feeUsd={} slippageUsd={} netRealizedPnlUsd={}",
+                    allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), positionSide,
+                    previousQty, resultingQty, accounting.deltaClosedQty(), accounting.newAvgEntryPrice(), price, grossRealizedPnl, accounting.feeUsd(), accounting.slippageUsd(), netRealizedPnl);
+            return ShadowPositionImpact.reduced(netRealizedPnl, state.getId())
+                    .withAccounting(previousQty, resultingQty, deltaClosedQty, eventNotional, eventSlippageUsd);
+        }
         BigDecimal eventQtyExecuted = resizeLike ? resultingQty.subtract(previousQty).abs() : resultingQty;
         BigDecimal eventNotional = resizeLike ? eventQtyExecuted.multiply(price).abs() : notional;
         eventNotional = positiveOrFallback(eventNotional, resizeLike ? ZERO : notional);
         BigDecimal eventSlippageUsd = slippageUsd(eventNotional);
+        CopyAccountingResult accounting = applyShadowAccounting(
+                op.getParSymbol(),
+                positionSide,
+                previousQty,
+                resultingQty,
+                state.getEntryPrice(),
+                price,
+                ZERO,
+                eventSlippageUsd,
+                eventTime,
+                opened
+                        ? (deltaType == HyperliquidDeltaType.FLIP ? "SHADOW_POSITION_OPENED_BY_FLIP" : "SHADOW_POSITION_OPENED")
+                        : "SHADOW_POSITION_RESIZED"
+        );
+        if (accounting.accepted()) {
+            eventQtyExecuted = accounting.deltaType() == PositionDeltaType.OPEN || accounting.deltaType() == PositionDeltaType.INCREASE
+                    ? accounting.deltaAddedQty()
+                    : eventQtyExecuted;
+            eventNotional = accounting.deltaNotionalUsd();
+        }
+        BigDecimal entryPrice = accounting.accepted()
+                ? accounting.newAvgEntryPrice()
+                : firstPositive(state.getEntryPrice(), price);
 
         state.setQty(resultingQty);
-        state.setEntryPrice(price);
-        state.setMarkPrice(firstNonNull(op.getPrecioMercado(), price));
-        state.setNotionalUsd(notional);
+        state.setEntryPrice(entryPrice);
+        state.setMarkPrice(price);
+        state.setNotionalUsd(positiveOrFallback(resultingQty.multiply(price), notional));
         state.setSlippageUsd(firstNonNull(state.getSlippageUsd(), ZERO).add(eventSlippageUsd));
         state.setLastSourceEventId(originId);
         shadowPositionStateRepository.save(state);
@@ -1233,20 +1425,30 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             closedAny = true;
             BigDecimal previousQty = firstNonNull(state.getQty(), ZERO).abs();
             BigDecimal previousNotional = positiveOrFallback(previousQty.multiply(closePrice), firstNonNull(state.getNotionalUsd(), op.getNotionalUsd(), op.getMarginUsedUsd(), ZERO).abs());
-            BigDecimal realizedPnl = shadowRealizedPnl(
-                    state.getPositionSide(),
-                    state.getQty(),
-                    state.getEntryPrice(),
-                    closePrice
-            ).subtract(firstNonNull(state.getFeesUsd(), ZERO))
-                    .subtract(firstNonNull(state.getSlippageUsd(), ZERO));
+            BigDecimal closeSlippageUsd = slippageUsd(previousNotional);
+            BigDecimal avgEntryPrice = resolveAvgEntryPrice(allocation, op, originId, state.getPositionSide(), state);
+            CopyAccountingResult accounting = applyShadowAccounting(op.getParSymbol(), state.getPositionSide(), previousQty, ZERO, avgEntryPrice, closePrice, ZERO, closeSlippageUsd, eventTime, "SHADOW_POSITION_CLOSED_BY_FLIP");
+            if (!accounting.accepted()) {
+                log.warn("event=shadow_close_rejected_missing_entry_price reasonCode=ENTRY_PRICE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} previousQty={} resultingQty=0 copyImpact=shadow_flip_close_skipped",
+                        allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), state.getPositionSide(), previousQty);
+                continue;
+            }
+            BigDecimal grossRealizedPnl = accounting.grossRealizedPnlUsd();
+            BigDecimal realizedPnl = accounting.netRealizedPnlUsd();
+            BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(closeSlippageUsd);
+            BigDecimal totalRealizedPnl = firstNonNull(state.getRealizedPnlUsd(), ZERO).add(realizedPnl).setScale(12, RoundingMode.HALF_UP);
             state.setStatus("CLOSED");
             state.setClosedAt(eventTime);
             state.setQty(ZERO);
+            state.setEntryPrice(accounting.newAvgEntryPrice());
             state.setMarkPrice(closePrice);
-            state.setRealizedPnlUsd(realizedPnl);
+            state.setNotionalUsd(ZERO);
+            state.setSlippageUsd(totalSlippage);
+            state.setRealizedPnlUsd(totalRealizedPnl);
             state.setLastSourceEventId(originId);
             shadowPositionStateRepository.save(state);
+            log.info("event=shadow_realized_pnl_calculated reasonCode=SHADOW_POSITION_CLOSED_BY_FLIP symbol={} side={} qtyClosed={} avgEntryPrice={} executionPrice={} formula={} grossRealizedPnlUsd={} netRealizedPnlUsd={}",
+                    op.getParSymbol(), state.getPositionSide(), accounting.deltaClosedQty(), accounting.newAvgEntryPrice(), closePrice, pnlFormula(state.getPositionSide()), grossRealizedPnl, realizedPnl);
             ShadowCopyOperationEntity closedOperation = closeShadowOperationForPosition(
                     allocation,
                     op.getParSymbol(),
@@ -1266,7 +1468,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                     closePrice,
                     previousQty,
                     previousNotional,
-                    realizedPnl
+                    realizedPnl,
+                    closeSlippageUsd
             );
             ShadowPositionImpact closedImpact = ShadowPositionImpact.closed(realizedPnl, state.getId());
             updateRuntimeActivity(allocation, "CLOSE", closedImpact, eventTime);
@@ -1303,7 +1506,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         shadowOperation.setStatus("CLOSED");
         shadowOperation.setDateClose(eventTime);
         shadowOperation.setPriceClose(price);
-        shadowOperation.setRealizedPnlUsd(realizedPnlUsd);
+        shadowOperation.setRealizedPnlUsd(firstNonNull(shadowOperation.getRealizedPnlUsd(), ZERO).add(firstNonNull(realizedPnlUsd, ZERO)));
         return shadowOperationRepository.save(shadowOperation);
     }
 
@@ -1317,7 +1520,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             BigDecimal closePrice,
             BigDecimal previousQty,
             BigDecimal previousNotional,
-            BigDecimal realizedPnl
+            BigDecimal realizedPnl,
+            BigDecimal closeSlippageUsd
     ) {
         String previousSide = state.getPositionSide();
         String eventType = "SHADOW_POSITION_CLOSED";
@@ -1357,9 +1561,9 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .previousQty(previousQty)
                 .resultingQty(ZERO)
                 .realizedPnlUsd(realizedPnl)
-                .feeUsd(firstNonNull(state.getFeesUsd(), ZERO))
+                .feeUsd(ZERO)
                 .slippageBps(BigDecimal.valueOf(shadowSlippageBps).setScale(6, RoundingMode.HALF_UP))
-                .slippageUsd(firstNonNull(state.getSlippageUsd(), ZERO))
+                .slippageUsd(firstNonNull(closeSlippageUsd, ZERO))
                 .decision("SIMULATED")
                 .decisionReason("shadow_flip_closed_previous_side")
                 .source("shadow_copy")
@@ -2029,16 +2233,50 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .divide(BigDecimal.valueOf(10_000), 12, RoundingMode.HALF_UP);
     }
 
-    private static BigDecimal shadowRealizedPnl(String side, BigDecimal qty, BigDecimal entryPrice, BigDecimal closePrice) {
-        BigDecimal safeQty = qty == null ? ZERO : qty.abs();
-        if (safeQty.signum() <= 0 || entryPrice == null || closePrice == null) {
-            return ZERO;
+    private CopyAccountingResult applyShadowAccounting(
+            String symbol,
+            String side,
+            BigDecimal previousQty,
+            BigDecimal resultingQty,
+            BigDecimal avgEntryPrice,
+            BigDecimal executionPrice,
+            BigDecimal feeUsd,
+            BigDecimal slippageUsd,
+            OffsetDateTime eventTime,
+            String shadowReasonCode
+    ) {
+        CopyAccountingResult result = copyPositionAccountingService.apply(new CopyAccountingInput(
+                symbol,
+                parsePositionSide(side),
+                previousQty,
+                resultingQty,
+                avgEntryPrice,
+                executionPrice,
+                feeUsd,
+                slippageUsd,
+                eventTime == null ? null : eventTime.toInstant(),
+                AccountingMode.SHADOW
+        ));
+        if (result.accepted()) {
+            log.info("event=shadow_copy_accounting_applied reasonCode={} symbol={} side={} deltaType={}",
+                    shadowReasonCode, symbol, side, result.deltaType());
         }
-        String normalizedSide = normalizeStatus(side);
-        if ("SHORT".equals(normalizedSide)) {
-            return entryPrice.subtract(closePrice).multiply(safeQty).setScale(12, RoundingMode.HALF_UP);
+        return result;
+    }
+
+    private PositionSide parsePositionSide(String side) {
+        String normalized = normalizeStatus(side);
+        if ("LONG".equals(normalized)) {
+            return PositionSide.LONG;
         }
-        return closePrice.subtract(entryPrice).multiply(safeQty).setScale(12, RoundingMode.HALF_UP);
+        if ("SHORT".equals(normalized)) {
+            return PositionSide.SHORT;
+        }
+        return null;
+    }
+
+    private String pnlFormula(String side) {
+        return copyPositionAccountingService.pnlFormula(parsePositionSide(side));
     }
 
     @SafeVarargs
