@@ -10,6 +10,7 @@ import com.apunto.engine.dto.client.NewOperationClientRequest;
 import com.apunto.engine.service.ProcesBinanceService;
 import com.apunto.engine.shared.dto.ApiResponse;
 import com.apunto.engine.shared.enums.OrderType;
+import com.apunto.engine.shared.exception.BinanceApiReadinessException;
 import com.apunto.engine.shared.exception.BinanceRateLimitException;
 import com.apunto.engine.shared.exception.CopyBinanceClientException;
 import com.apunto.engine.shared.exception.CopyOrderRejectedException;
@@ -160,6 +161,14 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
             if (err.httpStatus() == 429 || "BINANCE_RATE_LIMIT".equals(err.errorCode())) {
                 throw new BinanceRateLimitException(
                         "Binance rate limit ejecutando orden: " + safeLog(err.binanceMsg()),
+                        ex,
+                        details
+                );
+            }
+
+            if (isBinanceApiReadinessFailure(err)) {
+                throw new BinanceApiReadinessException(
+                        "Binance API key/IP/permisos Futures invalidos para operar: " + safeLog(err.binanceMsg()),
                         ex,
                         details
                 );
@@ -361,6 +370,14 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 );
             }
 
+            if (isBinanceApiReadinessFailure(err)) {
+                throw new BinanceApiReadinessException(
+                        "Binance API key/IP/permisos Futures invalidos para cerrar/reducir: " + safeLog(err.binanceMsg()),
+                        ex,
+                        details
+                );
+            }
+
             if ("BINANCE_CLIENT_ERROR".equals(err.errorCode()) || err.httpStatus() < 500) {
                 throw new CopyOrderRejectedException(
                         "Binance rechazó el cierre/reducción: " + safeLog(err.binanceMsg()),
@@ -553,6 +570,21 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         }
         String lower = msg.toLowerCase(java.util.Locale.ROOT);
         return lower.contains("notional") && lower.contains("no smaller than");
+    }
+
+    private boolean isBinanceApiReadinessFailure(BinanceHttpError err) {
+        if (err == null) {
+            return false;
+        }
+        if ("-2015".equals(err.binanceCode())) {
+            return true;
+        }
+        String msg = err.binanceMsg() == null ? "" : err.binanceMsg().toLowerCase(java.util.Locale.ROOT);
+        return (err.httpStatus() == 401 || err.httpStatus() == 403)
+                && (msg.contains("invalid api-key")
+                || msg.contains("ip")
+                || msg.contains("permission")
+                || msg.contains("permissions"));
     }
 
     private String reduceOnlyLogValue(Boolean reduceOnly) {

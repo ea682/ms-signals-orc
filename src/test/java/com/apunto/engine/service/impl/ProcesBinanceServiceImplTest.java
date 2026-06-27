@@ -16,14 +16,19 @@ import com.apunto.engine.shared.dto.ApiResponse;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
+import com.apunto.engine.shared.exception.BinanceApiReadinessException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ProcesBinanceServiceImplTest {
@@ -89,11 +94,84 @@ class ProcesBinanceServiceImplTest {
         assertEquals("BTCUSDT", symbols.get(0).getSymbol());
     }
 
+    @Test
+    void openInvalidApiKeyThrowsReadinessException() {
+        CapturingBinanceClient client = new CapturingBinanceClient();
+        CapturingBinanceClient closeClient = new CapturingBinanceClient();
+        client.openFailure = invalidApiKeyResponse("/api/binance/futures/order");
+        ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+
+        BinanceApiReadinessException ex = assertThrows(BinanceApiReadinessException.class, () ->
+                service.operationPosition(OperationDto.builder()
+                        .symbol("BTCUSDT")
+                        .side(Side.BUY)
+                        .type(OrderType.MARKET)
+                        .positionSide(PositionSide.LONG)
+                        .quantity("0.01")
+                        .reduceOnly(false)
+                        .apiKey("bad-api-key")
+                        .secret("secret")
+                        .build()));
+
+        assertEquals(BinanceApiReadinessException.REASON_CODE, ex.getErrCode());
+        assertEquals("-2015", ex.getDetails().get("binanceCode"));
+    }
+
+    @Test
+    void closeInvalidApiKeyThrowsReadinessException() {
+        CapturingBinanceClient client = new CapturingBinanceClient();
+        CapturingBinanceClient closeClient = new CapturingBinanceClient();
+        closeClient.closeFailure = invalidApiKeyResponse("/api/binance/futures/close-position");
+        ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+
+        BinanceApiReadinessException ex = assertThrows(BinanceApiReadinessException.class, () ->
+                service.operationPosition(OperationDto.builder()
+                        .symbol("BTCUSDT")
+                        .side(Side.SELL)
+                        .type(OrderType.MARKET)
+                        .positionSide(PositionSide.LONG)
+                        .quantity("0.01")
+                        .reduceOnly(true)
+                        .apiKey("bad-api-key")
+                        .secret("secret")
+                        .build()));
+
+        assertEquals(BinanceApiReadinessException.REASON_CODE, ex.getErrCode());
+        assertEquals("-2015", ex.getDetails().get("binanceCode"));
+        assertTrue(closeClient.closeCalled);
+    }
+
+    private static RestClientResponseException invalidApiKeyResponse(String path) {
+        String body = """
+                {
+                  "data": {
+                    "errorCode": "BINANCE_CLIENT_ERROR",
+                    "details": {
+                      "binanceCode": "-2015",
+                      "binanceMsg": "Invalid API-key, IP, or permissions for action"
+                    }
+                  },
+                  "traceId": "trace-invalid-key",
+                  "path": "%s"
+                }
+                """.formatted(path);
+        return new RestClientResponseException(
+                "Unauthorized",
+                401,
+                "Unauthorized",
+                HttpHeaders.EMPTY,
+                body.getBytes(StandardCharsets.UTF_8),
+                StandardCharsets.UTF_8
+        );
+    }
+
     private static final class CapturingBinanceClient implements BinanceClient {
         private NewOperationClientRequest lastRequest;
         private CloseOperationClientRequest lastCloseRequest;
         private String lastSymbolsApiKey;
         private boolean closeCalled;
+        private RuntimeException openFailure;
+        private RuntimeException closeFailure;
 
         @Override
         public ApiResponse<BinanceFuturesOrderClientResponse> openPosition(
@@ -105,6 +183,9 @@ class ProcesBinanceServiceImplTest {
                 String traceId,
                 NewOperationClientRequest request
         ) {
+            if (openFailure != null) {
+                throw openFailure;
+            }
             this.lastRequest = request;
             return ApiResponse.<BinanceFuturesOrderClientResponse>builder()
                     .statusCode(200)
@@ -123,6 +204,9 @@ class ProcesBinanceServiceImplTest {
                 CloseOperationClientRequest request
         ) {
             this.closeCalled = true;
+            if (closeFailure != null) {
+                throw closeFailure;
+            }
             this.lastCloseRequest = request;
             return ApiResponse.<BinanceFuturesOrderClientResponse>builder()
                     .statusCode(200)

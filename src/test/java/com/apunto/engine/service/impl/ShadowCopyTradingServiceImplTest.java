@@ -15,6 +15,7 @@ import com.apunto.engine.repository.ShadowCopyOperationRepository;
 import com.apunto.engine.repository.ShadowPositionStateRepository;
 import com.apunto.engine.repository.ShadowWalletProfileValidationRepository;
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.service.copy.accounting.CopyPositionAccountingService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import org.junit.jupiter.api.Test;
 
@@ -302,7 +303,8 @@ class ShadowCopyTradingServiceImplTest {
                     return unexpected(method);
                 }),
                 shadowProfileValidationRepository(),
-                new CopyStrategyRuntimeRouter()
+                new CopyStrategyRuntimeRouter(),
+                accountingService()
         );
         setField(service, "separateShadowEnabled", true);
         setField(service, "shadowVersion", 1);
@@ -424,6 +426,7 @@ class ShadowCopyTradingServiceImplTest {
         assertEquals(new BigDecimal("100"), event.getNotionalUsd());
         assertEquals(new BigDecimal("0.020000000000"), event.getSlippageUsd());
         assertEquals(BigDecimal.ZERO, event.getFeeUsd());
+        assertNull(event.getRealizedPnlUsd());
         assertEquals(new BigDecimal("150"), runtime.previousState().getQty());
         assertEquals(new BigDecimal("300"), runtime.previousOperation().getSizeUsd());
     }
@@ -438,12 +441,180 @@ class ShadowCopyTradingServiceImplTest {
         assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("100"), new BigDecimal("2"))));
 
         ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
-        assertEquals("SHADOW_POSITION_RESIZED", event.getReasonCode());
+        assertEquals("SHADOW_RESIZE_NOOP", event.getReasonCode());
         assertEquals(new BigDecimal("100"), event.getPreviousQty());
         assertEquals(new BigDecimal("100"), event.getResultingQty());
         assertEquals(BigDecimal.ZERO, event.getQtyExecuted());
         assertEquals(BigDecimal.ZERO, event.getNotionalUsd());
         assertEquals(BigDecimal.ZERO, event.getSlippageUsd());
+    }
+
+    @Test
+    void shortPartialReduceRealizesPositivePnlAndKeepsPositionOpen() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.SHORT);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("16.87838"));
+        runtime.previousState().setEntryPrice(new BigDecimal("60072"));
+        runtime.previousState().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousState().setSlippageUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSizePar(new BigDecimal("16.87838"));
+        runtime.previousOperation().setPriceEntry(new BigDecimal("60072"));
+        runtime.previousOperation().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSimulatedSlippageUsd(BigDecimal.ZERO);
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.SHORT, new BigDecimal("5.04902"), new BigDecimal("59969"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("SHADOW_POSITION_REDUCED", event.getReasonCode());
+        assertEquals("SIMULATED", event.getDecision());
+        assertEquals(new BigDecimal("16.87838"), event.getPreviousQty());
+        assertEquals(new BigDecimal("5.04902"), event.getResultingQty());
+        assertEquals(new BigDecimal("11.82936"), event.getQtyExecuted());
+        assertEquals(new BigDecimal("709394.88984"), event.getNotionalUsd());
+        assertEquals(new BigDecimal("141.878977968000"), event.getSlippageUsd());
+        assertEquals(new BigDecimal("1076.545102032000"), event.getRealizedPnlUsd());
+        assertEquals("OPEN", runtime.previousState().getStatus());
+        assertEquals(new BigDecimal("5.04902"), runtime.previousState().getQty());
+        assertEquals(new BigDecimal("1076.545102032000"), runtime.previousState().getRealizedPnlUsd());
+        assertEquals("OPEN", runtime.previousOperation().getStatus());
+        assertTrue(runtime.previousOperation().isActive());
+        assertEquals(new BigDecimal("5.04902"), runtime.previousOperation().getSizePar());
+        assertEquals(new BigDecimal("1076.545102032000"), runtime.previousOperation().getRealizedPnlUsd());
+    }
+
+    @Test
+    void shortFinalCloseRealizesOnlyRemainingDeltaPnl() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.SHORT);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("5.04902"));
+        runtime.previousState().setEntryPrice(new BigDecimal("60072"));
+        runtime.previousState().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousState().setSlippageUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSizePar(new BigDecimal("5.04902"));
+        runtime.previousOperation().setPriceEntry(new BigDecimal("60072"));
+        runtime.previousOperation().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSimulatedSlippageUsd(BigDecimal.ZERO);
+
+        assertEquals(1, runtime.service().recordShadowEvent(closeEvent(UUID.randomUUID(), PositionSide.SHORT, new BigDecimal("59970"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("SHADOW_POSITION_CLOSED", event.getReasonCode());
+        assertEquals(new BigDecimal("5.04902"), event.getPreviousQty());
+        assertEquals(BigDecimal.ZERO, event.getResultingQty());
+        assertEquals(new BigDecimal("5.04902"), event.getQtyExecuted());
+        assertEquals(new BigDecimal("302789.72940"), event.getNotionalUsd());
+        assertEquals(new BigDecimal("60.557945880000"), event.getSlippageUsd());
+        assertEquals(new BigDecimal("454.442094120000"), event.getRealizedPnlUsd());
+        assertEquals("CLOSED", runtime.previousState().getStatus());
+        assertEquals(BigDecimal.ZERO, runtime.previousState().getQty());
+        assertEquals(new BigDecimal("454.442094120000"), runtime.previousState().getRealizedPnlUsd());
+        assertEquals("CLOSED", runtime.previousOperation().getStatus());
+        assertFalse(runtime.previousOperation().isActive());
+        assertEquals(new BigDecimal("59970"), runtime.previousOperation().getPriceClose());
+        assertEquals(new BigDecimal("454.442094120000"), runtime.previousOperation().getRealizedPnlUsd());
+    }
+
+    @Test
+    void longPartialReduceRealizesPositivePnl() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("10"));
+        runtime.previousState().setEntryPrice(new BigDecimal("100"));
+        runtime.previousState().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousState().setSlippageUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSizePar(new BigDecimal("10"));
+        runtime.previousOperation().setPriceEntry(new BigDecimal("100"));
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("4"), new BigDecimal("110"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("SHADOW_POSITION_REDUCED", event.getReasonCode());
+        assertEquals(new BigDecimal("6"), event.getQtyExecuted());
+        assertEquals(new BigDecimal("660"), event.getNotionalUsd());
+        assertEquals(new BigDecimal("0.132000000000"), event.getSlippageUsd());
+        assertEquals(new BigDecimal("59.868000000000"), event.getRealizedPnlUsd());
+        assertEquals("OPEN", runtime.previousState().getStatus());
+        assertEquals(new BigDecimal("4"), runtime.previousState().getQty());
+    }
+
+    @Test
+    void longPartialReduceRealizesNegativePnl() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("10"));
+        runtime.previousState().setEntryPrice(new BigDecimal("100"));
+        runtime.previousState().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousState().setSlippageUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSizePar(new BigDecimal("10"));
+        runtime.previousOperation().setPriceEntry(new BigDecimal("100"));
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("4"), new BigDecimal("90"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("SHADOW_POSITION_REDUCED", event.getReasonCode());
+        assertEquals(new BigDecimal("-60.108000000000"), event.getRealizedPnlUsd());
+        assertTrue(event.getRealizedPnlUsd().signum() < 0);
+        assertEquals("OPEN", runtime.previousState().getStatus());
+        assertEquals(new BigDecimal("4"), runtime.previousState().getQty());
+    }
+
+    @Test
+    void shortPartialReduceRealizesNegativePnlWhenPriceMovesAgainstShort() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.SHORT);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("10"));
+        runtime.previousState().setEntryPrice(new BigDecimal("100"));
+        runtime.previousState().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousState().setSlippageUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSizePar(new BigDecimal("10"));
+        runtime.previousOperation().setPriceEntry(new BigDecimal("100"));
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.SHORT, new BigDecimal("4"), new BigDecimal("110"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("SHADOW_POSITION_REDUCED", event.getReasonCode());
+        assertEquals(new BigDecimal("-60.132000000000"), event.getRealizedPnlUsd());
+        assertTrue(event.getRealizedPnlUsd().signum() < 0);
+        assertEquals("OPEN", runtime.previousState().getStatus());
+        assertEquals(new BigDecimal("4"), runtime.previousState().getQty());
+    }
+
+    @Test
+    void partialReduceWithoutValidPriceIsSkipped() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+        runtime.previousState().setQty(new BigDecimal("10"));
+        runtime.previousState().setEntryPrice(new BigDecimal("100"));
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("4"), BigDecimal.ZERO)));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("PRICE_SOURCE_UNAVAILABLE", event.getReasonCode());
+        assertEquals("SKIPPED", event.getDecision());
+        assertNull(event.getRealizedPnlUsd());
+        assertEquals(new BigDecimal("10"), runtime.previousState().getQty());
+        assertEquals("OPEN", runtime.previousState().getStatus());
+    }
+
+    @Test
+    void partialReduceWithoutEntryPriceIsSkipped() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+        runtime.previousState().setQty(new BigDecimal("10"));
+        runtime.previousState().setEntryPrice(null);
+        runtime.previousState().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSizePar(new BigDecimal("10"));
+        runtime.previousOperation().setPriceEntry(null);
+
+        assertEquals(1, runtime.service().recordShadowEvent(resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("4"), new BigDecimal("110"))));
+
+        ShadowCopyOperationEventEntity event = runtime.recordedEvents().get(0);
+        assertEquals("ENTRY_PRICE_MISSING", event.getReasonCode());
+        assertEquals("SKIPPED", event.getDecision());
+        assertEquals(new BigDecimal("10"), event.getPreviousQty());
+        assertEquals(new BigDecimal("4"), event.getResultingQty());
+        assertNull(event.getRealizedPnlUsd());
+        assertEquals(new BigDecimal("10"), runtime.previousState().getQty());
+        assertEquals(BigDecimal.ZERO, runtime.previousState().getRealizedPnlUsd());
+        assertEquals("OPEN", runtime.previousOperation().getStatus());
     }
 
     @Test
@@ -580,7 +751,8 @@ class ShadowCopyTradingServiceImplTest {
                 shadowPositionStateRepository(closedByShadow, netByShadow),
                 proxy(CopyWalletProfileRepository.class, (method, args) -> unexpected(method)),
                 proxy(ShadowWalletProfileValidationRepository.class, (method, args) -> unexpected(method)),
-                new CopyStrategyRuntimeRouter()
+                new CopyStrategyRuntimeRouter(),
+                accountingService()
         );
 
         setField(service, "separateShadowEnabled", true);
@@ -951,7 +1123,8 @@ class ShadowCopyTradingServiceImplTest {
                     return unexpected(method);
                 }),
                 shadowProfileValidationRepository(validations),
-                new CopyStrategyRuntimeRouter()
+                new CopyStrategyRuntimeRouter(),
+                accountingService()
         );
         setField(service, "separateShadowEnabled", true);
         setField(service, "shadowVersion", 1);
@@ -1079,7 +1252,8 @@ class ShadowCopyTradingServiceImplTest {
                     return unexpected(method);
                 }),
                 shadowProfileValidationRepository(validations),
-                new CopyStrategyRuntimeRouter()
+                new CopyStrategyRuntimeRouter(),
+                accountingService()
         );
         setField(service, "separateShadowEnabled", true);
         setField(service, "shadowVersion", 1);
@@ -1129,7 +1303,8 @@ class ShadowCopyTradingServiceImplTest {
                 }),
                 copyWalletProfileRepository(saved),
                 shadowProfileValidationRepository(),
-                new CopyStrategyRuntimeRouter()
+                new CopyStrategyRuntimeRouter(),
+                accountingService()
         );
         setField(service, "separateShadowEnabled", true);
         setField(service, "requireShadowValidationBeforeLive", true);
@@ -1217,6 +1392,10 @@ class ShadowCopyTradingServiceImplTest {
             }
             return unexpected(method);
         });
+    }
+
+    private static CopyPositionAccountingService accountingService() {
+        return new CopyPositionAccountingService();
     }
 
     @SuppressWarnings("unchecked")
