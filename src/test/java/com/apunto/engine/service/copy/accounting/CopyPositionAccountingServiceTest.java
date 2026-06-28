@@ -44,6 +44,54 @@ class CopyPositionAccountingServiceTest {
     }
 
     @Test
+    void btcOpenLabelWithLowerLongQtyClassifiesAsReduce() {
+        PositionDeltaClassification classification = classifier.classify(new PositionDeltaClassificationInput(
+                "OPEN",
+                "OPEN",
+                "LONG",
+                "LONG",
+                new BigDecimal("1.14975"),
+                new BigDecimal("0.05972"),
+                new BigDecimal("-1.09003"),
+                new BigDecimal("110"),
+                new BigDecimal("100"),
+                "BTCUSDT",
+                "0xabc",
+                "0xabc|LONG_ONLY|direction|LONG",
+                "shadow"
+        ));
+
+        assertEquals(PositionDeltaType.REDUCE, classification.computedDeltaType());
+        assertTrue(classification.shouldRealizePnl());
+        assertBd("1.09003", classification.qtyToRealize());
+        assertEquals("EVENT_TYPE_CONTRADICTS_POSITION_MATH", classification.warningCode());
+    }
+
+    @Test
+    void ethOpenLabelWithLowerLongQtyClassifiesAsReduce() {
+        PositionDeltaClassification classification = classifier.classify(new PositionDeltaClassificationInput(
+                "OPEN",
+                "OPEN",
+                "LONG",
+                "LONG",
+                new BigDecimal("47.434"),
+                new BigDecimal("5.136"),
+                new BigDecimal("-42.298"),
+                new BigDecimal("2500"),
+                new BigDecimal("2501"),
+                "ETHUSDT",
+                "0xabc",
+                "0xabc|MOVEMENT_ALL|strategy|MOVEMENT_ALL",
+                "live"
+        ));
+
+        assertEquals(PositionDeltaType.REDUCE, classification.computedDeltaType());
+        assertTrue(classification.shouldRealizePnl());
+        assertBd("42.298", classification.qtyToRealize());
+        assertEquals("EVENT_TYPE_CONTRADICTS_POSITION_MATH", classification.warningCode());
+    }
+
+    @Test
     void longIncreaseUsesWeightedAverageEntry() {
         CopyAccountingResult result = accounting.apply(input(PositionSide.LONG, "10", "20", "100", "120", "0", "0"));
 

@@ -923,11 +923,26 @@ public class HyperliquidOriginPositionStoreService {
 
         FuturesPositionEntity saved;
         if (created) {
-            entityManager.persist(entity);
-            entityManager.flush();
-            saved = entity;
+            int affected = upsertFuturesPosition(entity);
+            saved = repository.findByIdFuturesPosition(originId).orElse(entity);
+            log.info("event=position_upsert.ok inserted={} updated={} idempotent={} positionKey={} walletId={} symbol={} side={} sourceUpdatedAt={} affectedRows={}",
+                    affected > 0,
+                    false,
+                    affected == 0,
+                    mapped.positionKey(),
+                    mapped.wallet(),
+                    mapped.symbol(),
+                    mapped.side(),
+                    entity.getSourceTs(),
+                    affected);
         } else {
             saved = repository.saveAndFlush(entity);
+            log.info("event=position_upsert.ok inserted=false updated=true idempotent=false positionKey={} walletId={} symbol={} side={} sourceUpdatedAt={} affectedRows=1",
+                    mapped.positionKey(),
+                    mapped.wallet(),
+                    mapped.symbol(),
+                    mapped.side(),
+                    entity.getSourceTs());
         }
         if (saved.getStatus() != PositionStatus.OPEN) {
             activeOriginIds.remove(mapped.positionKey(), saved.getIdFuturesPosition());
@@ -945,6 +960,105 @@ public class HyperliquidOriginPositionStoreService {
                 priceReference == null ? null : priceReference.price(),
                 elapsedMs(startedNs)
         );
+    }
+
+    private int upsertFuturesPosition(FuturesPositionEntity entity) {
+        String sql = """
+                insert into futuros_operaciones.futures_position as fp (
+                    id, platform, venue, chain_id, external_id, account_id, symbol, status, side,
+                    operation_type, leverage, size_qty, notional_usd, margin_used_usd, size_legacy,
+                    entry_price, mark_price, exit_price, unrealized_pnl_usd, realized_pnl_usd,
+                    liquidation_price, source_ts, created_at, updated_at, closed_at, ingested_at,
+                    is_active, has_account_issue, failed_attempts, raw, client_order_id, close_client_order_id
+                ) values (
+                    :id, :platform, :venue, :chainId, :externalId, :accountId, :symbol,
+                    cast(:status as futuros_operaciones.position_status),
+                    cast(:side as futuros_operaciones.position_side),
+                    :operationType, :leverage, :sizeQty, :notionalUsd, :marginUsedUsd, :sizeLegacy,
+                    :entryPrice, :markPrice, :exitPrice, :unrealizedPnlUsd, :realizedPnlUsd,
+                    :liquidationPrice, :sourceTs, :createdAt, :updatedAt, :closedAt, :ingestedAt,
+                    :isActive, :hasAccountIssue, :failedAttempts, cast(:raw as jsonb), :clientOrderId, :closeClientOrderId
+                )
+                on conflict (id) do update set
+                    platform = excluded.platform,
+                    venue = excluded.venue,
+                    chain_id = excluded.chain_id,
+                    external_id = excluded.external_id,
+                    account_id = excluded.account_id,
+                    symbol = excluded.symbol,
+                    status = excluded.status,
+                    side = excluded.side,
+                    operation_type = excluded.operation_type,
+                    leverage = excluded.leverage,
+                    size_qty = excluded.size_qty,
+                    notional_usd = excluded.notional_usd,
+                    margin_used_usd = excluded.margin_used_usd,
+                    size_legacy = excluded.size_legacy,
+                    entry_price = excluded.entry_price,
+                    mark_price = excluded.mark_price,
+                    exit_price = excluded.exit_price,
+                    unrealized_pnl_usd = excluded.unrealized_pnl_usd,
+                    realized_pnl_usd = excluded.realized_pnl_usd,
+                    liquidation_price = excluded.liquidation_price,
+                    source_ts = excluded.source_ts,
+                    updated_at = excluded.updated_at,
+                    closed_at = excluded.closed_at,
+                    ingested_at = excluded.ingested_at,
+                    is_active = excluded.is_active,
+                    has_account_issue = excluded.has_account_issue,
+                    failed_attempts = excluded.failed_attempts,
+                    raw = excluded.raw,
+                    client_order_id = excluded.client_order_id,
+                    close_client_order_id = excluded.close_client_order_id
+                where fp.source_ts is null
+                   or excluded.source_ts is null
+                   or excluded.source_ts >= fp.source_ts
+                """;
+        return entityManager.createNativeQuery(sql)
+                .setParameter("id", entity.getIdFuturesPosition())
+                .setParameter("platform", entity.getPlatform())
+                .setParameter("venue", entity.getVenue())
+                .setParameter("chainId", entity.getChainId())
+                .setParameter("externalId", entity.getExternalId())
+                .setParameter("accountId", entity.getAccountId())
+                .setParameter("symbol", entity.getSymbol())
+                .setParameter("status", entity.getStatus() == null ? PositionStatus.OPEN.name() : entity.getStatus().name())
+                .setParameter("side", entity.getSide() == null ? null : entity.getSide().name())
+                .setParameter("operationType", entity.getOperationType())
+                .setParameter("leverage", entity.getLeverage())
+                .setParameter("sizeQty", entity.getSizeQty())
+                .setParameter("notionalUsd", entity.getNotionalUsd())
+                .setParameter("marginUsedUsd", entity.getMarginUsedUsd())
+                .setParameter("sizeLegacy", entity.getSizeLegacy())
+                .setParameter("entryPrice", entity.getEntryPrice())
+                .setParameter("markPrice", entity.getMarkPrice())
+                .setParameter("exitPrice", entity.getExitPrice())
+                .setParameter("unrealizedPnlUsd", entity.getUnrealizedPnlUsd())
+                .setParameter("realizedPnlUsd", entity.getRealizedPnlUsd())
+                .setParameter("liquidationPrice", entity.getLiquidationPrice())
+                .setParameter("sourceTs", entity.getSourceTs())
+                .setParameter("createdAt", entity.getCreatedAt())
+                .setParameter("updatedAt", entity.getUpdatedAt())
+                .setParameter("closedAt", entity.getClosedAt())
+                .setParameter("ingestedAt", entity.getIngestedAt())
+                .setParameter("isActive", entity.getIsActive())
+                .setParameter("hasAccountIssue", entity.getHasAccountIssue())
+                .setParameter("failedAttempts", entity.getFailedAttempts())
+                .setParameter("raw", rawJson(entity.getRaw()))
+                .setParameter("clientOrderId", entity.getClientOrderId())
+                .setParameter("closeClientOrderId", entity.getCloseClientOrderId())
+                .executeUpdate();
+    }
+
+    private String rawJson(JsonNode raw) {
+        if (raw == null || raw.isNull()) {
+            return "{}";
+        }
+        try {
+            return objectMapper.writeValueAsString(raw);
+        } catch (Exception ex) {
+            return "{}";
+        }
     }
 
 

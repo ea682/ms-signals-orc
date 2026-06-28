@@ -116,6 +116,10 @@ public class CopyPositionAccountingService {
         return side == PositionSide.SHORT ? "SHORT_ENTRY_MINUS_EXEC" : "LONG_EXEC_MINUS_ENTRY";
     }
 
+    public PositionDeltaClassification classify(PositionDeltaClassificationInput input) {
+        return classifier.classify(input);
+    }
+
     public BigDecimal weightedAverageEntryPrice(
             BigDecimal previousQty,
             BigDecimal previousEntryPrice,
