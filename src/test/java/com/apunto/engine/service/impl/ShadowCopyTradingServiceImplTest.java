@@ -37,6 +37,7 @@ import com.apunto.engine.shared.enums.PositionSide;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -535,6 +536,32 @@ class ShadowCopyTradingServiceImplTest {
         assertEquals(new BigDecimal("59.868000000000"), event.getRealizedPnlUsd());
         assertEquals("OPEN", runtime.previousState().getStatus());
         assertEquals(new BigDecimal("4"), runtime.previousState().getQty());
+    }
+
+    @Test
+    void openEventWithLowerLongQtyIsReducedByPositionMath() throws Exception {
+        FlipRuntime runtime = flipRuntime(PositionSide.LONG);
+        setField(runtime.service(), "shadowSlippageBps", 2.0d);
+        runtime.previousState().setQty(new BigDecimal("1.14975"));
+        runtime.previousState().setEntryPrice(new BigDecimal("100"));
+        runtime.previousState().setRealizedPnlUsd(BigDecimal.ZERO);
+        runtime.previousState().setSlippageUsd(BigDecimal.ZERO);
+        runtime.previousOperation().setSizePar(new BigDecimal("1.14975"));
+        runtime.previousOperation().setPriceEntry(new BigDecimal("100"));
+
+        OperacionEvent event = resizeEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("0.05972"), new BigDecimal("110"));
+        event.setDeltaType("OPEN");
+
+        assertEquals(1, runtime.service().recordShadowEvent(event));
+
+        ShadowCopyOperationEventEntity recorded = runtime.recordedEvents().get(0);
+        assertEquals("OPEN", recorded.getEventType());
+        assertEquals("SHADOW_POSITION_REDUCED", recorded.getReasonCode());
+        assertEquals(new BigDecimal("1.14975"), recorded.getPreviousQty());
+        assertEquals(new BigDecimal("0.05972"), recorded.getResultingQty());
+        assertEquals(new BigDecimal("1.09003"), recorded.getQtyExecuted());
+        assertNotNull(recorded.getRealizedPnlUsd());
+        assertTrue(recorded.getRealizedPnlUsd().compareTo(BigDecimal.ZERO) > 0);
     }
 
     @Test
