@@ -23,8 +23,11 @@ import com.apunto.engine.service.copy.accounting.AccountingMode;
 import com.apunto.engine.service.copy.accounting.CopyAccountingInput;
 import com.apunto.engine.service.copy.accounting.CopyAccountingResult;
 import com.apunto.engine.service.copy.accounting.CopyPositionAccountingService;
+import com.apunto.engine.service.copy.accounting.PositionDeltaClassification;
+import com.apunto.engine.service.copy.accounting.PositionDeltaClassificationInput;
 import com.apunto.engine.service.copy.accounting.PositionDeltaType;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.observability.CopyFlowTiming;
 import com.apunto.engine.shared.enums.PositionSide;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -57,6 +60,7 @@ import java.util.stream.Collectors;
 public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
+    private static final ThreadLocal<CopyFlowTiming> SHADOW_FLOW_TIMING = new ThreadLocal<>();
 
     private record ShadowPositionImpact(
             String reasonCode,
@@ -695,21 +699,28 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             CopyJobAction action,
             HyperliquidDeltaType deltaType
     ) {
+        CopyFlowTiming timing = CopyFlowTiming.start();
+        SHADOW_FLOW_TIMING.set(timing);
+        try {
         OperacionDto op = event.getOperacion();
         String originId = op.getIdOperacion().toString();
         String typeOperation = op.getTipoOperacion() == null ? "BOTH" : op.getTipoOperacion().name();
         OffsetDateTime eventTime = eventTime(op, action);
         BigDecimal qty = firstNonNull(op.getSizeQty(), op.getSize(), ZERO).abs();
+        long priceNs = timing.mark();
         BigDecimal price = resolveShadowExecutionPrice(op, action, deltaType);
+        timing.add(CopyFlowTiming.Stage.PRICE_RESOLUTION, priceNs);
         BigDecimal notional = resolveShadowNotional(op, qty, price);
         String eventType = shadowEventType(action, deltaType);
 
+        long dedupeNs = timing.mark();
         shadowEventRepository.lockShadowEventIdempotency(shadowEventIdempotencyKey(allocation, originId, eventType, typeOperation, eventTime));
         boolean duplicate = allocation.getWalletProfileId() != null
                 ? shadowEventRepository.existsByWalletProfileIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime(
                 allocation.getWalletProfileId(), originId, eventType, typeOperation, eventTime)
                 : shadowEventRepository.existsByShadowAllocationIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime(
                 allocation.getId(), originId, eventType, typeOperation, eventTime);
+        timing.add(CopyFlowTiming.Stage.DEDUPE, dedupeNs);
         if (duplicate) {
             String duplicateReasonCode = deltaType == HyperliquidDeltaType.FLIP
                     ? "DUPLICATE_SHADOW_FLIP_EVENT"
@@ -721,6 +732,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 log.info("event=duplicate_shadow_event_skipped originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} action={} deltaType={} reasonCode={} shadowImpact=NO_DUPLICATE_EVENT",
                         originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), typeOperation, action, deltaType, duplicateReasonCode);
             }
+            logShadowFlowLatency(timing, "skipped", eventType, null, duplicateReasonCode, op, allocation, typeOperation, originId);
             return false;
         }
 
@@ -752,7 +764,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         } else {
             log.debug("event=shadow_price_resolved source=OPERATION symbol={} price={} usage={}",
                     op.getParSymbol(), price, shadowPriceUsage(action, deltaType));
-            impact = updateShadowPositionState(allocation, op, action, deltaType, eventTime, qty, notional, price, originId, typeOperation);
+            impact = updateShadowPositionState(allocation, op, action, deltaType, eventTime, qty, notional, price, originId, typeOperation, eventType);
         }
         BigDecimal eventQtyExecuted = firstNonNull(impact.qtyExecuted(), qty);
         BigDecimal eventNotional = firstNonNull(impact.eventNotionalUsd(), notional);
@@ -803,9 +815,11 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .eventTime(eventTime)
                 .dateCreation(OffsetDateTime.now())
                 .build();
+        long dbNs = timing.mark();
         shadowEventRepository.save(shadowEvent);
         updateRuntimeActivity(allocation, eventType, impact, eventTime);
         refreshProfileValidationAfterEvent(allocation, eventType, impact, eventTime);
+        timing.add(CopyFlowTiming.Stage.DB_PERSIST, dbNs);
         log.info("event=shadow_event_recorded originId={} userId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} shadowOperationId={} liveAllocationId={} walletId={} copyProfileCode={} executionMode=SHADOW intent={} symbol={} side={} reasonCode={} shadowImpact={} qty={} notional={} slippageUsd={}",
                 originId,
                 allocation.getIdUser(),
@@ -824,7 +838,11 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 qty,
                 eventNotional,
                 eventSlippageUsd);
+        logShadowFlowLatency(timing, impact.positionUpdated() ? "success" : "skipped", eventType, computedDeltaTypeForImpact(impact), impact.reasonCode(), op, allocation, typeOperation, originId);
         return true;
+        } finally {
+            SHADOW_FLOW_TIMING.remove();
+        }
     }
 
     private String shadowEventIdempotencyKey(
@@ -1151,7 +1169,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             BigDecimal notional,
             BigDecimal price,
             String originId,
-            String positionSide
+            String positionSide,
+            String originalEventType
     ) {
         boolean closedPreviousSideByFlip = false;
         if (deltaType == HyperliquidDeltaType.FLIP && action != CopyJobAction.CLOSE) {
@@ -1269,8 +1288,27 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         }
         BigDecimal previousQty = firstNonNull(state.getQty(), ZERO).abs();
         BigDecimal resultingQty = qty.abs();
+        CopyFlowTiming timing = SHADOW_FLOW_TIMING.get();
+        long classificationNs = timing == null ? 0L : timing.mark();
+        PositionDeltaClassification classification = classifyShadowPosition(
+                originalEventType,
+                deltaType,
+                positionSide,
+                previousQty,
+                resultingQty,
+                price,
+                state.getEntryPrice(),
+                op,
+                allocation
+        );
+        logClassificationCorrectionIfNeeded(classification, originalEventType, deltaType, positionSide, previousQty, resultingQty, price, op, allocation, originId);
+        if (timing != null) {
+            timing.add(CopyFlowTiming.Stage.CLASSIFICATION, classificationNs);
+        }
+        PositionDeltaType computedDeltaType = classification.computedDeltaType();
         boolean resizeLike = !opened && (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE);
-        if (resizeLike && resultingQty.compareTo(previousQty) == 0) {
+        boolean noopByMath = !opened && (computedDeltaType == PositionDeltaType.NOOP || computedDeltaType == PositionDeltaType.SNAPSHOT_NOOP);
+        if (noopByMath) {
             state.setMarkPrice(price);
             state.setNotionalUsd(positiveOrFallback(resultingQty.multiply(price), state.getNotionalUsd()));
             state.setLastSourceEventId(originId);
@@ -1280,7 +1318,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return ShadowPositionImpact.resizeNoop(state.getId())
                     .withAccounting(previousQty, resultingQty, ZERO, ZERO, ZERO);
         }
-        if (resizeLike && resultingQty.compareTo(previousQty) < 0) {
+        if (!opened && (computedDeltaType == PositionDeltaType.REDUCE || computedDeltaType == PositionDeltaType.CLOSE_FULL)) {
             BigDecimal avgEntryPrice = resolveAvgEntryPrice(allocation, op, originId, positionSide, state);
             BigDecimal deltaClosedQty = previousQty.subtract(resultingQty).abs();
             BigDecimal eventNotional = positiveOrFallback(deltaClosedQty.multiply(price), ZERO);
@@ -1295,7 +1333,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                     ZERO,
                     eventSlippageUsd,
                     eventTime,
-                    resultingQty.signum() == 0 ? "SHADOW_POSITION_CLOSED" : "SHADOW_POSITION_REDUCED"
+                    computedDeltaType == PositionDeltaType.CLOSE_FULL ? "SHADOW_POSITION_CLOSED" : "SHADOW_POSITION_REDUCED"
             );
             if (!accounting.accepted()) {
                 log.warn("event=shadow_reduce_rejected_missing_entry_price reasonCode=ENTRY_PRICE_MISSING wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} previousQty={} resultingQty={} copyImpact=shadow_reduce_skipped",
@@ -1307,7 +1345,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             BigDecimal netRealizedPnl = accounting.netRealizedPnlUsd();
             BigDecimal totalSlippage = firstNonNull(state.getSlippageUsd(), ZERO).add(eventSlippageUsd);
             BigDecimal totalRealizedPnl = firstNonNull(state.getRealizedPnlUsd(), ZERO).add(netRealizedPnl).setScale(12, RoundingMode.HALF_UP);
-            if (resultingQty.signum() == 0) {
+            if (computedDeltaType == PositionDeltaType.CLOSE_FULL) {
                 state.setStatus("CLOSED");
                 state.setClosedAt(eventTime);
                 state.setQty(ZERO);
@@ -1342,9 +1380,10 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return ShadowPositionImpact.reduced(netRealizedPnl, state.getId())
                     .withAccounting(previousQty, resultingQty, deltaClosedQty, eventNotional, eventSlippageUsd);
         }
-        BigDecimal eventQtyExecuted = resizeLike ? resultingQty.subtract(previousQty).abs() : resultingQty;
-        BigDecimal eventNotional = resizeLike ? eventQtyExecuted.multiply(price).abs() : notional;
-        eventNotional = positiveOrFallback(eventNotional, resizeLike ? ZERO : notional);
+        boolean increaseByMath = !opened && computedDeltaType == PositionDeltaType.INCREASE;
+        BigDecimal eventQtyExecuted = increaseByMath ? resultingQty.subtract(previousQty).abs() : resultingQty;
+        BigDecimal eventNotional = increaseByMath ? eventQtyExecuted.multiply(price).abs() : notional;
+        eventNotional = positiveOrFallback(eventNotional, increaseByMath ? ZERO : notional);
         BigDecimal eventSlippageUsd = slippageUsd(eventNotional);
         CopyAccountingResult accounting = applyShadowAccounting(
                 op.getParSymbol(),
@@ -1390,7 +1429,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                     ? ShadowPositionImpact.openedByFlip(state.getId()).withAccounting(ZERO, resultingQty, eventQtyExecuted, eventNotional, eventSlippageUsd)
                     : ShadowPositionImpact.opened(state.getId()).withAccounting(ZERO, resultingQty, eventQtyExecuted, eventNotional, eventSlippageUsd);
         }
-        if (resizeLike) {
+        if (increaseByMath) {
             log.info("event=shadow_resize_delta_cost_applied reasonCode=SHADOW_POSITION_RESIZED wallet={} walletProfileId={} allocationId={} shadowValidationId={} symbol={} side={} previousQty={} resultingQty={} deltaQty={} executionPrice={} deltaNotional={} feeUsd={} slippageUsd={} costBasis=DELTA_NOTIONAL",
                     allocation.getWalletId(), allocation.getWalletProfileId(), allocation.getId(), allocation.getShadowValidationId(), op.getParSymbol(), positionSide,
                     previousQty, resultingQty, eventQtyExecuted, price, eventNotional, ZERO, eventSlippageUsd);
@@ -2233,6 +2272,122 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .divide(BigDecimal.valueOf(10_000), 12, RoundingMode.HALF_UP);
     }
 
+    private PositionDeltaClassification classifyShadowPosition(
+            String originalEventType,
+            HyperliquidDeltaType originalDeltaType,
+            String positionSide,
+            BigDecimal previousQty,
+            BigDecimal resultingQty,
+            BigDecimal executionPrice,
+            BigDecimal avgEntryPrice,
+            OperacionDto op,
+            ShadowCopyAllocationEntity allocation
+    ) {
+        return copyPositionAccountingService.classify(new PositionDeltaClassificationInput(
+                originalEventType,
+                originalDeltaType == null ? null : originalDeltaType.name(),
+                positionSide,
+                positionSide,
+                previousQty,
+                resultingQty,
+                previousQty == null || resultingQty == null ? null : resultingQty.subtract(previousQty),
+                executionPrice,
+                avgEntryPrice,
+                op == null ? null : op.getParSymbol(),
+                allocation == null ? null : allocation.getWalletId(),
+                runtimeProfileKey(allocation),
+                "shadow"
+        ));
+    }
+
+    private void logClassificationCorrectionIfNeeded(
+            PositionDeltaClassification classification,
+            String originalEventType,
+            HyperliquidDeltaType originalDeltaType,
+            String positionSide,
+            BigDecimal previousQty,
+            BigDecimal resultingQty,
+            BigDecimal executionPrice,
+            OperacionDto op,
+            ShadowCopyAllocationEntity allocation,
+            String originId
+    ) {
+        if (classification == null || !classification.corrected()) {
+            return;
+        }
+        BigDecimal deltaQty = previousQty == null || resultingQty == null ? null : resultingQty.subtract(previousQty);
+        log.warn("event=copy_position.classification.corrected flow=shadow originalEventType={} originalDeltaType={} computedDeltaType={} reasonCode={} warningCode={} previousQty={} resultingQty={} deltaQty={} executionPrice={} symbol={} walletId={} profileKey={} strategyCode={} side={} originId={}",
+                originalEventType,
+                originalDeltaType,
+                classification.computedDeltaType(),
+                classification.warningCode(),
+                classification.warningCode(),
+                previousQty,
+                resultingQty,
+                deltaQty,
+                executionPrice,
+                op == null ? null : op.getParSymbol(),
+                allocation == null ? null : allocation.getWalletId(),
+                runtimeProfileKey(allocation),
+                allocation == null ? null : allocation.getCopyStrategyCode(),
+                positionSide,
+                originId);
+    }
+
+    private void logShadowFlowLatency(
+            CopyFlowTiming timing,
+            String result,
+            String originalEventType,
+            String computedDeltaType,
+            String reasonCode,
+            OperacionDto op,
+            ShadowCopyAllocationEntity allocation,
+            String side,
+            String originId
+    ) {
+        if (timing == null) {
+            return;
+        }
+        log.info("{} originalEventType={} computedDeltaType={} reasonCode={} symbol={} side={} walletId={} profileKey={} strategyCode={} originId={} traceId={}",
+                timing.logfmtCore("shadow", result),
+                safeLog(originalEventType),
+                safeLog(computedDeltaType),
+                safeLog(reasonCode),
+                op == null ? null : safeLog(op.getParSymbol()),
+                safeLog(side),
+                allocation == null ? null : safeLog(allocation.getWalletId()),
+                safeLog(runtimeProfileKey(allocation)),
+                allocation == null ? null : safeLog(allocation.getCopyStrategyCode()),
+                safeLog(originId),
+                org.slf4j.MDC.get("traceId"));
+    }
+
+    private String computedDeltaTypeForImpact(ShadowPositionImpact impact) {
+        if (impact == null || impact.reasonCode() == null) {
+            return "INVALID";
+        }
+        return switch (impact.reasonCode()) {
+            case "SHADOW_POSITION_OPENED", "SHADOW_POSITION_OPENED_BY_FLIP" -> "OPEN";
+            case "SHADOW_POSITION_RESIZED" -> "INCREASE";
+            case "SHADOW_POSITION_REDUCED" -> "REDUCE";
+            case "SHADOW_POSITION_CLOSED", "SHADOW_POSITION_CLOSED_BY_FLIP" -> "CLOSE_FULL";
+            case "SHADOW_RESIZE_NOOP" -> "NOOP";
+            default -> "INVALID";
+        };
+    }
+
+    private String safeLog(String value) {
+        if (value == null || value.isBlank()) {
+            return "NA";
+        }
+        String clean = value.replace('\n', '_')
+                .replace('\r', '_')
+                .replace('\t', '_')
+                .replace(' ', '_')
+                .replace('"', '\'');
+        return clean.length() > 500 ? clean.substring(0, 500) : clean;
+    }
+
     private CopyAccountingResult applyShadowAccounting(
             String symbol,
             String side,
@@ -2245,6 +2400,8 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             OffsetDateTime eventTime,
             String shadowReasonCode
     ) {
+        CopyFlowTiming timing = SHADOW_FLOW_TIMING.get();
+        long accountingNs = timing == null ? 0L : timing.mark();
         CopyAccountingResult result = copyPositionAccountingService.apply(new CopyAccountingInput(
                 symbol,
                 parsePositionSide(side),
@@ -2257,6 +2414,9 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 eventTime == null ? null : eventTime.toInstant(),
                 AccountingMode.SHADOW
         ));
+        if (timing != null) {
+            timing.add(CopyFlowTiming.Stage.ACCOUNTING, accountingNs);
+        }
         if (result.accepted()) {
             log.info("event=shadow_copy_accounting_applied reasonCode={} symbol={} side={} deltaType={}",
                     shadowReasonCode, symbol, side, result.deltaType());

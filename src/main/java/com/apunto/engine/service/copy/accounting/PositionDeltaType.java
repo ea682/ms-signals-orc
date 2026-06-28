@@ -5,5 +5,8 @@ public enum PositionDeltaType {
     INCREASE,
     REDUCE,
     CLOSE_FULL,
-    NOOP
+    NOOP,
+    FLIP,
+    SNAPSHOT_NOOP,
+    INVALID
 }

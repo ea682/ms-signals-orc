@@ -33,6 +33,8 @@ import com.apunto.engine.service.copy.ProportionalCopySizingCalculator;
 import com.apunto.engine.service.copy.accounting.CopyAccountingResult;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingAdapter;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingInput;
+import com.apunto.engine.service.copy.accounting.PositionDeltaType;
+import com.apunto.engine.service.copy.observability.CopyFlowTiming;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.PositionStatus;
@@ -91,6 +93,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final BigDecimal MIN_NOTIONAL_FALLBACK = new BigDecimal("5");
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal REBALANCE_TOLERANCE_PCT = new BigDecimal("0.02");
+    private static final ThreadLocal<CopyFlowTiming> LIVE_FLOW_TIMING = new ThreadLocal<>();
 
     private static final int DEFAULT_CALC_SCALE = 18;
     private static final long TTL_MS = 60_000L;
@@ -2927,12 +2930,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal executedQty = order == null ? ZERO : safeQty(copyTradingMapper.resolveFilledQty(order));
         final BigDecimal price = resolvePriceRef(order == null ? null : order.getAvgPrice(), entryPrice);
         final BigDecimal notional = price.compareTo(ZERO) <= 0 ? ZERO : executedQty.multiply(price);
-        final CopyAccountingResult accounting = applyLiveAccounting(eventType, symbol, positionSide, order, previousQty, resultingQty, entryPrice);
+        CopyFlowTiming timing = LIVE_FLOW_TIMING.get();
+        boolean localTiming = false;
+        if (timing == null) {
+            timing = CopyFlowTiming.start();
+            localTiming = true;
+        }
+        final CopyAccountingResult accounting = applyLiveAccounting(eventType, symbol, positionSide, order, previousQty, resultingQty, entryPrice, originId, walletId, allocation, timing);
         final BigDecimal realizedPnl = realizedPnlFromAccounting(eventType, accounting);
 
         final String executionMode = executionModeOf(allocation);
         final boolean shadow = isShadowMode(allocation);
 
+        long responseToPersistNs = timing.mark();
+        long dbNs = timing.mark();
         copyOperationEventService.record(CopyOperationEventRecordCommand.builder()
                 .userCopyAllocationId(allocation == null ? null : allocation.getId())
                 .copyStrategyCode(allocation == null ? null : allocation.getCopyStrategyCode())
@@ -2965,6 +2976,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .reasonCode(reasonCode)
                 .eventTime(orderEventTime(order))
                 .build());
+        timing.add(CopyFlowTiming.Stage.DB_PERSIST, dbNs);
+        timing.add(CopyFlowTiming.Stage.BINANCE_RESPONSE_TO_PERSIST, responseToPersistNs);
+        logLiveFlowLatency(timing, "success", eventType, accounting == null ? null : accounting.deltaType(), reasonCode, symbol, positionSide, originId, walletId, allocation, order, firstNonBlank(traceId, MDC.get("traceId")));
+        if (LIVE_FLOW_TIMING.get() == timing || localTiming) {
+            LIVE_FLOW_TIMING.remove();
+        }
     }
 
     private CopyAccountingResult applyLiveAccounting(String eventType,
@@ -2973,10 +2990,15 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                                      BinanceFuturesOrderClientResponse order,
                                                      BigDecimal previousQty,
                                                      BigDecimal resultingQty,
-                                                     BigDecimal entryPrice) {
+                                                     BigDecimal entryPrice,
+                                                     String originId,
+                                                     String walletId,
+                                                     UserCopyAllocationEntity allocation,
+                                                     CopyFlowTiming timing) {
         if (!shouldApplyLiveAccounting(eventType)) {
             return null;
         }
+        long accountingNs = timing == null ? 0L : timing.mark();
         CopyAccountingResult result = liveCopyAccountingAdapter.apply(new LiveCopyAccountingInput(
                 symbol,
                 positionSide,
@@ -2989,6 +3011,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 ZERO,
                 orderEventTime(order).toInstant()
         ));
+        if (timing != null) {
+            timing.add(CopyFlowTiming.Stage.ACCOUNTING, accountingNs);
+        }
         if (!result.accepted()) {
             log.warn("event=live_copy_accounting_rejected eventType={} symbol={} side={} previousQty={} resultingQty={} reasonCode={} orderId={}",
                     eventType,
@@ -2998,8 +3023,45 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     resultingQty,
                     result.reasonCode(),
                     order == null ? null : order.getOrderId());
+        } else {
+            logLiveClassificationCorrectionIfNeeded(eventType, result, symbol, positionSide, previousQty, resultingQty, order, originId, walletId, allocation);
         }
         return result;
+    }
+
+    private void logLiveClassificationCorrectionIfNeeded(String originalEventType,
+                                                         CopyAccountingResult accounting,
+                                                         String symbol,
+                                                         PositionSide positionSide,
+                                                         BigDecimal previousQty,
+                                                         BigDecimal resultingQty,
+                                                         BinanceFuturesOrderClientResponse order,
+                                                         String originId,
+                                                         String walletId,
+                                                         UserCopyAllocationEntity allocation) {
+        if (!"OPEN".equals(originalEventType) || accounting == null) {
+            return;
+        }
+        PositionDeltaType computed = accounting.deltaType();
+        if (computed != PositionDeltaType.REDUCE
+                && computed != PositionDeltaType.CLOSE_FULL
+                && computed != PositionDeltaType.NOOP) {
+            return;
+        }
+        BigDecimal deltaQty = previousQty == null || resultingQty == null ? null : resultingQty.subtract(previousQty);
+        log.warn("event=copy_position.classification.corrected flow=live originalEventType={} computedDeltaType={} reasonCode=EVENT_TYPE_CONTRADICTS_POSITION_MATH warningCode=EVENT_TYPE_CONTRADICTS_POSITION_MATH previousQty={} resultingQty={} deltaQty={} symbol={} walletId={} profileKey={} strategyCode={} side={} originId={} orderId={}",
+                originalEventType,
+                computed,
+                previousQty,
+                resultingQty,
+                deltaQty,
+                symbol,
+                walletId,
+                allocation == null ? null : allocation.getStrategyKey(),
+                allocation == null ? null : allocation.getCopyStrategyCode(),
+                positionSide,
+                originId,
+                order == null ? null : order.getOrderId());
     }
 
     private boolean shouldApplyLiveAccounting(String eventType) {
@@ -3015,6 +3077,37 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return null;
         }
         return accounting == null || !accounting.accepted() ? null : accounting.netRealizedPnlUsd();
+    }
+
+    private void logLiveFlowLatency(CopyFlowTiming timing,
+                                    String result,
+                                    String originalEventType,
+                                    PositionDeltaType computedDeltaType,
+                                    String reasonCode,
+                                    String symbol,
+                                    PositionSide side,
+                                    String originId,
+                                    String walletId,
+                                    UserCopyAllocationEntity allocation,
+                                    BinanceFuturesOrderClientResponse order,
+                                    String traceId) {
+        if (timing == null) {
+            return;
+        }
+        log.info("{} originalEventType={} computedDeltaType={} reasonCode={} symbol={} side={} walletId={} profileKey={} strategyCode={} originId={} binanceOrderId={} clientOrderId={} traceId={}",
+                timing.logfmtCore("live", result),
+                safeLog(originalEventType),
+                computedDeltaType == null ? "NA" : computedDeltaType.name(),
+                safeLog(reasonCode),
+                safeLog(symbol),
+                side == null ? "NA" : side.name(),
+                safeLog(walletId),
+                allocation == null ? "NA" : safeLog(allocation.getStrategyKey()),
+                allocation == null ? "NA" : safeLog(allocation.getCopyStrategyCode()),
+                safeLog(originId),
+                order == null || order.getOrderId() == null ? "NA" : order.getOrderId(),
+                safeLog(firstNonBlank(order == null ? null : order.getClientOrderId(), null)),
+                safeLog(traceId));
     }
 
     private OffsetDateTime orderEventTime(BinanceFuturesOrderClientResponse order) {
@@ -4596,15 +4689,60 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private BinanceFuturesOrderClientResponse executeOrShadow(OperationDto dto, BigDecimal priceRef, UserCopyAllocationEntity allocation, String traceId) {
         if (!isShadowMode(allocation)) {
+            CopyFlowTiming timing = LIVE_FLOW_TIMING.get();
+            boolean createdTiming = false;
+            if (timing == null) {
+                timing = CopyFlowTiming.start();
+                LIVE_FLOW_TIMING.set(timing);
+                createdTiming = true;
+            }
+            long httpNs = timing == null ? 0L : timing.mark();
+            boolean httpRecorded = false;
             try {
                 return procesBinanceService.operationPosition(dto);
             } catch (BinanceApiReadinessException ex) {
                 blockLiveAllocationForApiReadiness(dto, allocation, traceId, ex);
+                if (timing != null) {
+                    timing.add(CopyFlowTiming.Stage.BINANCE_HTTP, httpNs);
+                    httpRecorded = true;
+                }
+                logLiveFlowLatency(timing, "skipped", "UNKNOWN", null, BinanceApiReadinessException.REASON_CODE,
+                        dto == null ? null : dto.getSymbol(),
+                        dto == null ? null : dto.getPositionSide(),
+                        dto == null ? null : dto.getOriginId(),
+                        dto == null ? null : dto.getWalletId(),
+                        allocation,
+                        null,
+                        traceId);
+                if (createdTiming) {
+                    LIVE_FLOW_TIMING.remove();
+                }
                 throw new SkipExecutionException(
                         BinanceApiReadinessException.REASON_CODE,
                         "Binance API key/IP/permisos Futures invalidos; LIVE bloqueado para esta allocation",
                         apiReadinessSkipDetails(dto, allocation, ex)
                 );
+            } catch (RuntimeException ex) {
+                if (timing != null) {
+                    timing.add(CopyFlowTiming.Stage.BINANCE_HTTP, httpNs);
+                    httpRecorded = true;
+                }
+                logLiveFlowLatency(timing, "error", "UNKNOWN", null, "BINANCE_HTTP_ERROR",
+                        dto == null ? null : dto.getSymbol(),
+                        dto == null ? null : dto.getPositionSide(),
+                        dto == null ? null : dto.getOriginId(),
+                        dto == null ? null : dto.getWalletId(),
+                        allocation,
+                        null,
+                        traceId);
+                if (createdTiming) {
+                    LIVE_FLOW_TIMING.remove();
+                }
+                throw ex;
+            } finally {
+                if (timing != null && !httpRecorded) {
+                    timing.add(CopyFlowTiming.Stage.BINANCE_HTTP, httpNs);
+                }
             }
         }
         BinanceFuturesOrderClientResponse response = buildShadowOrderResponse(dto, priceRef);
