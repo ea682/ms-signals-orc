@@ -34,7 +34,14 @@ import com.apunto.engine.service.copy.accounting.CopyAccountingResult;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingAdapter;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingInput;
 import com.apunto.engine.service.copy.accounting.PositionDeltaType;
+import com.apunto.engine.service.copy.leverage.CopyLeverageAuditCalculator;
+import com.apunto.engine.service.copy.leverage.CopyLeverageAuditInput;
+import com.apunto.engine.service.copy.leverage.CopyLeverageSnapshot;
 import com.apunto.engine.service.copy.observability.CopyFlowTiming;
+import com.apunto.engine.service.copy.observability.CopyFlowTimingContext;
+import com.apunto.engine.service.copy.slippage.AdverseSlippageCalculator;
+import com.apunto.engine.service.copy.slippage.AdverseSlippageResult;
+import com.apunto.engine.service.copy.slippage.CopySlippageAction;
 import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.PositionStatus;
@@ -70,6 +77,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -233,6 +241,42 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     @Value("${copy.rules.min-notional-safety-pct:0.05}")
     private BigDecimal minNotionalSafetyPct;
+
+    @Value("${copy.live-readiness.max-leverage-x:5}")
+    private BigDecimal copyLiveReadinessMaxLeverageX;
+
+    @Value("${copy.live-readiness.require-live-leverage-confirmed:true}")
+    private boolean requireLiveLeverageConfirmed;
+
+    @Value("${copy.live-readiness.block-on-margin-mode-mismatch:true}")
+    private boolean blockOnMarginModeMismatch;
+
+    @Value("${binance.trading-config-preconfigure.margin-type:CROSSED}")
+    private String configuredLiveMarginType;
+
+    @Value("${copy.live.enabled:false}")
+    private boolean copyLiveEnabled;
+
+    @Value("${copy.live.canary-enabled:false}")
+    private boolean copyLiveCanaryEnabled;
+
+    @Value("${copy.live.dry-run:true}")
+    private boolean copyLiveDryRun;
+
+    @Value("${copy.live.whitelist.user-ids:}")
+    private String copyLiveWhitelistUserIds;
+
+    @Value("${copy.live.whitelist.wallet-ids:}")
+    private String copyLiveWhitelistWalletIds;
+
+    @Value("${copy.live.whitelist.symbols:}")
+    private String copyLiveWhitelistSymbols;
+
+    @Value("${copy.live.whitelist.allocation-ids:}")
+    private String copyLiveWhitelistAllocationIds;
+
+    @Value("${copy.live.whitelist.strategy-codes:}")
+    private String copyLiveWhitelistStrategyCodes;
 
     private final CopyTradingMapper copyTradingMapper;
     private final FuturesPositionService futuresPositionService;
@@ -625,6 +669,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 log.info("event=copy.open.order.ok traceId={} originId={} userId={} wallet={} symbol={} orderId={} elapsedMs={}",
                         traceId, originId, userId, walletId, prepared.symbol, order.getOrderId(), elapsedMsSince(sendNs));
+                final CopyLeverageSnapshot leverageSnapshot = buildDirectOpenLeverageSnapshot(originOperation, prepared, order, allocation);
                 recordCopyOperationEvent(
                         "OPEN",
                         "OPEN",
@@ -643,7 +688,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         traceId,
                         "direct_open",
                         null,
-                        allocation
+                        allocation,
+                        leverageSnapshot
                 );
                 final long saveNs = System.nanoTime();
                 createNewOperation(order, walletId, originOperation.getIdOperacion(), userId, prepared.leverage, allocation);
@@ -832,6 +878,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 log.info("event=copy.open.order.ok traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} orderId={} elapsedMs={}",
                         allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol, order.getOrderId(), elapsedMsSince(sendNs));
+                final CopyLeverageSnapshot leverageSnapshot = buildDirectOpenLeverageSnapshot(originOperation, prepared, order, allocation);
                 recordCopyOperationEvent(
                         "OPEN",
                         "OPEN",
@@ -850,7 +897,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         allocationTraceId,
                         "direct_open",
                         isShadowMode(allocation) ? "allocation_shadow_open_created" : "allocation_open_created",
-                        allocation
+                        allocation,
+                        leverageSnapshot
                 );
                 final long saveNs = System.nanoTime();
                 createNewOperation(order, walletId, originOperation.getIdOperacion(), userId, prepared.leverage, allocation);
@@ -1778,6 +1826,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .markPrice(originOperation.getPrecioMercado())
                     .marginUsedUsd(originOperation.getMarginUsedUsd())
                     .notionalUsd(inferredNotional)
+                    .leverage(originOperation.getLeverage())
                     .sizeQty(originOperation.getSizeQty())
                     .sizeLegacy(originOperation.getSize())
                     .createdAt(toUtcOffsetDateTime(originOperation.getFechaCreacion()))
@@ -2075,6 +2124,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         priceRef,
                         targetQty,
                         targetNotionalFinal,
+                        leg.getLeverage(),
+                        leg.getNotionalUsd(),
+                        sourceMargin,
                         entryPriceRef,
                         leg.getCreatedAt(),
                         leg.getUpdatedAt(),
@@ -2434,6 +2486,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 target.leverage()
         );
         applyCopyMetadata(created, allocation);
+        final CopyLeverageSnapshot leverageSnapshot = buildTargetOpenLeverageSnapshot(target, dto, response, allocation);
         recordCopyOperationEvent(
                 "OPEN",
                 copyIntent == null ? "OPEN" : copyIntent,
@@ -2452,7 +2505,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 traceId,
                 source == null ? "rebalance_open" : source,
                 reasonCode,
-                allocation
+                allocation,
+                leverageSnapshot
         );
         persistActiveAfterOrder(created, activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol()), "rebalance_open_persist_failed");
         log.info("event=rebalance.copy.open_ok category=rebalance reasonCode={} reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} qty={} {}",
@@ -2504,6 +2558,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         );
         reopened.setIdOperation(existingCopy.getIdOperation());
         applyCopyMetadata(reopened, allocation);
+        final CopyLeverageSnapshot leverageSnapshot = buildTargetOpenLeverageSnapshot(target, dto, response, allocation);
         recordCopyOperationEvent(
                 "REOPEN",
                 "OPEN",
@@ -2522,7 +2577,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 traceId,
                 "rebalance_reopen",
                 null,
-                allocation
+                allocation,
+                leverageSnapshot
         );
         persistActiveAfterOrder(reopened, activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol()), "rebalance_reopen_persist_failed");
         log.info("event=rebalance.copy.reopen_ok category=rebalance reasonAlias=inactive_copy_reopened friendlyReason=copia_existente_reabierta explanation=se_actualizo_la_copia_existente_en_vez_de_insertar_una_nueva copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} copyId={} orderId={} qty={}",
@@ -2633,6 +2689,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final BigDecimal addUsd = filledQty.multiply(fillPrice);
         final BigDecimal newUsd = oldUsd.add(addUsd);
         final BigDecimal newEntry = resolvePriceRef(accounting.newAvgEntryPrice(), currentCopy.getPriceEntry());
+        final CopyLeverageSnapshot leverageSnapshot = buildAdjustmentLeverageSnapshot(currentCopy, target, response);
 
         recordCopyOperationEvent(
                 "INCREASE",
@@ -2652,7 +2709,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 traceId,
                 "rebalance_increase",
                 null,
-                allocation
+                allocation,
+                leverageSnapshot
         );
 
         final CopyOperationDto updated = CopyOperationDto.builder()
@@ -2717,6 +2775,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final BigDecimal remainingQty = currentQty.subtract(filledQty);
+        final CopyLeverageSnapshot leverageSnapshot = buildAdjustmentLeverageSnapshot(currentCopy, target, response);
         recordCopyOperationEvent(
                 remainingQty.compareTo(ZERO) <= 0 || targetQty.compareTo(ZERO) <= 0 ? "CLOSE" : "REDUCE",
                 remainingQty.compareTo(ZERO) <= 0 || targetQty.compareTo(ZERO) <= 0 ? "CLOSE" : "ADJUST",
@@ -2735,7 +2794,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 traceId,
                 "rebalance_reduce",
                 null,
-                allocation
+                allocation,
+                leverageSnapshot
         );
 
         final OffsetDateTime eventTime = copyTradingMapper.toUtcOffsetDateTime(response.getUpdateTime());
@@ -2927,10 +2987,43 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                           String source,
                                           String reasonCode,
                                           UserCopyAllocationEntity allocation) {
+        recordCopyOperationEvent(eventType, copyIntent, originId, userId, walletId, symbol, positionSide, side,
+                clientOrderId, order, requestedQty, previousQty, resultingQty, entryPrice, traceId, source, reasonCode, allocation, null);
+    }
+
+    private void recordCopyOperationEvent(String eventType,
+                                          String copyIntent,
+                                          String originId,
+                                          String userId,
+                                          String walletId,
+                                          String symbol,
+                                          PositionSide positionSide,
+                                          Side side,
+                                          String clientOrderId,
+                                          BinanceFuturesOrderClientResponse order,
+                                          BigDecimal requestedQty,
+                                          BigDecimal previousQty,
+                                          BigDecimal resultingQty,
+                                          BigDecimal entryPrice,
+                                          String traceId,
+                                          String source,
+                                          String reasonCode,
+                                          UserCopyAllocationEntity allocation,
+                                          CopyLeverageSnapshot leverageSnapshot) {
         final BigDecimal executedQty = order == null ? ZERO : safeQty(copyTradingMapper.resolveFilledQty(order));
-        final BigDecimal price = resolvePriceRef(order == null ? null : order.getAvgPrice(), entryPrice);
+        final BigDecimal executionPrice = executionPrice(order);
+        final BigDecimal price = resolvePriceRef(executionPrice, entryPrice);
         final BigDecimal notional = price.compareTo(ZERO) <= 0 ? ZERO : executedQty.multiply(price);
-        CopyFlowTiming timing = LIVE_FLOW_TIMING.get();
+        final Side executionSide = side == null ? sideFromOrder(order) : side;
+        final AdverseSlippageResult slippage = AdverseSlippageCalculator.calculateAdverseSlippage(
+                executionSide,
+                CopySlippageAction.fromEventType(eventType),
+                entryPrice,
+                executionPrice,
+                executedQty
+        );
+        final String priceSource = executionPriceSource(order, executionPrice, entryPrice);
+        CopyFlowTiming timing = currentLiveFlowTiming();
         boolean localTiming = false;
         if (timing == null) {
             timing = CopyFlowTiming.start();
@@ -2978,10 +3071,142 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .build());
         timing.add(CopyFlowTiming.Stage.DB_PERSIST, dbNs);
         timing.add(CopyFlowTiming.Stage.BINANCE_RESPONSE_TO_PERSIST, responseToPersistNs);
-        logLiveFlowLatency(timing, "success", eventType, accounting == null ? null : accounting.deltaType(), reasonCode, symbol, positionSide, originId, walletId, allocation, order, firstNonBlank(traceId, MDC.get("traceId")));
+        logLiveFlowLatency(timing, "success", eventType, accounting == null ? null : accounting.deltaType(), reasonCode, symbol, positionSide, originId, walletId, allocation, order, firstNonBlank(traceId, MDC.get("traceId")), slippage, priceSource, leverageSnapshot);
         if (LIVE_FLOW_TIMING.get() == timing || localTiming) {
             LIVE_FLOW_TIMING.remove();
         }
+    }
+
+    private CopyLeverageSnapshot buildDirectOpenLeverageSnapshot(OperacionDto originOperation,
+                                                                 PreparedOpen prepared,
+                                                                 BinanceFuturesOrderClientResponse order,
+                                                                 UserCopyAllocationEntity allocation) {
+        if (prepared == null) {
+            return CopyLeverageSnapshot.unknown();
+        }
+        final boolean shadow = isShadowMode(allocation);
+        final BigDecimal requestedLeverage = prepared.dto == null || prepared.dto.getLeverage() == null
+                ? null
+                : BigDecimal.valueOf(prepared.dto.getLeverage());
+        final BigDecimal liveRequestedLeverage = shadow ? null : firstPositive(order == null ? null : order.getLiveRequestedLeverageX(), requestedLeverage);
+        final BigDecimal liveExchangeLeverage = shadow ? null : firstPositive(order == null ? null : order.getLiveExchangeLeverageX());
+        final BigDecimal liveEffectiveLeverage = shadow ? null : firstPositive(order == null ? null : order.getLiveEffectiveLeverageX());
+        final BigDecimal liveNotional = shadow ? null : firstPositive(order == null ? null : order.getLiveNotionalUsd(), orderNotional(order, prepared.entryPrice), prepared.notional);
+        final BigDecimal liveMargin = shadow ? null : firstPositive(order == null ? null : order.getLiveRequiredMarginUsd(), computeBufferedMarginForNotionalValue(liveNotional, firstPositive(liveEffectiveLeverage, liveRequestedLeverage)));
+        final String liveMarginMode = shadow ? null : firstNonBlank(order == null ? null : order.getLiveMarginMode(), configuredLiveMarginType);
+
+        return CopyLeverageAuditCalculator.evaluateOpen(CopyLeverageAuditInput.builder()
+                .sourceLeverageX(originOperation == null ? null : originOperation.getLeverage())
+                .sourceNotionalUsd(originOperation == null ? null : firstPositive(originOperation.getNotionalUsd(), inferEconomicNotionalFromEvent(originOperation)))
+                .sourceMarginUsd(originOperation == null ? null : originOperation.getMarginUsedUsd())
+                .shadowRequestedLeverageX(requestedLeverage)
+                .shadowAppliedLeverageX(requestedLeverage)
+                .shadowNotionalUsd(prepared.notional)
+                .shadowRequiredMarginUsd(prepared.marginRequired)
+                .liveRequestedLeverageX(liveRequestedLeverage)
+                .liveExchangeLeverageX(liveExchangeLeverage)
+                .liveEffectiveLeverageX(liveEffectiveLeverage)
+                .liveNotionalUsd(liveNotional)
+                .liveRequiredMarginUsd(liveMargin)
+                .liveMarginMode(liveMarginMode)
+                .leverageCapX(copyLiveReadinessMaxLeverageX)
+                .leverageSource(originOperation != null && positive(originOperation.getLeverage()) ? "hyperliquid_delta" : "missing")
+                .requireLiveExchangeLeverage(!shadow && requireLiveLeverageConfirmed)
+                .requireMarginModeMatch(blockOnMarginModeMismatch)
+                .build());
+    }
+
+    private CopyLeverageSnapshot buildTargetOpenLeverageSnapshot(TargetLeg target,
+                                                                OperationDto dto,
+                                                                BinanceFuturesOrderClientResponse order,
+                                                                UserCopyAllocationEntity allocation) {
+        if (target == null) {
+            return CopyLeverageSnapshot.unknown();
+        }
+        final boolean shadow = isShadowMode(allocation);
+        final BigDecimal requestedLeverage = dto == null || dto.getLeverage() == null
+                ? BigDecimal.valueOf(target.leverage())
+                : BigDecimal.valueOf(dto.getLeverage());
+        final BigDecimal liveRequestedLeverage = shadow ? null : firstPositive(order == null ? null : order.getLiveRequestedLeverageX(), requestedLeverage);
+        final BigDecimal liveExchangeLeverage = shadow ? null : firstPositive(order == null ? null : order.getLiveExchangeLeverageX());
+        final BigDecimal liveEffectiveLeverage = shadow ? null : firstPositive(order == null ? null : order.getLiveEffectiveLeverageX());
+        final BigDecimal liveNotional = shadow ? null : firstPositive(order == null ? null : order.getLiveNotionalUsd(), orderNotional(order, target.priceRef()), target.targetNotional());
+        final BigDecimal liveMargin = shadow ? null : firstPositive(order == null ? null : order.getLiveRequiredMarginUsd(), computeBufferedMarginForNotionalValue(liveNotional, firstPositive(liveEffectiveLeverage, liveRequestedLeverage)));
+        final String liveMarginMode = shadow ? null : firstNonBlank(order == null ? null : order.getLiveMarginMode(), configuredLiveMarginType);
+
+        return CopyLeverageAuditCalculator.evaluateOpen(CopyLeverageAuditInput.builder()
+                .sourceLeverageX(target.sourceLeverage())
+                .sourceNotionalUsd(target.sourceNotional())
+                .sourceMarginUsd(target.sourceMargin())
+                .shadowRequestedLeverageX(requestedLeverage)
+                .shadowAppliedLeverageX(requestedLeverage)
+                .shadowNotionalUsd(target.targetNotional())
+                .shadowRequiredMarginUsd(computeBufferedMarginForNotionalValue(target.targetNotional(), requestedLeverage))
+                .liveRequestedLeverageX(liveRequestedLeverage)
+                .liveExchangeLeverageX(liveExchangeLeverage)
+                .liveEffectiveLeverageX(liveEffectiveLeverage)
+                .liveNotionalUsd(liveNotional)
+                .liveRequiredMarginUsd(liveMargin)
+                .liveMarginMode(liveMarginMode)
+                .leverageCapX(copyLiveReadinessMaxLeverageX)
+                .leverageSource(positive(target.sourceLeverage()) ? "hyperliquid_position" : "missing")
+                .requireLiveExchangeLeverage(!shadow && requireLiveLeverageConfirmed)
+                .requireMarginModeMatch(blockOnMarginModeMismatch)
+                .build());
+    }
+
+    private CopyLeverageSnapshot buildAdjustmentLeverageSnapshot(CopyOperationDto currentCopy,
+                                                                TargetLeg target,
+                                                                BinanceFuturesOrderClientResponse order) {
+        BigDecimal inherited = firstPositive(
+                currentCopy == null ? null : currentCopy.getLeverage(),
+                target == null ? null : BigDecimal.valueOf(target.leverage())
+        );
+        BigDecimal notional = target == null ? orderNotional(order, null) : orderNotional(order, target.priceRef());
+        BigDecimal margin = computeBufferedMarginForNotionalValue(notional, inherited);
+        return CopyLeverageAuditCalculator.inheritedForReduction(
+                inherited,
+                notional,
+                margin,
+                configuredLiveMarginType,
+                "live_copy_position"
+        );
+    }
+
+    private BigDecimal orderNotional(BinanceFuturesOrderClientResponse order, BigDecimal priceFallback) {
+        if (order == null) {
+            return null;
+        }
+        if (positive(order.getCumQuote())) {
+            return order.getCumQuote().abs();
+        }
+        final BigDecimal qty = safeQty(copyTradingMapper.resolveFilledQty(order));
+        final BigDecimal price = resolvePriceRef(executionPrice(order), priceFallback);
+        if (qty.compareTo(ZERO) <= 0 || price.compareTo(ZERO) <= 0) {
+            return null;
+        }
+        return qty.multiply(price).abs();
+    }
+
+    private BigDecimal computeBufferedMarginForNotionalValue(BigDecimal notional, BigDecimal leverage) {
+        if (!positive(notional) || !positive(leverage)) {
+            return null;
+        }
+        return notional
+                .divide(leverage, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
+                .multiply(ONE.add(safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT)));
+    }
+
+    private BigDecimal firstPositive(BigDecimal... values) {
+        if (values == null) {
+            return null;
+        }
+        for (BigDecimal value : values) {
+            if (positive(value)) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private CopyAccountingResult applyLiveAccounting(String eventType,
@@ -3039,13 +3264,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                                          String originId,
                                                          String walletId,
                                                          UserCopyAllocationEntity allocation) {
-        if (!"OPEN".equals(originalEventType) || accounting == null) {
+        if (accounting == null) {
             return;
         }
         PositionDeltaType computed = accounting.deltaType();
-        if (computed != PositionDeltaType.REDUCE
-                && computed != PositionDeltaType.CLOSE_FULL
-                && computed != PositionDeltaType.NOOP) {
+        if (!eventTypeContradictsMath(originalEventType, computed)) {
             return;
         }
         BigDecimal deltaQty = previousQty == null || resultingQty == null ? null : resultingQty.subtract(previousQty);
@@ -3062,6 +3285,24 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 positionSide,
                 originId,
                 order == null ? null : order.getOrderId());
+    }
+
+    private boolean eventTypeContradictsMath(String originalEventType, PositionDeltaType computed) {
+        if (originalEventType == null || computed == null) {
+            return false;
+        }
+        String original = originalEventType.trim().toUpperCase(Locale.ROOT);
+        return switch (original) {
+            case "OPEN", "INCREASE", "FLIP" ->
+                    computed == PositionDeltaType.REDUCE
+                            || computed == PositionDeltaType.CLOSE_FULL
+                            || computed == PositionDeltaType.NOOP
+                            || computed == PositionDeltaType.SNAPSHOT_NOOP;
+            case "REDUCE", "CLOSE", "PANIC_CLOSE" ->
+                    computed == PositionDeltaType.OPEN
+                            || computed == PositionDeltaType.INCREASE;
+            default -> false;
+        };
     }
 
     private boolean shouldApplyLiveAccounting(String eventType) {
@@ -3091,10 +3332,29 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                     UserCopyAllocationEntity allocation,
                                     BinanceFuturesOrderClientResponse order,
                                     String traceId) {
+        logLiveFlowLatency(timing, result, originalEventType, computedDeltaType, reasonCode, symbol, side, originId, walletId, allocation, order, traceId, null, "unknown", null);
+    }
+
+    private void logLiveFlowLatency(CopyFlowTiming timing,
+                                    String result,
+                                    String originalEventType,
+                                    PositionDeltaType computedDeltaType,
+                                    String reasonCode,
+                                    String symbol,
+                                    PositionSide side,
+                                    String originId,
+                                    String walletId,
+                                    UserCopyAllocationEntity allocation,
+                                    BinanceFuturesOrderClientResponse order,
+                                    String traceId,
+                                    AdverseSlippageResult slippage,
+                                    String priceSource,
+                                    CopyLeverageSnapshot leverageSnapshot) {
         if (timing == null) {
             return;
         }
-        log.info("{} originalEventType={} computedDeltaType={} reasonCode={} symbol={} side={} walletId={} profileKey={} strategyCode={} originId={} binanceOrderId={} clientOrderId={} traceId={}",
+        final CopyLeverageSnapshot leverage = leverageSnapshot == null ? CopyLeverageSnapshot.unknown() : leverageSnapshot;
+        log.info("{} originalEventType={} computedDeltaType={} reasonCode={} symbol={} side={} walletId={} profileKey={} strategyCode={} originId={} binanceOrderId={} clientOrderId={} traceId={} expectedPrice={} executedAvgPrice={} priceSource={} rawSlippageBps={} adverseSlippageBps={} rawSlippageUsd={} adverseSlippageUsd={} slippageStatus={} {}",
                 timing.logfmtCore("live", result),
                 safeLog(originalEventType),
                 computedDeltaType == null ? "NA" : computedDeltaType.name(),
@@ -3107,7 +3367,76 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 safeLog(originId),
                 order == null || order.getOrderId() == null ? "NA" : order.getOrderId(),
                 safeLog(firstNonBlank(order == null ? null : order.getClientOrderId(), null)),
-                safeLog(traceId));
+                safeLog(traceId),
+                slippage == null ? "NA" : plain(slippage.expectedPrice()),
+                slippage == null ? "NA" : plain(slippage.executedPrice()),
+                safeLog(priceSource),
+                slippage == null ? "NA" : plain(slippage.rawSlippageBps()),
+                slippage == null ? "NA" : plain(slippage.adverseSlippageBps()),
+                slippage == null ? "NA" : plain(slippage.rawSlippageUsd()),
+                slippage == null ? "NA" : plain(slippage.adverseSlippageUsd()),
+                slippage == null || slippage.status() == null ? "NA" : slippage.status().name(),
+                leverage.logFields());
+    }
+
+    private BigDecimal executionPrice(BinanceFuturesOrderClientResponse order) {
+        if (order == null) {
+            return null;
+        }
+        if (positive(order.getAvgPrice())) {
+            return order.getAvgPrice();
+        }
+        if (positive(order.getPrice())) {
+            return order.getPrice();
+        }
+        BigDecimal qty = safeQty(copyTradingMapper.resolveFilledQty(order));
+        if (positive(order.getCumQuote()) && positive(qty)) {
+            return order.getCumQuote().divide(qty, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+        return null;
+    }
+
+    private String executionPriceSource(BinanceFuturesOrderClientResponse order, BigDecimal executionPrice, BigDecimal entryPrice) {
+        if (order == null) {
+            return "unknown";
+        }
+        if (positive(order.getAvgPrice()) && Objects.equals(order.getAvgPrice(), executionPrice)) {
+            return "order_avg_price";
+        }
+        if (positive(order.getPrice()) && Objects.equals(order.getPrice(), executionPrice)) {
+            return "order_price";
+        }
+        if (positive(order.getCumQuote()) && executionPrice != null) {
+            return "order_cum_quote";
+        }
+        if (!positive(executionPrice) && positive(entryPrice)) {
+            return "expected_price_fallback";
+        }
+        return "unknown";
+    }
+
+    private Side sideFromOrder(BinanceFuturesOrderClientResponse order) {
+        if (order == null || order.getSide() == null || order.getSide().isBlank()) {
+            return null;
+        }
+        try {
+            return Side.valueOf(order.getSide().trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
+    }
+
+    private boolean positive(BigDecimal value) {
+        return value != null && value.compareTo(ZERO) > 0;
+    }
+
+    private String plain(BigDecimal value) {
+        return value == null ? "NA" : value.stripTrailingZeros().toPlainString();
+    }
+
+    private CopyFlowTiming currentLiveFlowTiming() {
+        CopyFlowTiming timing = LIVE_FLOW_TIMING.get();
+        return timing == null ? CopyFlowTimingContext.currentLive() : timing;
     }
 
     private OffsetDateTime orderEventTime(BinanceFuturesOrderClientResponse order) {
@@ -3229,7 +3558,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 traceId,
                 "panic_close_after_persist_failure",
                 "persist_failed_after_binance_order",
-                allocation
+                allocation,
+                CopyLeverageAuditCalculator.inheritedForReduction(
+                        BigDecimal.valueOf(prepared.leverage),
+                        orderNotional(closeResp, openResponse == null ? null : openResponse.getAvgPrice()),
+                        computeBufferedMarginForNotionalValue(orderNotional(closeResp, openResponse == null ? null : openResponse.getAvgPrice()), BigDecimal.valueOf(prepared.leverage)),
+                        configuredLiveMarginType,
+                        "panic_close_open_response"
+                )
         );
         activeCopyOperationCache.forgetPending(originId, userId, traceId, "panic_close_after_persist_failure");
         log.warn("event=panic_close.ok traceId={} originId={} userId={} wallet={} symbol={} qty={} orderId={}",
@@ -3301,9 +3637,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 elapsedMsSince(sendNs),
                 CopyLogAdvice.fields(effectiveReasonCode, CopyLogAdvice.context(null, null, 1, null, null, true, activeCopyOperationCache.activeSize(), source == null ? "direct_close" : source)));
         final String traceId = activeCopyOperationCache.traceId(originId, userId, copyOperation.getIdWalletOrigin(), copyOperation.getParsymbol());
+        final CopyLeverageSnapshot leverageSnapshot = CopyLeverageAuditCalculator.inheritedForReduction(
+                copyOperation.getLeverage(),
+                orderNotional(order, copyOperation.getPriceEntry()),
+                computeBufferedMarginForNotionalValue(orderNotional(order, copyOperation.getPriceEntry()), copyOperation.getLeverage()),
+                configuredLiveMarginType,
+                "live_copy_position"
+        );
+        final BigDecimal requestedCloseQty = parseQuantity(closeRequest.getQuantity());
+        final BigDecimal previousQty = safeQty(copyOperation.getSizePar());
+        final BigDecimal executedCloseQty = safeQty(copyTradingMapper.resolveFilledQty(order));
+        final BigDecimal remainingQty = previousQty.subtract(executedCloseQty).max(ZERO);
+        final boolean partialFillClose = executedCloseQty.compareTo(ZERO) > 0 && remainingQty.compareTo(ZERO) > 0;
         recordCopyOperationEvent(
-                "CLOSE",
-                copyIntent == null ? "CLOSE" : copyIntent,
+                partialFillClose ? "REDUCE" : "CLOSE",
+                partialFillClose ? "PARTIAL_CLOSE" : copyIntent == null ? "CLOSE" : copyIntent,
                 originId,
                 userId,
                 copyOperation.getIdWalletOrigin(),
@@ -3312,15 +3660,52 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 closeRequest.getSide(),
                 closeRequest.getClientOrderId(),
                 order,
-                parseQuantity(closeRequest.getQuantity()),
-                safeQty(copyOperation.getSizePar()),
-                ZERO,
+                requestedCloseQty,
+                previousQty,
+                remainingQty,
                 copyOperation.getPriceEntry(),
                 traceId,
                 source == null ? "direct_close" : source,
                 reasonCode,
-                allocationMetadataFromCopy(copyOperation)
+                allocationMetadataFromCopy(copyOperation),
+                leverageSnapshot
         );
+
+        if (partialFillClose) {
+            final BigDecimal currentUsd = safeUsd(copyOperation.getSiseUsd(), previousQty, copyOperation.getPriceEntry());
+            final BigDecimal unitUsd = previousQty.compareTo(ZERO) <= 0
+                    ? ZERO
+                    : currentUsd.divide(previousQty, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+            final CopyOperationDto partiallyClosed = CopyOperationDto.builder()
+                    .idOperation(copyOperation.getIdOperation())
+                    .idOrden(copyOperation.getIdOrden())
+                    .idUser(copyOperation.getIdUser())
+                    .idOrderOrigin(copyOperation.getIdOrderOrigin())
+                    .idWalletOrigin(copyOperation.getIdWalletOrigin())
+                    .parsymbol(copyOperation.getParsymbol())
+                    .typeOperation(copyOperation.getTypeOperation())
+                    .leverage(copyOperation.getLeverage())
+                    .siseUsd(unitUsd.multiply(remainingQty))
+                    .sizePar(remainingQty)
+                    .priceEntry(copyOperation.getPriceEntry())
+                    .priceClose(null)
+                    .dateCreation(copyOperation.getDateCreation())
+                    .dateClose(null)
+                    .active(true)
+                    .build();
+            applyCopyMetadata(partiallyClosed, allocationMetadataFromCopy(copyOperation));
+            persistActiveAfterOrder(partiallyClosed, traceId, "partial_close_persist_failed");
+            log.warn("event=copy.close.partial_fill category=copy reasonCode=PARTIAL_FILL reasonAlias=partial_close_kept_active friendlyReason=cierre_parcial explanation=binance_ejecuto_solo_parte_del_cierre_y_la_copia_sigue_activa copyImpact=copy_still_active originId={} userId={} wallet={} symbol={} orderId={} requestedQty={} executedQty={} remainingQty={}",
+                    originId,
+                    userId,
+                    copyOperation.getIdWalletOrigin(),
+                    copyOperation.getParsymbol(),
+                    order.getOrderId(),
+                    requestedCloseQty.toPlainString(),
+                    executedCloseQty.toPlainString(),
+                    remainingQty.toPlainString());
+            return;
+        }
 
         final CopyOperationDto buildCopyOperation = copyTradingMapper.buildCopyCloseOperationDto(copyOperation, order);
         applyCopyMetadata(buildCopyOperation, allocationMetadataFromCopy(copyOperation));
@@ -4687,9 +5072,81 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
     }
 
+    private LiveExecutionGateDecision liveExecutionGate(OperationDto dto, UserCopyAllocationEntity allocation) {
+        boolean reduceOnly = dto != null && dto.isReduceOnly();
+        if (!copyLiveEnabled) {
+            return new LiveExecutionGateDecision(false, "LIVE_DISABLED", false);
+        }
+        if (copyLiveDryRun) {
+            return new LiveExecutionGateDecision(false, "LIVE_DRY_RUN", false);
+        }
+        if (reduceOnly) {
+            return new LiveExecutionGateDecision(true, "LIVE_REDUCTION_ALLOWED", true);
+        }
+        if (!copyLiveCanaryEnabled) {
+            return new LiveExecutionGateDecision(false, "LIVE_CANARY_DISABLED", false);
+        }
+        boolean whitelisted = liveWhitelisted(dto, allocation);
+        if (!whitelisted) {
+            return new LiveExecutionGateDecision(false, "LIVE_WHITELIST_BLOCKED", false);
+        }
+        return new LiveExecutionGateDecision(true, "LIVE_CANARY_WHITELIST_ALLOWED", true);
+    }
+
+    private boolean liveWhitelisted(OperationDto dto, UserCopyAllocationEntity allocation) {
+        boolean anyConfigured = false;
+        Set<String> users = parseWhitelist(copyLiveWhitelistUserIds);
+        if (!users.isEmpty()) {
+            anyConfigured = true;
+            if (!users.contains(normalizeWhitelistValue(dto == null ? null : dto.getUserId()))) return false;
+        }
+        Set<String> wallets = parseWhitelist(copyLiveWhitelistWalletIds);
+        if (!wallets.isEmpty()) {
+            anyConfigured = true;
+            if (!wallets.contains(normalizeWhitelistValue(dto == null ? null : dto.getWalletId()))) return false;
+        }
+        Set<String> symbols = parseWhitelist(copyLiveWhitelistSymbols);
+        if (!symbols.isEmpty()) {
+            anyConfigured = true;
+            if (!symbols.contains(normalizeWhitelistValue(dto == null ? null : dto.getSymbol()))) return false;
+        }
+        Set<String> allocations = parseWhitelist(copyLiveWhitelistAllocationIds);
+        if (!allocations.isEmpty()) {
+            anyConfigured = true;
+            if (!allocations.contains(normalizeWhitelistValue(allocation == null || allocation.getId() == null ? null : allocation.getId().toString()))) return false;
+        }
+        Set<String> strategies = parseWhitelist(copyLiveWhitelistStrategyCodes);
+        if (!strategies.isEmpty()) {
+            anyConfigured = true;
+            if (!strategies.contains(normalizeWhitelistValue(allocation == null ? null : allocation.getCopyStrategyCode()))) return false;
+        }
+        return anyConfigured;
+    }
+
+    private Set<String> parseWhitelist(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Set.of();
+        }
+        return java.util.Arrays.stream(raw.split(","))
+                .map(this::normalizeWhitelistValue)
+                .filter(value -> value != null && !value.isBlank())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private String normalizeWhitelistValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.isBlank() ? null : normalized.toUpperCase(Locale.ROOT);
+    }
+
+    private record LiveExecutionGateDecision(boolean allowed, String reasonCode, boolean realBinanceAllowed) {
+    }
+
     private BinanceFuturesOrderClientResponse executeOrShadow(OperationDto dto, BigDecimal priceRef, UserCopyAllocationEntity allocation, String traceId) {
         if (!isShadowMode(allocation)) {
-            CopyFlowTiming timing = LIVE_FLOW_TIMING.get();
+            CopyFlowTiming timing = currentLiveFlowTiming();
             boolean createdTiming = false;
             if (timing == null) {
                 timing = CopyFlowTiming.start();
@@ -4698,6 +5155,28 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
             long httpNs = timing == null ? 0L : timing.mark();
             boolean httpRecorded = false;
+            LiveExecutionGateDecision liveGate = liveExecutionGate(dto, allocation);
+            if (!liveGate.allowed()) {
+                if (timing != null) {
+                    timing.add(CopyFlowTiming.Stage.BINANCE_HTTP, httpNs);
+                }
+                log.warn("event=copy.live.gate.blocked reasonCode={} traceId={} userId={} wallet={} allocationId={} strategy={} symbol={} side={} positionSide={} reduceOnly={} liveEnabled={} canaryEnabled={} dryRun={} realBinanceAllowed={} copyImpact=mock_fill_no_real_binance",
+                        liveGate.reasonCode(),
+                        traceId,
+                        dto == null ? null : dto.getUserId(),
+                        dto == null ? null : dto.getWalletId(),
+                        allocation == null ? null : allocation.getId(),
+                        allocation == null ? null : allocation.getCopyStrategyCode(),
+                        dto == null ? null : dto.getSymbol(),
+                        dto == null ? null : dto.getSide(),
+                        dto == null ? null : dto.getPositionSide(),
+                        dto != null && dto.isReduceOnly(),
+                        copyLiveEnabled,
+                        copyLiveCanaryEnabled,
+                        copyLiveDryRun,
+                        liveGate.realBinanceAllowed());
+                return buildShadowOrderResponse(dto, priceRef);
+            }
             try {
                 return procesBinanceService.operationPosition(dto);
             } catch (BinanceApiReadinessException ex) {
@@ -4865,9 +5344,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return r != null
                 && r.getOrderId() != null
                 && r.getSymbol() != null
-                && (r.getExecutedQty() != null || r.getCumQty() != null || r.getOrigQty() != null)
-                && r.getAvgPrice() != null
+                && safeQty(copyTradingMapper.resolveFilledQty(r)).compareTo(ZERO) > 0
+                && hasExecutablePrice(r)
                 && r.getUpdateTime() != null;
+    }
+
+    private boolean hasExecutablePrice(BinanceFuturesOrderClientResponse order) {
+        if (order == null) {
+            return false;
+        }
+        if (positive(order.getAvgPrice()) || positive(order.getPrice())) {
+            return true;
+        }
+        BigDecimal qty = safeQty(copyTradingMapper.resolveFilledQty(order));
+        return positive(order.getCumQuote()) && qty.compareTo(ZERO) > 0;
     }
 
 
@@ -4916,6 +5406,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                              BigDecimal priceRef,
                              BigDecimal targetQty,
                              BigDecimal targetNotional,
+                             BigDecimal sourceLeverage,
+                             BigDecimal sourceNotional,
+                             BigDecimal sourceMargin,
                              BigDecimal entryPrice,
                              OffsetDateTime sourceCreatedAt,
                              OffsetDateTime sourceUpdatedAt,
@@ -5206,17 +5699,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return margin;
         }
 
-        final int leverageRef = resolveSourceLeverageReference(walletMetric);
+        final BigDecimal leverageRef = firstPositive(leg.getLeverage(), BigDecimal.valueOf(resolveSourceLeverageReference(walletMetric)));
 
         BigDecimal notional = abs(leg.getNotionalUsd());
-        if (notional.compareTo(ZERO) > 0 && leverageRef > 0) {
-            return notional.divide(BigDecimal.valueOf(leverageRef), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        if (notional.compareTo(ZERO) > 0 && positive(leverageRef)) {
+            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
         }
 
         final BigDecimal priceRef = resolvePriceRef(leg.getMarkPrice(), leg.getEntryPrice());
         notional = safeQty(leg.getSizeQty()).multiply(priceRef);
-        if (notional.compareTo(ZERO) > 0 && leverageRef > 0) {
-            return notional.divide(BigDecimal.valueOf(leverageRef), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        if (notional.compareTo(ZERO) > 0 && positive(leverageRef)) {
+            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
         }
 
         return abs(leg.getSizeLegacy());
@@ -5232,17 +5725,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return margin;
         }
 
-        final int leverageRef = resolveSourceLeverageReference(walletMetric);
+        final BigDecimal leverageRef = firstPositive(originOperation.getLeverage(), BigDecimal.valueOf(resolveSourceLeverageReference(walletMetric)));
 
         BigDecimal notional = abs(originOperation.getNotionalUsd());
-        if (notional.compareTo(ZERO) > 0 && leverageRef > 0) {
-            return notional.divide(BigDecimal.valueOf(leverageRef), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        if (notional.compareTo(ZERO) > 0 && positive(leverageRef)) {
+            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
         }
 
         final BigDecimal priceRef = resolvePriceRef(originOperation.getPrecioMercado(), originOperation.getPrecioEntrada());
         notional = safeQty(originOperation.getSizeQty()).multiply(priceRef);
-        if (notional.compareTo(ZERO) > 0 && leverageRef > 0) {
-            return notional.divide(BigDecimal.valueOf(leverageRef), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        if (notional.compareTo(ZERO) > 0 && positive(leverageRef)) {
+            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
         }
 
         return abs(originOperation.getSize());

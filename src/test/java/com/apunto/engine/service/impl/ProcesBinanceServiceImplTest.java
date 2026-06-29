@@ -17,9 +17,11 @@ import com.apunto.engine.shared.enums.OrderType;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.apunto.engine.shared.enums.Side;
 import com.apunto.engine.shared.exception.BinanceApiReadinessException;
+import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.math.BigDecimal;
@@ -27,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,6 +41,7 @@ class ProcesBinanceServiceImplTest {
         CapturingBinanceClient standardClient = new CapturingBinanceClient();
         CapturingBinanceClient closeClient = new CapturingBinanceClient();
         ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(standardClient, closeClient, new ObjectMapper());
+        service.setOrderSubmitEnabledForTest(true);
 
         service.operationPosition(OperationDto.builder()
                 .symbol("BTCUSDT")
@@ -64,6 +68,7 @@ class ProcesBinanceServiceImplTest {
         CapturingBinanceClient client = new CapturingBinanceClient();
         CapturingBinanceClient closeClient = new CapturingBinanceClient();
         ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+        service.setOrderSubmitEnabledForTest(true);
 
         service.operationPosition(OperationDto.builder()
                 .symbol("BTCUSDT")
@@ -79,6 +84,30 @@ class ProcesBinanceServiceImplTest {
         assertEquals(Boolean.FALSE, client.lastRequest.getReduceOnly());
         assertNull(client.lastRequest.getConfigureAccountSettings());
         assertNull(closeClient.lastCloseRequest);
+    }
+
+    @Test
+    void orderSubmitDisabledBlocksPrivateBinanceCalls() {
+        CapturingBinanceClient client = new CapturingBinanceClient();
+        CapturingBinanceClient closeClient = new CapturingBinanceClient();
+        ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+        service.setOrderSubmitEnabledForTest(false);
+
+        SkipExecutionException ex = assertThrows(SkipExecutionException.class, () ->
+                service.operationPosition(OperationDto.builder()
+                        .symbol("BTCUSDT")
+                        .side(Side.BUY)
+                        .type(OrderType.MARKET)
+                        .positionSide(PositionSide.LONG)
+                        .quantity("0.01")
+                        .reduceOnly(false)
+                        .apiKey("api-key")
+                        .secret("secret")
+                        .build()));
+
+        assertEquals("binance_order_submit_disabled", ex.getReasonCode());
+        assertNull(client.lastRequest);
+        assertFalse(closeClient.closeCalled);
     }
 
     @Test
@@ -100,6 +129,7 @@ class ProcesBinanceServiceImplTest {
         CapturingBinanceClient closeClient = new CapturingBinanceClient();
         client.openFailure = invalidApiKeyResponse("/api/binance/futures/order");
         ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+        service.setOrderSubmitEnabledForTest(true);
 
         BinanceApiReadinessException ex = assertThrows(BinanceApiReadinessException.class, () ->
                 service.operationPosition(OperationDto.builder()
@@ -118,11 +148,38 @@ class ProcesBinanceServiceImplTest {
     }
 
     @Test
+    void openTimeoutReconcilesByClientOrderIdBeforeFailing() {
+        CapturingBinanceClient client = new CapturingBinanceClient();
+        CapturingBinanceClient closeClient = new CapturingBinanceClient();
+        client.openFailure = new ResourceAccessException("read timed out");
+        client.lookupResponse = filledLookupResponse("BTCUSDT", "open-abc", 789L);
+        ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+        service.setOrderSubmitEnabledForTest(true);
+
+        BinanceFuturesOrderClientResponse response = service.operationPosition(OperationDto.builder()
+                .symbol("BTCUSDT")
+                .side(Side.BUY)
+                .type(OrderType.MARKET)
+                .positionSide(PositionSide.LONG)
+                .quantity("0.01")
+                .reduceOnly(false)
+                .clientOrderId("open-abc")
+                .apiKey("api-key")
+                .secret("secret")
+                .build());
+
+        assertTrue(client.lookupCalled);
+        assertEquals("open-abc", client.lastLookupClientOrderId);
+        assertEquals(789L, response.getOrderId());
+    }
+
+    @Test
     void closeInvalidApiKeyThrowsReadinessException() {
         CapturingBinanceClient client = new CapturingBinanceClient();
         CapturingBinanceClient closeClient = new CapturingBinanceClient();
         closeClient.closeFailure = invalidApiKeyResponse("/api/binance/futures/close-position");
         ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+        service.setOrderSubmitEnabledForTest(true);
 
         BinanceApiReadinessException ex = assertThrows(BinanceApiReadinessException.class, () ->
                 service.operationPosition(OperationDto.builder()
@@ -172,6 +229,9 @@ class ProcesBinanceServiceImplTest {
         private boolean closeCalled;
         private RuntimeException openFailure;
         private RuntimeException closeFailure;
+        private boolean lookupCalled;
+        private String lastLookupClientOrderId;
+        private BinanceFuturesOrderClientResponse lookupResponse;
 
         @Override
         public ApiResponse<BinanceFuturesOrderClientResponse> openPosition(
@@ -211,6 +271,22 @@ class ProcesBinanceServiceImplTest {
             return ApiResponse.<BinanceFuturesOrderClientResponse>builder()
                     .statusCode(200)
                     .data(orderResponse(request))
+                    .build();
+        }
+
+        @Override
+        public ApiResponse<BinanceFuturesOrderClientResponse> getOrderByClientOrderId(
+                String apiKey,
+                String secret,
+                String traceId,
+                String symbol,
+                String origClientOrderId
+        ) {
+            this.lookupCalled = true;
+            this.lastLookupClientOrderId = origClientOrderId;
+            return ApiResponse.<BinanceFuturesOrderClientResponse>builder()
+                    .statusCode(200)
+                    .data(lookupResponse)
                     .build();
         }
 
@@ -308,5 +384,20 @@ class ProcesBinanceServiceImplTest {
             response.setClientOrderId(request.getClientOrderId());
             return response;
         }
+    }
+
+    private static BinanceFuturesOrderClientResponse filledLookupResponse(String symbol, String clientOrderId, long orderId) {
+        BinanceFuturesOrderClientResponse response = new BinanceFuturesOrderClientResponse();
+        response.setOrderId(orderId);
+        response.setSymbol(symbol);
+        response.setStatus("FILLED");
+        response.setAvgPrice(new BigDecimal("100"));
+        response.setOrigQty(new BigDecimal("0.01"));
+        response.setExecutedQty(new BigDecimal("0.01"));
+        response.setSide("BUY");
+        response.setPositionSide("LONG");
+        response.setClientOrderId(clientOrderId);
+        response.setUpdateTime(1710000000000L);
+        return response;
     }
 }

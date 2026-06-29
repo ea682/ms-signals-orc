@@ -29,6 +29,14 @@ public class RestClientConfig {
     }
 
     @Bean
+    public ClientHttpRequestFactory binanceClientHttpRequestFactory(
+            @Value("${rest-client.binance-service.connect-ms:1000}") int connectMs,
+            @Value("${rest-client.binance-service.read-ms:8000}") int readMs
+    ) {
+        return requestFactory("binance", connectMs, readMs);
+    }
+
+    @Bean
     public ClientHttpRequestFactory binanceCloseClientHttpRequestFactory(
             @Value("${rest-client.binance-service.close-connect-ms:1000}") int connectMs,
             @Value("${rest-client.binance-service.close-read-ms:8000}") int readMs
@@ -62,7 +70,7 @@ public class RestClientConfig {
     @Bean
     public RestClient binanceRestClient(
             RestClient.Builder builder,
-            @Qualifier("clientHttpRequestFactory") ClientHttpRequestFactory requestFactory,
+            @Qualifier("binanceClientHttpRequestFactory") ClientHttpRequestFactory requestFactory,
             @Value("${rest-client.binance-service.info-base}") String baseUrl
     ) {
         return builder

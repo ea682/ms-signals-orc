@@ -50,6 +50,10 @@ public class OperacionDto {
     @JsonAlias({"marginUsedUsd"})
     private final BigDecimal marginUsedUsd;
 
+    /** Compat: futures_position / Hyperliquid delta DTO usa "leverage" */
+    @JsonAlias({"leverage", "apalancamiento"})
+    private final BigDecimal leverage;
+
     /** Compat: futures_position DTO usa "entryPrice" */
     @JsonAlias({"entryPrice"})
     private final BigDecimal precioEntrada;

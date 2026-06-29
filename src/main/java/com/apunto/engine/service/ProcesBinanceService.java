@@ -19,6 +19,8 @@ public interface ProcesBinanceService {
      */
     BinanceFuturesOrderClientResponse operationPosition(OperationDto dto);
 
+    Optional<BinanceFuturesOrderClientResponse> findOrderByClientOrderId(OperationDto dto);
+
     /**
      * Obtiene el catálogo de símbolos de Binance Futures.
      */

@@ -32,6 +32,7 @@ public record HyperliquidMappedDelta(
                 .sizeQty(source.getSizeQty())
                 .notionalUsd(source.getNotionalUsd())
                 .marginUsedUsd(source.getMarginUsedUsd())
+                .leverage(source.getLeverage())
                 .precioEntrada(source.getPrecioEntrada())
                 .precioCierre(source.getPrecioCierre())
                 .precioMercado(source.getPrecioMercado())

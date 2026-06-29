@@ -27,6 +27,17 @@ public final class PositionDeltaClassifier {
     }
 
     public PositionDeltaClassification classify(PositionDeltaClassificationInput input) {
+        BigDecimal rawPrevious = input == null ? null : input.previousQty();
+        BigDecimal rawResulting = input == null ? null : input.resultingQty();
+        if (isNegative(rawPrevious) || isNegative(rawResulting)) {
+            return new PositionDeltaClassification(
+                    PositionDeltaType.INVALID,
+                    false,
+                    ZERO,
+                    "INVALID_QTY",
+                    "NEGATIVE_QTY"
+            );
+        }
         BigDecimal previous = nonNegative(input == null ? null : input.previousQty());
         BigDecimal resulting = nonNegative(input == null ? null : input.resultingQty());
         String previousSide = normalize(input == null ? null : input.previousSide());
@@ -62,6 +73,10 @@ public final class PositionDeltaClassifier {
         return value == null || value.compareTo(ZERO) <= 0 ? ZERO : value;
     }
 
+    private boolean isNegative(BigDecimal value) {
+        return value != null && value.compareTo(ZERO) < 0;
+    }
+
     private boolean isSnapshotLike(PositionDeltaClassificationInput input) {
         String originalDeltaType = normalize(input == null ? null : input.originalDeltaType());
         String originalEventType = normalize(input == null ? null : input.originalEventType());
@@ -81,8 +96,12 @@ public final class PositionDeltaClassifier {
         }
         String originalEventType = normalize(input.originalEventType());
         String originalDeltaType = normalize(input.originalDeltaType());
-        if ("OPEN".equals(originalEventType)
+        if (("OPEN".equals(originalEventType) || "INCREASE".equals(originalEventType) || "FLIP".equals(originalEventType))
                 && (computed == PositionDeltaType.REDUCE || computed == PositionDeltaType.CLOSE_FULL || computed == PositionDeltaType.NOOP || computed == PositionDeltaType.SNAPSHOT_NOOP)) {
+            return "EVENT_TYPE_CONTRADICTS_POSITION_MATH";
+        }
+        if (("REDUCE".equals(originalEventType) || "CLOSE".equals(originalEventType) || "PANIC_CLOSE".equals(originalEventType))
+                && (computed == PositionDeltaType.OPEN || computed == PositionDeltaType.INCREASE)) {
             return "EVENT_TYPE_CONTRADICTS_POSITION_MATH";
         }
         if (("RESIZE".equals(originalDeltaType) || "UPDATE".equals(originalDeltaType))

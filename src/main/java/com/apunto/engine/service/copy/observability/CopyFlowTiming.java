@@ -29,6 +29,10 @@ public final class CopyFlowTiming {
         return new CopyFlowTiming(System.nanoTime());
     }
 
+    public static CopyFlowTiming fromEventReceivedNs(long eventReceivedNs) {
+        return new CopyFlowTiming(eventReceivedNs);
+    }
+
     public long mark() {
         return System.nanoTime();
     }

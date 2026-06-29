@@ -13,6 +13,8 @@ rest-client:
     info-base: ${URL_METRIC:http://ms-metrica-cuenta:4102/}
   binance-service:
     info-base: ${URL_BINANCE:http://ms-binance-engine:4106}
+    connect-ms: ${BINANCE_ORDER_CONNECT_TIMEOUT_MS:1000}
+    read-ms: ${BINANCE_ORDER_READ_TIMEOUT_MS:8000}
     close-connect-ms: ${BINANCE_CLOSE_CONNECT_TIMEOUT_MS:1000}
     close-read-ms: ${BINANCE_CLOSE_READ_TIMEOUT_MS:8000}
 
@@ -106,6 +108,8 @@ app:
       topic: ${KAFKA_TOPIC_OPERACIONES:futures-position-eventos}
 
 binance:
+  order-submit-enabled: ${BINANCE_ORDER_SUBMIT_ENABLED:false}
+  live-safe-validation-mode: ${BINANCE_LIVE_SAFE_VALIDATION_MODE:true}
   trading-config-preconfigure:
     enabled: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_ENABLED:true}
     initial-delay-ms: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_INITIAL_DELAY_MS:60000}
@@ -123,6 +127,37 @@ binance:
     require-trading-status: ${BINANCE_SYMBOLS_REQUIRE_TRADING_STATUS:true}
 
 copy:
+  live:
+    enabled: ${COPY_LIVE_ENABLED:false}
+    canary-enabled: ${COPY_LIVE_CANARY_ENABLED:false}
+    dry-run: ${COPY_LIVE_DRY_RUN:true}
+    whitelist:
+      user-ids: ${COPY_LIVE_WHITELIST_USER_IDS:}
+      wallet-ids: ${COPY_LIVE_WHITELIST_WALLET_IDS:}
+      symbols: ${COPY_LIVE_WHITELIST_SYMBOLS:}
+      allocation-ids: ${COPY_LIVE_WHITELIST_ALLOCATION_IDS:}
+      strategy-codes: ${COPY_LIVE_WHITELIST_STRATEGY_CODES:}
+  live-readiness:
+    min-closed-positions: ${COPY_LIVE_READINESS_MIN_CLOSED_POSITIONS:50}
+    min-profit-factor: ${COPY_LIVE_READINESS_MIN_PROFIT_FACTOR:1.3}
+    require-positive-expectancy: ${COPY_LIVE_READINESS_REQUIRE_POSITIVE_EXPECTANCY:true}
+    require-positive-net-pnl: ${COPY_LIVE_READINESS_REQUIRE_POSITIVE_NET_PNL:true}
+    max-top1-concentration: ${COPY_LIVE_READINESS_MAX_TOP1_CONCENTRATION:0.35}
+    min-stable-hours-after-deploy: ${COPY_LIVE_READINESS_MIN_STABLE_HOURS_AFTER_DEPLOY:24}
+    max-shadow-p95-end-to-end-ms: ${COPY_LIVE_READINESS_MAX_SHADOW_P95_END_TO_END_MS:500}
+    max-live-mock-p95-end-to-end-ms: ${COPY_LIVE_READINESS_MAX_LIVE_MOCK_P95_END_TO_END_MS:1000}
+    max-binance-p95-http-ms: ${COPY_LIVE_READINESS_MAX_BINANCE_P95_HTTP_MS:800}
+    max-adverse-slippage-bps-p95: ${COPY_LIVE_READINESS_MAX_ADVERSE_SLIPPAGE_BPS_P95:10}
+    max-adverse-slippage-usd-per-order: ${COPY_LIVE_READINESS_MAX_ADVERSE_SLIPPAGE_USD_PER_ORDER:1.00}
+    require-slippage-sample-size: ${COPY_LIVE_READINESS_REQUIRE_SLIPPAGE_SAMPLE_SIZE:20}
+    max-leverage-x: ${COPY_LIVE_READINESS_MAX_LEVERAGE_X:5}
+    require-source-leverage: ${COPY_LIVE_READINESS_REQUIRE_SOURCE_LEVERAGE:true}
+    require-live-leverage-confirmed: ${COPY_LIVE_READINESS_REQUIRE_LIVE_LEVERAGE_CONFIRMED:true}
+    block-on-leverage-mismatch: ${COPY_LIVE_READINESS_BLOCK_ON_LEVERAGE_MISMATCH:true}
+    block-on-margin-mode-mismatch: ${COPY_LIVE_READINESS_BLOCK_ON_MARGIN_MODE_MISMATCH:true}
+    max-effective-leverage-x: ${COPY_LIVE_READINESS_MAX_EFFECTIVE_LEVERAGE_X:5}
+    max-live-notional-usd-per-order: ${COPY_LIVE_READINESS_MAX_LIVE_NOTIONAL_USD_PER_ORDER:10}
+    max-live-required-margin-usd-per-order: ${COPY_LIVE_READINESS_MAX_LIVE_REQUIRED_MARGIN_USD_PER_ORDER:10}
   shadow:
     async:
       enabled: ${COPY_SHADOW_ASYNC_ENABLED:true}
@@ -231,7 +266,7 @@ metric-wallet:
     reentry-capital-multiplier: ${METRIC_WALLET_SHADOW_REENTRY_CAPITAL_MULTIPLIER:0.25}
   allocation:
     sync-enabled: ${METRIC_WALLET_SYNC_DISTRIBUTION_ENABLED:false}
-    default-execution-mode: ${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:LIVE}
+    default-execution-mode: ${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:SHADOW}
     max-profiles-per-wallet: ${COPY_USER_MAX_PROFILES_PER_WALLET:1}
     runtime-cache-ttl: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_TTL:1500ms}
     runtime-cache-max-size: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_MAX_SIZE:20000}

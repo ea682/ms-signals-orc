@@ -632,7 +632,8 @@ public class HyperliquidOriginPositionStoreService {
                 if (id == null) {
                     return false;
                 }
-                FuturesPositionEntity entity = repository.findByIdFuturesPosition(id).orElse(null);
+                FuturesPositionEntity entity = repository.findByIdFuturesPosition(id)
+                        .orElseGet(() -> repository.findByPlatformAndExternalId(PLATFORM, externalId(id)).orElse(null));
                 if (entity == null) {
                     return false;
                 }
@@ -677,7 +678,8 @@ public class HyperliquidOriginPositionStoreService {
                 String lower = message.toLowerCase(Locale.ROOT);
                 if (lower.contains("duplicate key")
                         || lower.contains("unique constraint")
-                        || lower.contains("futures_position_pkey")) {
+                        || lower.contains("futures_position_pkey")
+                        || lower.contains("futures_position_uq_platform_external")) {
                     return true;
                 }
             }
@@ -888,18 +890,30 @@ public class HyperliquidOriginPositionStoreService {
             );
         }
 
-        FuturesPositionEntity entity = repository.findByIdFuturesPosition(originId).orElse(null);
+        String externalId = externalId(originId);
+        FuturesPositionEntity entity = repository.findByIdFuturesPosition(originId)
+                .orElseGet(() -> repository.findByPlatformAndExternalId(PLATFORM, externalId).orElse(null));
         boolean created = entity == null;
         if (created) {
             entity = new FuturesPositionEntity();
             entity.setIdFuturesPosition(originId);
             entity.setPlatform(PLATFORM);
             entity.setVenue(VENUE);
-            entity.setExternalId("hyperliquid|direct|" + originId);
+            entity.setExternalId(externalId);
             entity.setCreatedAt(resolveCreatedAt(operation, mapped.request()));
             entity.setIngestedAt(OffsetDateTime.now(ZoneOffset.UTC));
             entity.setFailedAttempts(0);
             entity.setHasAccountIssue(false);
+        } else if (!originId.equals(entity.getIdFuturesPosition())) {
+            log.warn("event=position_upsert.external_conflict reasonCode=FUTURES_POSITION_PLATFORM_EXTERNAL_ALREADY_EXISTS incomingOriginId={} existingPositionId={} platform={} externalId={} positionKey={} walletId={} symbol={} side={} action=update_existing_external_row",
+                    originId,
+                    entity.getIdFuturesPosition(),
+                    PLATFORM,
+                    externalId,
+                    mapped.positionKey(),
+                    mapped.wallet(),
+                    mapped.symbol(),
+                    mapped.side());
         }
 
         boolean closing = isClosing(mapped);
@@ -924,7 +938,9 @@ public class HyperliquidOriginPositionStoreService {
         FuturesPositionEntity saved;
         if (created) {
             int affected = upsertFuturesPosition(entity);
-            saved = repository.findByIdFuturesPosition(originId).orElse(entity);
+            FuturesPositionEntity fallbackEntity = entity;
+            saved = repository.findByIdFuturesPosition(originId)
+                    .orElseGet(() -> repository.findByPlatformAndExternalId(PLATFORM, externalId).orElse(fallbackEntity));
             log.info("event=position_upsert.ok inserted={} updated={} idempotent={} positionKey={} walletId={} symbol={} side={} sourceUpdatedAt={} affectedRows={}",
                     affected > 0,
                     false,
@@ -1253,6 +1269,10 @@ public class HyperliquidOriginPositionStoreService {
     private UUID fallbackLifecycleId(HyperliquidMappedDelta mapped) {
         String seed = "hyperliquid|direct|orphan-close|" + firstNonBlank(mapped.idempotencyKey(), mapped.positionKey(), UUID.randomUUID().toString());
         return UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String externalId(UUID originId) {
+        return "hyperliquid|direct|" + originId;
     }
 
     private String positionKey(String wallet, String symbol, String side) {
