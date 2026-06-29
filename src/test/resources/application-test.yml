@@ -1,0 +1,31 @@
+spring:
+  profiles:
+    active: test
+
+rest-client:
+  binance-service:
+    info-base: http://127.0.0.1:9/binance-disabled-in-tests
+
+binance:
+  order-submit-enabled: false
+  client-mode: mock
+  live-safe-validation-mode: true
+
+copy:
+  live:
+    enabled: false
+    canary-enabled: false
+    dry-run: true
+
+metric-wallet:
+  allocation:
+    default-execution-mode: SHADOW
+
+hyperliquid:
+  direct-ingest:
+    origin-store:
+      binance-price-base-url: http://127.0.0.1:9/binance-price-disabled-in-tests
+
+futures:
+  capital-maintenance:
+    bnb-price-base-url: http://127.0.0.1:9/bnb-price-disabled-in-tests

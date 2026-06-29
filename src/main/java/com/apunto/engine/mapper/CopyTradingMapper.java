@@ -29,15 +29,45 @@ public interface CopyTradingMapper {
     default BigDecimal resolveFilledQty(BinanceFuturesOrderClientResponse order) {
         if (order == null) return null;
 
-        // Preferimos executedQty, luego cumQty, y como fallback origQty.
+        // Preferimos executedQty, luego cumQty. origQty solo es seguro si Binance ya marco fill.
         BigDecimal q = order.getExecutedQty();
         if (q == null || q.compareTo(BigDecimal.ZERO) <= 0) {
             q = order.getCumQty();
         }
-        if (q == null || q.compareTo(BigDecimal.ZERO) <= 0) {
+        if ((q == null || q.compareTo(BigDecimal.ZERO) <= 0) && hasFillStatus(order.getStatus())) {
             q = order.getOrigQty();
         }
+        if (q == null || q.compareTo(BigDecimal.ZERO) <= 0) {
+            return null;
+        }
         return q;
+    }
+
+    default boolean hasFillStatus(String status) {
+        if (status == null || status.isBlank()) {
+            return false;
+        }
+        String normalized = status.trim().toUpperCase(java.util.Locale.ROOT);
+        return "FILLED".equals(normalized)
+                || "PARTIALLY_FILLED".equals(normalized)
+                || "PARTIAL_FILLED".equals(normalized);
+    }
+
+    default BigDecimal resolveExecutionPrice(BinanceFuturesOrderClientResponse order) {
+        if (order == null) return null;
+        if (order.getAvgPrice() != null && order.getAvgPrice().compareTo(BigDecimal.ZERO) > 0) {
+            return order.getAvgPrice();
+        }
+        if (order.getPrice() != null && order.getPrice().compareTo(BigDecimal.ZERO) > 0) {
+            return order.getPrice();
+        }
+        BigDecimal q = resolveFilledQty(order);
+        if (q != null && q.compareTo(BigDecimal.ZERO) > 0
+                && order.getCumQuote() != null
+                && order.getCumQuote().compareTo(BigDecimal.ZERO) > 0) {
+            return order.getCumQuote().divide(q, 18, java.math.RoundingMode.HALF_UP);
+        }
+        return null;
     }
 
     default OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
@@ -97,7 +127,7 @@ public interface CopyTradingMapper {
     @Mapping(target = "typeOperation", source = "order.positionSide")
     @Mapping(target = "leverage", expression = "java(new java.math.BigDecimal(leverage))")
     @Mapping(target = "sizePar", expression = "java(resolveFilledQty(order))")
-    @Mapping(target = "priceEntry", source = "order.avgPrice")
+    @Mapping(target = "priceEntry", expression = "java(resolveExecutionPrice(order))")
     @Mapping(target = "priceClose", ignore = true)
     @Mapping(target = "dateClose", ignore = true)
     @Mapping(target = "dateCreation", expression = "java(toUtcOffsetDateTime(order.getUpdateTime()))")
@@ -117,7 +147,8 @@ public interface CopyTradingMapper {
                                 String idUser,
                                 int leverage) {
         BigDecimal q = resolveFilledQty(order);
-        BigDecimal countUsd = (q == null ? BigDecimal.ZERO : q).multiply(order.getAvgPrice());
+        BigDecimal price = resolveExecutionPrice(order);
+        BigDecimal countUsd = (q == null ? BigDecimal.ZERO : q).multiply(price == null ? BigDecimal.ZERO : price);
         target.setSiseUsd(countUsd);
     }
 
@@ -130,7 +161,7 @@ public interface CopyTradingMapper {
     @Mapping(target = "leverage", source = "operation.leverage")
     @Mapping(target = "sizePar", expression = "java(resolveFilledQty(order))")
     @Mapping(target = "priceEntry", source = "operation.priceEntry")
-    @Mapping(target = "priceClose", source = "order.avgPrice")
+    @Mapping(target = "priceClose", expression = "java(resolveExecutionPrice(order))")
     @Mapping(target = "dateCreation", source = "operation.dateCreation")
     @Mapping(target = "dateClose", expression = "java(toUtcOffsetDateTime(order.getUpdateTime()))")
     @Mapping(target = "active", constant = "false")
@@ -142,7 +173,8 @@ public interface CopyTradingMapper {
                                   CopyOperationDto operation,
                                   BinanceFuturesOrderClientResponse order) {
         BigDecimal q = resolveFilledQty(order);
-        BigDecimal countUsd = (q == null ? BigDecimal.ZERO : q).multiply(order.getAvgPrice());
+        BigDecimal price = resolveExecutionPrice(order);
+        BigDecimal countUsd = (q == null ? BigDecimal.ZERO : q).multiply(price == null ? BigDecimal.ZERO : price);
         target.setSiseUsd(countUsd);
     }
 

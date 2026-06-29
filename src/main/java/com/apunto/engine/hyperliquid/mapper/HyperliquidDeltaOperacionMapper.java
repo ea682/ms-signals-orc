@@ -53,6 +53,7 @@ public class HyperliquidDeltaOperacionMapper {
                 .sizeQty(sizeQty)
                 .notionalUsd(notionalUsd)
                 .marginUsedUsd(marginUsedUsd)
+                .leverage(request.leverage())
                 .precioEntrada(entryPriceRef)
                 .precioCierre(active ? null : closePriceRef)
                 .precioMercado(marketPriceRef)

@@ -15,6 +15,8 @@ public interface FuturesPositionRepository extends JpaRepository<FuturesPosition
 
     Optional<FuturesPositionEntity> findByIdFuturesPosition(UUID idFuturesPosition);
 
+    Optional<FuturesPositionEntity> findByPlatformAndExternalId(String platform, String externalId);
+
     @Query(value = """
             select *
             from futuros_operaciones.futures_position fp

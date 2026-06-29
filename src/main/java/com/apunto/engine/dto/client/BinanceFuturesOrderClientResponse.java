@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 
 @Data
 @NoArgsConstructor
@@ -44,5 +45,13 @@ public class BinanceFuturesOrderClientResponse {
 
     private Long goodTillDate;
     private Long updateTime;
-}
 
+    private BigDecimal liveRequestedLeverageX;
+    private BigDecimal liveExchangeLeverageX;
+    private BigDecimal liveEffectiveLeverageX;
+    private String liveMarginMode;
+    private String leverageStatus;
+    private Instant leverageConfirmedAt;
+    private BigDecimal liveNotionalUsd;
+    private BigDecimal liveRequiredMarginUsd;
+}

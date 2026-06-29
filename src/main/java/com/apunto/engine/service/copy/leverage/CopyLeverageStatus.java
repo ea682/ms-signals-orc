@@ -1,0 +1,14 @@
+package com.apunto.engine.service.copy.leverage;
+
+public enum CopyLeverageStatus {
+    OK,
+    MISSING_SOURCE_LEVERAGE,
+    MISSING_LIVE_EXCHANGE_LEVERAGE,
+    LEVERAGE_CAPPED,
+    LEVERAGE_MISMATCH,
+    MARGIN_MODE_MISMATCH,
+    NOTIONAL_MISMATCH,
+    LEVERAGE_NOT_APPLICABLE_FOR_REDUCTION,
+    INVALID_LEVERAGE,
+    UNKNOWN
+}
