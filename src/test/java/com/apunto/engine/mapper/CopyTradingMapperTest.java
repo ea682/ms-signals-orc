@@ -3,6 +3,7 @@ package com.apunto.engine.mapper;
 import com.apunto.engine.dto.CopyOperationDto;
 import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.dto.UserDetailDto;
+import com.apunto.engine.dto.client.BinanceFuturesOrderClientResponse;
 import com.apunto.engine.entity.UserApiKeyEntity;
 import com.apunto.engine.entity.UserEntity;
 import com.apunto.engine.shared.enums.PositionSide;
@@ -15,6 +16,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CopyTradingMapperTest {
@@ -39,6 +41,27 @@ class CopyTradingMapperTest {
         assertEquals(PositionSide.SHORT, dto.getPositionSide());
         assertTrue(dto.isReduceOnly());
         assertFalse(dto.getConfigureAccountSettings());
+    }
+
+    @Test
+    void resolveFilledQtyDoesNotTreatNewOrigQtyAsExecuted() {
+        BinanceFuturesOrderClientResponse order = new BinanceFuturesOrderClientResponse();
+        order.setStatus("NEW");
+        order.setOrigQty(new BigDecimal("0.25"));
+        order.setExecutedQty(BigDecimal.ZERO);
+        order.setCumQty(BigDecimal.ZERO);
+
+        assertNull(mapper.resolveFilledQty(order));
+    }
+
+    @Test
+    void resolveExecutionPriceCanUseCumQuoteWhenAvgPriceIsMissing() {
+        BinanceFuturesOrderClientResponse order = new BinanceFuturesOrderClientResponse();
+        order.setStatus("PARTIALLY_FILLED");
+        order.setExecutedQty(new BigDecimal("0.5"));
+        order.setCumQuote(new BigDecimal("50"));
+
+        assertEquals(new BigDecimal("100.000000000000000000"), mapper.resolveExecutionPrice(order));
     }
 
     private CopyOperationDto copy(String typeOperation) {

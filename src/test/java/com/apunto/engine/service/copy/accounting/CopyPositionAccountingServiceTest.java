@@ -92,6 +92,99 @@ class CopyPositionAccountingServiceTest {
     }
 
     @Test
+    void flipLabelWithSameSideLowerQtyClassifiesAsReduce() {
+        PositionDeltaClassification classification = classifier.classify(new PositionDeltaClassificationInput(
+                "FLIP",
+                "FLIP",
+                "LONG",
+                "LONG",
+                new BigDecimal("39.53319"),
+                new BigDecimal("2.79709"),
+                new BigDecimal("-36.73610"),
+                new BigDecimal("100"),
+                new BigDecimal("90"),
+                "ETHUSDT",
+                "0xabc",
+                "0xabc|MOVEMENT_ALL|strategy|MOVEMENT_ALL",
+                "shadow"
+        ));
+
+        assertEquals(PositionDeltaType.REDUCE, classification.computedDeltaType());
+        assertTrue(classification.shouldRealizePnl());
+        assertEquals("EVENT_TYPE_CONTRADICTS_POSITION_MATH", classification.warningCode());
+    }
+
+    @Test
+    void increaseLabelWithLowerQtyClassifiesAsReduce() {
+        PositionDeltaClassification classification = classifier.classify(new PositionDeltaClassificationInput(
+                "INCREASE",
+                "RESIZE",
+                "SHORT",
+                "SHORT",
+                new BigDecimal("10"),
+                new BigDecimal("4"),
+                new BigDecimal("-6"),
+                new BigDecimal("90"),
+                new BigDecimal("100"),
+                "BTCUSDT",
+                "0xabc",
+                "0xabc|SHORT_ONLY|direction|SHORT",
+                "live"
+        ));
+
+        assertEquals(PositionDeltaType.REDUCE, classification.computedDeltaType());
+        assertTrue(classification.shouldRealizePnl());
+        assertEquals("EVENT_TYPE_CONTRADICTS_POSITION_MATH", classification.warningCode());
+    }
+
+    @Test
+    void reduceLabelWithHigherQtyClassifiesAsIncreaseWithoutPnl() {
+        PositionDeltaClassification classification = classifier.classify(new PositionDeltaClassificationInput(
+                "REDUCE",
+                "RESIZE",
+                "LONG",
+                "LONG",
+                new BigDecimal("4"),
+                new BigDecimal("10"),
+                new BigDecimal("6"),
+                new BigDecimal("110"),
+                new BigDecimal("100"),
+                "BTCUSDT",
+                "0xabc",
+                "0xabc|LONG_ONLY|direction|LONG",
+                "live"
+        ));
+
+        assertEquals(PositionDeltaType.INCREASE, classification.computedDeltaType());
+        assertFalse(classification.shouldRealizePnl());
+        assertEquals("EVENT_TYPE_CONTRADICTS_POSITION_MATH", classification.warningCode());
+    }
+
+    @Test
+    void negativeResultingQtyIsInvalidForEnrichedClassifier() {
+        PositionDeltaClassification classification = classifier.classify(new PositionDeltaClassificationInput(
+                "OPEN",
+                "OPEN",
+                "LONG",
+                "LONG",
+                BigDecimal.ZERO,
+                new BigDecimal("-1"),
+                new BigDecimal("-1"),
+                new BigDecimal("100"),
+                null,
+                "BTCUSDT",
+                "0xabc",
+                "profile",
+                "live"
+        ));
+
+        assertEquals(PositionDeltaType.INVALID, classification.computedDeltaType());
+        assertFalse(classification.shouldRealizePnl());
+        assertEquals("INVALID_QTY", classification.reasonCode());
+        assertEquals("NEGATIVE_QTY", classification.warningCode());
+    }
+
+    @Test
     void longIncreaseUsesWeightedAverageEntry() {
         CopyAccountingResult result = accounting.apply(input(PositionSide.LONG, "10", "20", "100", "120", "0", "0"));
 

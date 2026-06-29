@@ -15,6 +15,8 @@ import com.apunto.engine.metric.TradingMetrics;
 import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.BinanceCopyExecutionService;
 import com.apunto.engine.service.OperacionEventIngestService;
+import com.apunto.engine.service.copy.observability.CopyFlowTiming;
+import com.apunto.engine.service.copy.observability.CopyFlowTimingContext;
 import com.apunto.engine.shared.exception.CopyPersistenceConflictException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.SkipExecutionException;
@@ -76,6 +78,11 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
 
     @Override
     public HyperliquidDirectCopyDispatchResult dispatch(HyperliquidMappedDelta mappedDelta) {
+        return dispatch(mappedDelta, 0L);
+    }
+
+    @Override
+    public HyperliquidDirectCopyDispatchResult dispatch(HyperliquidMappedDelta mappedDelta, long eventReceivedNs) {
         long startedNs = System.nanoTime();
         requireMappedDelta(mappedDelta);
 
@@ -148,7 +155,7 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
             }
             String executorLane = executorLane(action, deltaType);
             try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", userTraceId)) {
-                executorFor(action, deltaType).execute(() -> executeCopy(event, user, action, fallbackSubmitted, fallbackJobs));
+                executorFor(action, deltaType).execute(() -> executeCopy(event, user, action, fallbackSubmitted, fallbackJobs, eventReceivedNs));
                 submitted.incrementAndGet();
             } catch (RejectedExecutionException rejected) {
                 tradingMetrics.directCopyRejected(copyIntent(action, deltaType), "executor_rejected");
@@ -259,7 +266,8 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
             UserDetailDto user,
             CopyJobAction action,
             AtomicBoolean fallbackSubmitted,
-            AtomicInteger fallbackJobs
+            AtomicInteger fallbackJobs,
+            long eventReceivedNs
     ) {
         long startedNs = System.nanoTime();
         OperacionDto operacion = event.getOperacion();
@@ -270,7 +278,12 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         String traceId = activeCopyOperationCache.traceId(originId, userId, wallet, symbol);
         HyperliquidDeltaType eventDeltaType = HyperliquidDeltaType.from(event.getDeltaType());
         String actionLabel = displayAction(action, eventDeltaType);
-        try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", traceId)) {
+        try (CopyFlowTimingContext.Scope ignoredTiming = CopyFlowTimingContext.openLive(eventReceivedNs);
+             MDC.MDCCloseable ignored = MDC.putCloseable("traceId", traceId)) {
+            CopyFlowTiming timing = CopyFlowTimingContext.currentLive();
+            if (timing != null && eventReceivedNs > 0) {
+                timing.add(CopyFlowTiming.Stage.QUEUE, eventReceivedNs);
+            }
             try {
                 if (action == CopyJobAction.OPEN) {
                     binanceCopyExecutionService.executeOpenForUser(event, user);

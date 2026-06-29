@@ -16,6 +16,10 @@ public interface ShadowCopyTradingService {
 
     int recordShadowEvent(OperacionEvent event);
 
+    default int recordShadowEvent(OperacionEvent event, long eventReceivedNs) {
+        return recordShadowEvent(event);
+    }
+
     boolean isSeparateShadowEnabled();
 
     boolean isLivePromotable(UUID idUser, MetricaWalletDto candidate);

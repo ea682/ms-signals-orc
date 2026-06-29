@@ -515,6 +515,12 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     @Override
     @Transactional
     public int recordShadowEvent(OperacionEvent event) {
+        return recordShadowEvent(event, 0L);
+    }
+
+    @Override
+    @Transactional
+    public int recordShadowEvent(OperacionEvent event, long eventReceivedNs) {
         if (!separateShadowEnabled || event == null || event.getOperacion() == null) {
             return 0;
         }
@@ -555,7 +561,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             }
             log.info("event=hyperliquid_delta_profile_matched originId={} shadowAllocationId={} userId={} walletId={} copyProfileCode={} scopeType={} scopeValue={} symbol={} side={} action={} deltaType={} reasonCode=DELTA_MATCHED_STRATEGY reasonMessage=\"El delta aplica a esta estrategia y sera simulado en shadow\" shadowImpact=EVENT_WILL_BE_RECORDED",
                     originId, allocation.getId(), allocation.getIdUser(), walletId, strategyCode, allocation.getScopeType(), allocation.getScopeValue(), operation.getParSymbol(), side, action, deltaType);
-            boolean saved = recordShadowForAllocation(allocation, event, action, deltaType);
+            boolean saved = recordShadowForAllocation(allocation, event, action, deltaType, eventReceivedNs);
             if (saved) {
                 recorded++;
             } else {
@@ -697,9 +703,15 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             ShadowCopyAllocationEntity allocation,
             OperacionEvent event,
             CopyJobAction action,
-            HyperliquidDeltaType deltaType
+            HyperliquidDeltaType deltaType,
+            long eventReceivedNs
     ) {
-        CopyFlowTiming timing = CopyFlowTiming.start();
+        CopyFlowTiming timing = eventReceivedNs > 0
+                ? CopyFlowTiming.fromEventReceivedNs(eventReceivedNs)
+                : CopyFlowTiming.start();
+        if (eventReceivedNs > 0) {
+            timing.add(CopyFlowTiming.Stage.QUEUE, eventReceivedNs);
+        }
         SHADOW_FLOW_TIMING.set(timing);
         try {
         OperacionDto op = event.getOperacion();

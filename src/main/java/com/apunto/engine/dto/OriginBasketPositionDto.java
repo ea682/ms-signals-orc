@@ -22,6 +22,7 @@ public class OriginBasketPositionDto {
     private BigDecimal markPrice;
     private BigDecimal marginUsedUsd;
     private BigDecimal notionalUsd;
+    private BigDecimal leverage;
     private BigDecimal sizeQty;
     private BigDecimal sizeLegacy;
     private OffsetDateTime createdAt;

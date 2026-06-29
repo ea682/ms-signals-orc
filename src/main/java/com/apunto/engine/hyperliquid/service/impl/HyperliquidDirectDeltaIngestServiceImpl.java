@@ -399,9 +399,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", originTraceId(mapped))) {
             copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
             MDC.put("traceId", originTraceId(copyReady));
-            ShadowEnqueueResult shadowEnqueue = enqueueShadowBeforeLive(copyReady);
+            ShadowEnqueueResult shadowEnqueue = enqueueShadowBeforeLive(copyReady, task.acceptedNs());
             long liveDispatchStartNs = System.nanoTime();
-            HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady);
+            HyperliquidDirectCopyDispatchResult dispatchResult = directCopyDispatchService.dispatch(copyReady, task.acceptedNs());
             long liveDispatchElapsedMs = elapsedMs(liveDispatchStartNs);
             logShadowLiveSeparation(copyReady, dispatchResult, shadowEnqueue);
             operationMovementEventService.recordAsync(copyReady, dispatchResult, dispatchResult.reasonCode());
@@ -438,16 +438,16 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         }
     }
 
-    private ShadowEnqueueResult enqueueShadowBeforeLive(HyperliquidMappedDelta mappedDelta) {
+    private ShadowEnqueueResult enqueueShadowBeforeLive(HyperliquidMappedDelta mappedDelta, long eventReceivedNs) {
         long startedNs = System.nanoTime();
         if (mappedDelta == null || mappedDelta.event() == null) {
             return new ShadowEnqueueResult(false, "SHADOW_PAYLOAD_EMPTY", elapsedMs(startedNs), shadowQueueDepth(), shadowRemainingCapacity());
         }
         if (!shadowAsyncEnabled) {
-            int recorded = recordShadowSynchronously(mappedDelta, startedNs);
+            int recorded = recordShadowSynchronously(mappedDelta, startedNs, eventReceivedNs);
             return new ShadowEnqueueResult(recorded > 0, recorded > 0 ? "SHADOW_SYNC_RECORDED" : "SHADOW_SYNC_SKIPPED", elapsedMs(startedNs), shadowQueueDepth(), shadowRemainingCapacity());
         }
-        ShadowTask task = new ShadowTask(mappedDelta, System.nanoTime(), originTraceId(mappedDelta));
+        ShadowTask task = new ShadowTask(mappedDelta, eventReceivedNs > 0 ? eventReceivedNs : System.nanoTime(), originTraceId(mappedDelta));
         BlockingQueue<ShadowTask> lane = shadowLanes[shadowLaneFor(mappedDelta)];
         boolean offered;
         try {
@@ -484,12 +484,12 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         return new ShadowEnqueueResult(true, "SHADOW_ENQUEUED_BEFORE_LIVE", elapsedMs, shadowQueueDepth(), shadowRemainingCapacity());
     }
 
-    private int recordShadowSynchronously(HyperliquidMappedDelta mappedDelta, long startedNs) {
+    private int recordShadowSynchronously(HyperliquidMappedDelta mappedDelta, long startedNs, long eventReceivedNs) {
         if (mappedDelta == null || mappedDelta.event() == null) {
             return 0;
         }
         try {
-            int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event());
+            int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event(), eventReceivedNs);
             if (recorded > 0) {
                 log.warn("event=shadow_processed_sync_before_live idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} recorded={} reasonCode=SHADOW_SYNC_DEBUG_PATH reasonMessage=\"SHADOW async esta desactivado; LIVE puede esperar este write\" shadowImpact=SHADOW_EVENT_RECORDED elapsedMs={}",
                         mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), recorded, elapsedMs(startedNs));
@@ -595,7 +595,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mappedDelta = task.mappedDelta();
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", task.traceId())) {
-            int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event());
+            int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event(), task.acceptedNs());
             if (recorded > 0) {
                 shadowRecorded.addAndGet(recorded);
             } else {

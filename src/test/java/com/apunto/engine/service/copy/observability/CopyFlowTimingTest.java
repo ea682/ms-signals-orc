@@ -26,4 +26,28 @@ class CopyFlowTimingTest {
         assertFalse(logfmt.contains("originId="));
         assertFalse(logfmt.contains("profileKey="));
     }
+
+    @Test
+    void canStartFromExternalEventReceiveTimestamp() throws Exception {
+        long receivedNs = System.nanoTime();
+        Thread.sleep(2L);
+
+        CopyFlowTiming timing = CopyFlowTiming.fromEventReceivedNs(receivedNs);
+        String logfmt = timing.logfmtCore("shadow", "success");
+
+        assertTrue(timing.totalMs() >= 1L);
+        assertTrue(logfmt.contains("flow=shadow"));
+        assertTrue(logfmt.contains("endToEndMs="));
+    }
+
+    @Test
+    void liveTimingContextIsScopedAndRestored() {
+        assertFalse(CopyFlowTimingContext.currentLive() != null);
+
+        try (CopyFlowTimingContext.Scope ignored = CopyFlowTimingContext.openLive(System.nanoTime())) {
+            assertTrue(CopyFlowTimingContext.currentLive() != null);
+        }
+
+        assertFalse(CopyFlowTimingContext.currentLive() != null);
+    }
 }

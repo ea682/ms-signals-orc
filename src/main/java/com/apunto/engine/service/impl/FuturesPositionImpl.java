@@ -91,6 +91,7 @@ public class FuturesPositionImpl implements FuturesPositionService {
                 .markPrice(entity.getMarkPrice())
                 .marginUsedUsd(entity.getMarginUsedUsd())
                 .notionalUsd(entity.getNotionalUsd())
+                .leverage(entity.getLeverage())
                 .sizeQty(entity.getSizeQty())
                 .sizeLegacy(entity.getSizeLegacy())
                 .createdAt(entity.getCreatedAt())

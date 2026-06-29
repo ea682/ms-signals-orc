@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.ResourceAccessException;
@@ -53,6 +54,9 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     private final BinanceClient binanceCloseClient;
     private final ObjectMapper objectMapper;
 
+    @Value("${binance.order-submit-enabled:false}")
+    private boolean orderSubmitEnabled = false;
+
     public ProcesBinanceServiceImpl(
             @Qualifier("binanceInfoClient") BinanceClient binanceClient,
             @Qualifier("binanceCloseClient") BinanceClient binanceCloseClient,
@@ -66,6 +70,13 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     @Override
     public BinanceFuturesOrderClientResponse operationPosition(OperationDto dto) {
         validateOperation(dto);
+        if (!orderSubmitEnabled) {
+            throw new SkipExecutionException(
+                    "binance_order_submit_disabled",
+                    "Envio de ordenes Binance deshabilitado por configuracion",
+                    validationDetails(dto)
+            );
+        }
 
         if (useDedicatedCloseEndpoint(dto)) {
             return closePosition(dto);
@@ -241,6 +252,11 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     ex.getClass().getSimpleName(),
                     safeLog(ex.getMessage()));
 
+            Optional<BinanceFuturesOrderClientResponse> reconciled = reconcileAfterAmbiguousFailure(binanceClient, dto, "futures.order", ex);
+            if (reconciled.isPresent()) {
+                return reconciled.get();
+            }
+
             throw new CopyBinanceClientException("Timeout/red enviando orden a ms-binance", ex, details);
         } catch (EngineException ex) {
             Map<String, Object> details = orderDetails(dto);
@@ -408,6 +424,11 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     ex.getClass().getSimpleName(),
                     safeLog(ex.getMessage()));
 
+            Optional<BinanceFuturesOrderClientResponse> reconciled = reconcileAfterAmbiguousFailure(binanceCloseClient, dto, "futures.close_position", ex);
+            if (reconciled.isPresent()) {
+                return reconciled.get();
+            }
+
             throw new CopyBinanceClientException("Timeout/red cerrando/reduciendo posición en ms-binance", ex, details);
         } catch (EngineException ex) {
             Map<String, Object> details = orderDetails(dto);
@@ -449,6 +470,98 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                     safeLog(ex.getMessage()));
 
             throw new CopyBinanceClientException("Error cliente cerrando/reduciendo posición en ms-binance", ex, details);
+        }
+    }
+
+    @Override
+    public Optional<BinanceFuturesOrderClientResponse> findOrderByClientOrderId(OperationDto dto) {
+        validateOperation(dto);
+        return lookupOrderByClientOrderId(binanceClient, dto, "manual_lookup");
+    }
+
+    private Optional<BinanceFuturesOrderClientResponse> reconcileAfterAmbiguousFailure(BinanceClient client,
+                                                                                       OperationDto dto,
+                                                                                       String op,
+                                                                                       Exception originalError) {
+        if (dto == null || dto.getClientOrderId() == null || dto.getClientOrderId().isBlank()) {
+            log.warn("event=binance.futures.order.reconcile.skip reason=missing_client_order_id op={} symbol={} originalErrClass={}",
+                    op,
+                    dto == null ? null : dto.getSymbol(),
+                    originalError == null ? null : originalError.getClass().getSimpleName());
+            return Optional.empty();
+        }
+        return lookupOrderByClientOrderId(client, dto, op);
+    }
+
+    private Optional<BinanceFuturesOrderClientResponse> lookupOrderByClientOrderId(BinanceClient client,
+                                                                                   OperationDto dto,
+                                                                                   String op) {
+        try {
+            log.info("event=binance.futures.order.reconcile.start op={} traceId={} originId={} userId={} wallet={} symbol={} clientOrderId={}",
+                    op,
+                    safeNull(MDC.get("traceId")),
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    dto.getSymbol(),
+                    safeNull(dto.getClientOrderId()));
+
+            ApiResponse<BinanceFuturesOrderClientResponse> resp = client.getOrderByClientOrderId(
+                    dto.getApiKey(),
+                    dto.getSecret(),
+                    safeNull(MDC.get("traceId")),
+                    dto.getSymbol(),
+                    dto.getClientOrderId()
+            );
+            BinanceFuturesOrderClientResponse data = unwrap(resp, op + ".reconcile");
+            if (data == null || data.getOrderId() == null) {
+                log.warn("event=binance.futures.order.reconcile.not_found op={} originId={} userId={} wallet={} symbol={} clientOrderId={}",
+                        op,
+                        safeNull(dto.getOriginId()),
+                        safeNull(dto.getUserId()),
+                        safeNull(dto.getWalletId()),
+                        dto.getSymbol(),
+                        safeNull(dto.getClientOrderId()));
+                return Optional.empty();
+            }
+            log.info("event=binance.futures.order.reconcile.ok op={} traceId={} originId={} userId={} wallet={} symbol={} orderId={} status={} executedQty={} avgPrice={} clientOrderId={}",
+                    op,
+                    safeNull(MDC.get("traceId")),
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    data.getSymbol(),
+                    data.getOrderId(),
+                    data.getStatus(),
+                    data.getExecutedQty(),
+                    data.getAvgPrice(),
+                    data.getClientOrderId());
+            return Optional.of(data);
+        } catch (RestClientResponseException ex) {
+            BinanceHttpError err = parseBinanceHttpError(ex);
+            log.warn("event=binance.futures.order.reconcile.fail op={} reason=http_error originId={} userId={} wallet={} symbol={} clientOrderId={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\"",
+                    op,
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    dto.getSymbol(),
+                    safeNull(dto.getClientOrderId()),
+                    err.httpStatus(),
+                    err.errorCode(),
+                    err.binanceCode(),
+                    safeLog(err.binanceMsg()));
+            return Optional.empty();
+        } catch (RuntimeException ex) {
+            log.warn("event=binance.futures.order.reconcile.fail op={} reason=client_error originId={} userId={} wallet={} symbol={} clientOrderId={} errClass={} errMsg=\"{}\"",
+                    op,
+                    safeNull(dto.getOriginId()),
+                    safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()),
+                    dto.getSymbol(),
+                    safeNull(dto.getClientOrderId()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()));
+            return Optional.empty();
         }
     }
 
@@ -653,6 +766,10 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
 
     private String safeNull(String s) {
         return s == null ? "" : s;
+    }
+
+    void setOrderSubmitEnabledForTest(boolean orderSubmitEnabled) {
+        this.orderSubmitEnabled = orderSubmitEnabled;
     }
 
     private record BinanceHttpError(
