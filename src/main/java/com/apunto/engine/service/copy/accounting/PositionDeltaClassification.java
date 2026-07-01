@@ -10,6 +10,6 @@ public record PositionDeltaClassification(
         String warningCode
 ) {
     public boolean corrected() {
-        return warningCode != null && !warningCode.isBlank();
+        return "EVENT_TYPE_CONTRADICTS_POSITION_MATH".equals(warningCode);
     }
 }

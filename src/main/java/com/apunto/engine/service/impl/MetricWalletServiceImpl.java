@@ -619,28 +619,40 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             if (pnl < copyGuardMinWindowPnlUsdt) {
                 String detail = "window=" + window + " pnl=" + pnl + " min=" + copyGuardMinWindowPnlUsdt + " pauseAt=" + copyGuardPauseWindowPnlUsdt;
                 String normalizedWindow = window == null ? "" : window.trim().toLowerCase(java.util.Locale.ROOT);
+                String requiredWindowReason = requiredWindowReason(window, pnl);
                 if ("1w".equals(normalizedWindow)) {
                     log.info("event=guard_1w_warning walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_1W_NET_PNL action=REDUCE_CAPITAL copyImpact=capital_reduced",
                             walletId, strategyCode, window, pnl);
                     return CopyStrategyGuardDecision.reduce("NEGATIVE_1W_NET_PNL", detail, copyGuardOneWeekCapitalMultiplier);
                 }
                 if ("2w".equals(normalizedWindow)) {
-                    log.warn("event=guard_2w_pause_open walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_REQUIRED_WINDOW_2W action=PAUSE_OPEN copyImpact=no_new_live_open",
-                            walletId, strategyCode, window, pnl);
-                    return CopyStrategyGuardDecision.blocked("NEGATIVE_REQUIRED_WINDOW_2W", detail);
+                    log.warn("event=guard_2w_pause_open walletId={} strategyCode={} window={} pnl={} reasonCode={} action=PAUSE_OPEN copyImpact=no_new_live_open",
+                            walletId, strategyCode, window, pnl, requiredWindowReason);
+                    return CopyStrategyGuardDecision.blocked(requiredWindowReason, detail);
                 }
                 if ("1mo".equals(normalizedWindow)) {
-                    log.warn("event=guard_1mo_shadow_only walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_REQUIRED_WINDOW_1MO action=SHADOW_ONLY copyImpact=shadow_only",
-                            walletId, strategyCode, window, pnl);
-                    return CopyStrategyGuardDecision.shadowOnly("NEGATIVE_REQUIRED_WINDOW_1MO", detail, copyGuardOneMonthCapitalMultiplier);
+                    log.warn("event=guard_1mo_shadow_only walletId={} strategyCode={} window={} pnl={} reasonCode={} action=SHADOW_ONLY copyImpact=shadow_only",
+                            walletId, strategyCode, window, pnl, requiredWindowReason);
+                    return CopyStrategyGuardDecision.shadowOnly(requiredWindowReason, detail, copyGuardOneMonthCapitalMultiplier);
                 }
                 return pnl <= copyGuardPauseWindowPnlUsdt
-                        ? CopyStrategyGuardDecision.blocked("NEGATIVE_REQUIRED_WINDOW_" + windowReasonCode(window), detail)
-                        : CopyStrategyGuardDecision.reduce("NEGATIVE_REQUIRED_WINDOW_" + windowReasonCode(window), detail, 0.5);
+                        ? CopyStrategyGuardDecision.blocked(requiredWindowReason, detail)
+                        : CopyStrategyGuardDecision.reduce(requiredWindowReason, detail, 0.5);
             }
         }
 
         return CopyStrategyGuardDecision.allow();
+    }
+
+    private String requiredWindowReason(String window, Double pnl) {
+        String suffix = windowReasonCode(window);
+        if (pnl == null || !Double.isFinite(pnl)) {
+            return "SIMULATION_WINDOW_MISSING";
+        }
+        if (pnl < 0.0) {
+            return "NEGATIVE_REQUIRED_WINDOW_" + suffix;
+        }
+        return "NON_POSITIVE_REQUIRED_WINDOW_" + suffix;
     }
 
     private CopyStrategyGuardDecision decisionFromMetricCopyGuard(MetricaWalletDto dto) {

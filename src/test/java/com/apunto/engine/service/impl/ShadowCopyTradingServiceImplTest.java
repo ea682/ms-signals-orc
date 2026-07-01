@@ -710,6 +710,34 @@ class ShadowCopyTradingServiceImplTest {
     }
 
     @Test
+    void rankingExitKeepsShadowAllocationActiveWhenOpenCycleExists() throws Exception {
+        UUID user = UUID.randomUUID();
+        ShadowCopyAllocationEntity existing = shadowAllocation(99L, user, "MOVEMENT_ALL", "MOVEMENT_ALL", null);
+        existing.setWalletId("0xold");
+        existing.setStrategyKey("0xold|MOVEMENT_ALL|strategy|MOVEMENT_ALL");
+        List<ShadowCopyAllocationEntity> saved = new ArrayList<>();
+        ShadowCopyTradingServiceImpl service = serviceForShadowSyncWithActive(
+                saved,
+                List.of(existing),
+                Map.of(99L, 1L)
+        );
+
+        service.syncShadowAllocations(
+                user,
+                List.of(metric("0xnew", "MOVEMENT_ALL")),
+                1,
+                OffsetDateTime.parse("2026-06-22T11:00:00Z")
+        );
+
+        assertEquals("SHADOW_PAUSED", existing.getStatus());
+        assertEquals("PAUSE_OPEN", existing.getCopyGuardAction());
+        assertEquals("PAUSED_BY_RANKING_EXIT_OPEN_CYCLE", existing.getLastValidationReason());
+        assertTrue(existing.isActive());
+        assertNull(existing.getEndsAt());
+        assertTrue(saved.contains(existing));
+    }
+
+    @Test
     void simulationAuditFailureBlocksLivePromotion() throws Exception {
         UUID user = UUID.randomUUID();
         MetricaWalletDto metric = metric("0xabc", "MOVEMENT_ALL");
@@ -741,6 +769,23 @@ class ShadowCopyTradingServiceImplTest {
         );
 
         assertFalse(service.isLivePromotable(user, metric));
+    }
+
+    @Test
+    void zeroRequiredWindowUsesNonPositiveReasonForShadowSync() throws Exception {
+        UUID user = UUID.randomUUID();
+        List<ShadowCopyAllocationEntity> saved = new ArrayList<>();
+        ShadowCopyTradingServiceImpl service = serviceForShadowSync(saved);
+        setField(service, "requireShadowValidationBeforeLive", false);
+
+        MetricaWalletDto metric = metric("0xabc", "MOVEMENT_ALL");
+        metric.getCopySimulation().setPnlCopyNet(Map.of("2w", 0.0, "1mo", 2.0));
+
+        service.syncShadowAllocations(user, List.of(metric), 1, OffsetDateTime.parse("2026-06-22T11:00:00Z"));
+
+        assertEquals(1, saved.size());
+        assertEquals("NON_POSITIVE_REQUIRED_WINDOW_2W", saved.get(0).getLastValidationReason());
+        assertNull(saved.get(0).getTargetLiveAllocationPct());
     }
 
     @Test
@@ -1318,6 +1363,67 @@ class ShadowCopyTradingServiceImplTest {
                     return unexpected(method);
                 }),
                 proxy(ShadowPositionStateRepository.class, (method, args) -> {
+                    if ("sumClosedRealizedPnlUsdByWalletProfileId".equals(method.getName())
+                            || "sumSlippageUsdByWalletProfileId".equals(method.getName())) {
+                        return BigDecimal.ZERO;
+                    }
+                    if ("countClosedPositionsByWalletProfileId".equals(method.getName())
+                            || "countOpenPositionsByWalletProfileId".equals(method.getName())) {
+                        return 0L;
+                    }
+                    return unexpected(method);
+                }),
+                copyWalletProfileRepository(saved),
+                shadowProfileValidationRepository(),
+                new CopyStrategyRuntimeRouter(),
+                accountingService()
+        );
+        setField(service, "separateShadowEnabled", true);
+        setField(service, "requireShadowValidationBeforeLive", true);
+        setField(service, "minShadowClosedOperationsForLive", 5);
+        setField(service, "minShadowNetPnlUsdtForLive", BigDecimal.ZERO);
+        setField(service, "requirePositiveWindows", "2w,1mo");
+        setField(service, "shadowVersion", 1);
+        setField(service, "shadowSlippageBps", 0.0d);
+        return service;
+    }
+
+    private static ShadowCopyTradingServiceImpl serviceForShadowSyncWithActive(
+            List<ShadowCopyAllocationEntity> saved,
+            List<ShadowCopyAllocationEntity> activeAllocations,
+            Map<Long, Long> openByAllocation
+    ) throws Exception {
+        ShadowCopyTradingServiceImpl service = new ShadowCopyTradingServiceImpl(
+                proxy(ShadowCopyAllocationRepository.class, (method, args) -> {
+                    if ("findActiveStrategy".equals(method.getName())) {
+                        return Optional.empty();
+                    }
+                    if ("save".equals(method.getName())) {
+                        ShadowCopyAllocationEntity entity = (ShadowCopyAllocationEntity) args[0];
+                        if (!saved.contains(entity)) {
+                            saved.add(entity);
+                        }
+                        return entity;
+                    }
+                    if ("findActiveByUser".equals(method.getName())) {
+                        return activeAllocations;
+                    }
+                    if ("flush".equals(method.getName())) {
+                        return null;
+                    }
+                    return unexpected(method);
+                }),
+                proxy(ShadowCopyOperationRepository.class, (method, args) -> unexpected(method)),
+                proxy(ShadowCopyOperationEventRepository.class, (method, args) -> {
+                    if ("countByWalletProfileIdAndDecision".equals(method.getName())) {
+                        return 0L;
+                    }
+                    return unexpected(method);
+                }),
+                proxy(ShadowPositionStateRepository.class, (method, args) -> {
+                    if ("countOpenPositions".equals(method.getName())) {
+                        return openByAllocation.getOrDefault((Long) args[0], 0L);
+                    }
                     if ("sumClosedRealizedPnlUsdByWalletProfileId".equals(method.getName())
                             || "sumSlippageUsdByWalletProfileId".equals(method.getName())) {
                         return BigDecimal.ZERO;
