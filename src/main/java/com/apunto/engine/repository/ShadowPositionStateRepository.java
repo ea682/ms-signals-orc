@@ -75,6 +75,14 @@ public interface ShadowPositionStateRepository extends JpaRepository<ShadowPosit
     @Query("""
             select count(s)
             from ShadowPositionStateEntity s
+            where s.shadowAllocationId = :shadowAllocationId
+              and s.status = 'OPEN'
+            """)
+    long countOpenPositions(@Param("shadowAllocationId") Long shadowAllocationId);
+
+    @Query("""
+            select count(s)
+            from ShadowPositionStateEntity s
             where s.walletProfileId = :walletProfileId
               and s.status = 'OPEN'
             """)
