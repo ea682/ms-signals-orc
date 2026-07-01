@@ -154,6 +154,10 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         static ShadowPositionImpact entryPriceMissing(UUID shadowPositionId) {
             return of("ENTRY_PRICE_MISSING", "ENTRY_PRICE_MISSING", null, shadowPositionId, false);
         }
+
+        static ShadowPositionImpact newExposureBlockedByRankingExit(UUID shadowPositionId) {
+            return of("SHADOW_NEW_EXPOSURE_BLOCKED_BY_RANKING_EXIT", "NEW_EXPOSURE_BLOCKED", null, shadowPositionId, false);
+        }
     }
 
     private final ShadowCopyAllocationRepository shadowAllocationRepository;
@@ -1277,6 +1281,20 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                     originId, allocation.getId(), allocation.getWalletProfileId(), allocation.getWalletId(), allocation.getCopyStrategyCode(), op.getParSymbol(), positionSide, deltaType);
             return ShadowPositionImpact.resizeWithoutOpen();
         }
+        if (state == null && blocksNewShadowExposure(allocation)) {
+            log.info("event=shadow_new_exposure_blocked_by_ranking_exit originId={} shadowAllocationId={} walletProfileId={} walletId={} copyProfileCode={} symbol={} side={} deltaType={} status={} reasonCode=SHADOW_NEW_EXPOSURE_BLOCKED_BY_RANKING_EXIT allowNewEntries=false allowReductions=true allowCloses=true",
+                    originId,
+                    allocation.getId(),
+                    allocation.getWalletProfileId(),
+                    allocation.getWalletId(),
+                    allocation.getCopyStrategyCode(),
+                    op.getParSymbol(),
+                    positionSide,
+                    deltaType,
+                    allocation.getStatus());
+            return ShadowPositionImpact.newExposureBlockedByRankingExit(null)
+                    .withAccounting(ZERO, ZERO, ZERO, ZERO, ZERO);
+        }
         boolean opened = false;
         if (state == null) {
             opened = true;
@@ -1318,7 +1336,24 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             timing.add(CopyFlowTiming.Stage.CLASSIFICATION, classificationNs);
         }
         PositionDeltaType computedDeltaType = classification.computedDeltaType();
-        boolean resizeLike = !opened && (deltaType == HyperliquidDeltaType.RESIZE || deltaType == HyperliquidDeltaType.UPDATE);
+        if (blocksNewShadowExposure(allocation)
+                && (computedDeltaType == PositionDeltaType.OPEN || computedDeltaType == PositionDeltaType.INCREASE)) {
+            log.info("event=shadow_new_exposure_blocked_by_ranking_exit originId={} shadowAllocationId={} walletProfileId={} shadowPositionId={} walletId={} copyProfileCode={} symbol={} side={} previousQty={} resultingQty={} computedDeltaType={} status={} reasonCode=SHADOW_NEW_EXPOSURE_BLOCKED_BY_RANKING_EXIT allowNewEntries=false allowReductions=true allowCloses=true",
+                    originId,
+                    allocation.getId(),
+                    allocation.getWalletProfileId(),
+                    state.getId(),
+                    allocation.getWalletId(),
+                    allocation.getCopyStrategyCode(),
+                    op.getParSymbol(),
+                    positionSide,
+                    previousQty,
+                    resultingQty,
+                    computedDeltaType,
+                    allocation.getStatus());
+            return ShadowPositionImpact.newExposureBlockedByRankingExit(state.getId())
+                    .withAccounting(previousQty, previousQty, ZERO, ZERO, ZERO);
+        }
         boolean noopByMath = !opened && (computedDeltaType == PositionDeltaType.NOOP || computedDeltaType == PositionDeltaType.SNAPSHOT_NOOP);
         if (noopByMath) {
             state.setMarkPrice(price);
@@ -1634,14 +1669,40 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             if (activeKeys.contains(existing.getStrategyKey())) {
                 continue;
             }
+            long openPositions = countOpenShadowPositions(existing);
             existing.setStatus("SHADOW_PAUSED");
-            existing.setEndsAt(now);
-            existing.setActive(false);
+            existing.setCopyGuardAction("PAUSE_OPEN");
+            existing.setLastValidationReason(openPositions > 0
+                    ? "PAUSED_BY_RANKING_EXIT_OPEN_CYCLE"
+                    : "PAUSED_BY_RANKING_EXIT");
+            existing.setEndsAt(openPositions > 0 ? null : now);
+            existing.setActive(openPositions > 0);
             existing.setUpdatedAt(now);
             shadowAllocationRepository.save(existing);
             paused++;
+            log.info("event=shadow_allocation_ranking_exit_paused userId={} shadowAllocationId={} walletId={} strategyCode={} openPositions={} active={} reasonCode={} allowNewEntries=false allowReductions=true allowCloses=true",
+                    idUser,
+                    existing.getId(),
+                    existing.getWalletId(),
+                    existing.getCopyStrategyCode(),
+                    openPositions,
+                    existing.isActive(),
+                    existing.getLastValidationReason());
         }
         return paused;
+    }
+
+    private long countOpenShadowPositions(ShadowCopyAllocationEntity allocation) {
+        if (allocation == null) {
+            return 0L;
+        }
+        if (allocation.getWalletProfileId() != null) {
+            return Math.max(0L, shadowPositionStateRepository.countOpenPositionsByWalletProfileId(allocation.getWalletProfileId()));
+        }
+        if (allocation.getId() != null) {
+            return Math.max(0L, shadowPositionStateRepository.countOpenPositions(allocation.getId()));
+        }
+        return 0L;
     }
 
     private boolean isRelevantForShadow(MetricaWalletDto dto) {
@@ -1655,6 +1716,16 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         }
         Integer score = decisionScore(dto);
         return score == null || score >= 0;
+    }
+
+    private boolean blocksNewShadowExposure(ShadowCopyAllocationEntity allocation) {
+        if (allocation == null || allocation.getStatus() == null) {
+            return false;
+        }
+        String status = allocation.getStatus().trim().toUpperCase(Locale.ROOT).replace('-', '_');
+        return "SHADOW_PAUSED".equals(status)
+                || "SHADOW_OBSERVED".equals(status)
+                || "PAUSED_BY_RANKING_EXIT".equals(status);
     }
 
     private String shadowStatus(UUID idUser, MetricaWalletDto dto) {
@@ -1818,8 +1889,11 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             if (pnl == null) {
                 return "required_shadow_window_missing:" + window;
             }
-            if (pnl <= 0.0) {
+            if (pnl < 0.0) {
                 return "NEGATIVE_REQUIRED_WINDOW_" + windowReasonCode(window);
+            }
+            if (pnl == 0.0) {
+                return "NON_POSITIVE_REQUIRED_WINDOW_" + windowReasonCode(window);
             }
         }
         return null;
@@ -2328,7 +2402,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return;
         }
         BigDecimal deltaQty = previousQty == null || resultingQty == null ? null : resultingQty.subtract(previousQty);
-        log.warn("event=copy_position.classification.corrected flow=shadow originalEventType={} originalDeltaType={} computedDeltaType={} reasonCode={} warningCode={} previousQty={} resultingQty={} deltaQty={} executionPrice={} symbol={} walletId={} profileKey={} strategyCode={} side={} originId={}",
+        log.info("event=copy_position.classification.corrected flow=shadow originalEventType={} originalDeltaType={} computedDeltaType={} reasonCode={} warningCode={} previousQty={} resultingQty={} deltaQty={} executionPrice={} symbol={} walletId={} profileKey={} strategyCode={} side={} originId={} correctionApplied=true confidence=POSITION_MATH",
                 originalEventType,
                 originalDeltaType,
                 classification.computedDeltaType(),

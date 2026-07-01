@@ -110,6 +110,14 @@ public class MetricaWalletDto {
         private String scopeValue;
         private Double scoreFinal;
         private Double rankingScore;
+        private Double historicalScore;
+        private Double baseRankingScore;
+        private Double qualityScore;
+        private Double operationalScore;
+        private Double liveReadinessScore;
+        private String operationalAction;
+        private List<String> operationalReasons;
+        private Boolean keepInShadow;
         private Double capitalEfficiency;
         private Double capitalEfficiencyPct;
         private Double pnlCopyNetAdjusted;

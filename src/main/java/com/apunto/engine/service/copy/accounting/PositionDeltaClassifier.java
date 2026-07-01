@@ -38,6 +38,16 @@ public final class PositionDeltaClassifier {
                     "NEGATIVE_QTY"
             );
         }
+        if (rawPrevious == null || rawResulting == null) {
+            PositionDeltaType fallback = fallbackDeltaType(input);
+            return new PositionDeltaClassification(
+                    fallback,
+                    false,
+                    ZERO,
+                    reasonCode(fallback),
+                    "POSITION_QTY_MISSING_FOR_MATH"
+            );
+        }
         BigDecimal previous = nonNegative(input == null ? null : input.previousQty());
         BigDecimal resulting = nonNegative(input == null ? null : input.resultingQty());
         String previousSide = normalize(input == null ? null : input.previousSide());
@@ -109,6 +119,30 @@ public final class PositionDeltaClassifier {
             return "EVENT_TYPE_CONTRADICTS_POSITION_MATH";
         }
         return null;
+    }
+
+    private PositionDeltaType fallbackDeltaType(PositionDeltaClassificationInput input) {
+        String originalEventType = normalize(input == null ? null : input.originalEventType());
+        String originalDeltaType = normalize(input == null ? null : input.originalDeltaType());
+        if ("CLOSE".equals(originalEventType) || "PANIC_CLOSE".equals(originalEventType) || "CLOSE".equals(originalDeltaType)) {
+            return PositionDeltaType.CLOSE_FULL;
+        }
+        if ("REDUCE".equals(originalEventType)) {
+            return PositionDeltaType.REDUCE;
+        }
+        if ("OPEN".equals(originalEventType) || "OPEN".equals(originalDeltaType)) {
+            return PositionDeltaType.OPEN;
+        }
+        if ("INCREASE".equals(originalEventType) || "RESIZE".equals(originalDeltaType)) {
+            return PositionDeltaType.INCREASE;
+        }
+        if ("FLIP".equals(originalEventType) || "FLIP".equals(originalDeltaType)) {
+            return PositionDeltaType.FLIP;
+        }
+        if (isSnapshotLike(input)) {
+            return PositionDeltaType.SNAPSHOT_NOOP;
+        }
+        return PositionDeltaType.INVALID;
     }
 
     private String normalize(String value) {

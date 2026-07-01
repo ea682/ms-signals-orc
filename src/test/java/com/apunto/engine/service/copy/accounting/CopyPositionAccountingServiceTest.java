@@ -185,6 +185,30 @@ class CopyPositionAccountingServiceTest {
     }
 
     @Test
+    void missingQtyDoesNotInventMathCorrection() {
+        PositionDeltaClassification classification = classifier.classify(new PositionDeltaClassificationInput(
+                "INCREASE",
+                "RESIZE",
+                "SHORT",
+                "SHORT",
+                null,
+                null,
+                null,
+                new BigDecimal("90"),
+                new BigDecimal("100"),
+                "BTCUSDT",
+                "0xabc",
+                "0xabc|SHORT_ONLY|direction|SHORT",
+                "shadow"
+        ));
+
+        assertEquals(PositionDeltaType.INCREASE, classification.computedDeltaType());
+        assertFalse(classification.shouldRealizePnl());
+        assertFalse(classification.corrected());
+        assertEquals("POSITION_QTY_MISSING_FOR_MATH", classification.warningCode());
+    }
+
+    @Test
     void longIncreaseUsesWeightedAverageEntry() {
         CopyAccountingResult result = accounting.apply(input(PositionSide.LONG, "10", "20", "100", "120", "0", "0"));
 
