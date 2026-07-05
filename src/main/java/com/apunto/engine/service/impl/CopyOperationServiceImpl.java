@@ -323,6 +323,17 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         return v == null ? BigDecimal.ZERO : v;
     }
 
+    @Transactional(readOnly = true)
+    @Override
+    public BigDecimal sumBufferedMarginActiveForUser(String idUser, BigDecimal safety) {
+        if (idUser == null || idUser.isBlank()) {
+            return BigDecimal.ZERO;
+        }
+        final BigDecimal s = safety == null ? BigDecimal.ZERO : safety;
+        final BigDecimal v = copyOperationRepository.sumBufferedMarginActiveForUser(idUser, s);
+        return v == null ? BigDecimal.ZERO : v;
+    }
+
     private CopyOperationEntity buildCopyOperationEntity(CopyOperationDto operation) {
         CopyOperationEntity entity = new CopyOperationEntity();
 

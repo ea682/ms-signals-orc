@@ -27,6 +27,14 @@ public class ShadowLiveReadinessProperties {
     private BigDecimal maxEffectiveLeverageX = new BigDecimal("5");
     private BigDecimal maxLiveNotionalUsdPerOrder = new BigDecimal("10");
     private BigDecimal maxLiveRequiredMarginUsdPerOrder = new BigDecimal("10");
+    private long minMicroLiveCompleteCycles = 3;
+    private long minMicroLiveMeaningfulMovements = 30;
+    private BigDecimal microLiveBaseCapitalUSDT = new BigDecimal("100");
+    private BigDecimal microLiveMaxCapitalUSDT = new BigDecimal("100");
+    private BigDecimal evidenceMicroThresholdA = new BigDecimal("55");
+    private BigDecimal evidenceMicroThresholdB = new BigDecimal("60");
+    private BigDecimal evidenceMicroThresholdC = new BigDecimal("70");
+    private BigDecimal evidenceMicroThresholdD = new BigDecimal("80");
 
     public long getMinClosedPositions() {
         return minClosedPositions;
@@ -186,5 +194,69 @@ public class ShadowLiveReadinessProperties {
 
     public void setMaxLiveRequiredMarginUsdPerOrder(BigDecimal maxLiveRequiredMarginUsdPerOrder) {
         this.maxLiveRequiredMarginUsdPerOrder = maxLiveRequiredMarginUsdPerOrder;
+    }
+
+    public long getMinMicroLiveCompleteCycles() {
+        return minMicroLiveCompleteCycles;
+    }
+
+    public void setMinMicroLiveCompleteCycles(long minMicroLiveCompleteCycles) {
+        this.minMicroLiveCompleteCycles = minMicroLiveCompleteCycles;
+    }
+
+    public long getMinMicroLiveMeaningfulMovements() {
+        return minMicroLiveMeaningfulMovements;
+    }
+
+    public void setMinMicroLiveMeaningfulMovements(long minMicroLiveMeaningfulMovements) {
+        this.minMicroLiveMeaningfulMovements = minMicroLiveMeaningfulMovements;
+    }
+
+    public BigDecimal getMicroLiveBaseCapitalUSDT() {
+        return microLiveBaseCapitalUSDT;
+    }
+
+    public void setMicroLiveBaseCapitalUSDT(BigDecimal microLiveBaseCapitalUSDT) {
+        this.microLiveBaseCapitalUSDT = microLiveBaseCapitalUSDT;
+    }
+
+    public BigDecimal getMicroLiveMaxCapitalUSDT() {
+        return microLiveMaxCapitalUSDT;
+    }
+
+    public void setMicroLiveMaxCapitalUSDT(BigDecimal microLiveMaxCapitalUSDT) {
+        this.microLiveMaxCapitalUSDT = microLiveMaxCapitalUSDT;
+    }
+
+    public BigDecimal getEvidenceMicroThresholdA() {
+        return evidenceMicroThresholdA;
+    }
+
+    public void setEvidenceMicroThresholdA(BigDecimal evidenceMicroThresholdA) {
+        this.evidenceMicroThresholdA = evidenceMicroThresholdA;
+    }
+
+    public BigDecimal getEvidenceMicroThresholdB() {
+        return evidenceMicroThresholdB;
+    }
+
+    public void setEvidenceMicroThresholdB(BigDecimal evidenceMicroThresholdB) {
+        this.evidenceMicroThresholdB = evidenceMicroThresholdB;
+    }
+
+    public BigDecimal getEvidenceMicroThresholdC() {
+        return evidenceMicroThresholdC;
+    }
+
+    public void setEvidenceMicroThresholdC(BigDecimal evidenceMicroThresholdC) {
+        this.evidenceMicroThresholdC = evidenceMicroThresholdC;
+    }
+
+    public BigDecimal getEvidenceMicroThresholdD() {
+        return evidenceMicroThresholdD;
+    }
+
+    public void setEvidenceMicroThresholdD(BigDecimal evidenceMicroThresholdD) {
+        this.evidenceMicroThresholdD = evidenceMicroThresholdD;
     }
 }

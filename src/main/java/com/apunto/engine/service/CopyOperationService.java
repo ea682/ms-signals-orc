@@ -22,4 +22,5 @@ public interface CopyOperationService {
     void upsertActiveOperation(CopyOperationDto operation);
     CopyOperationDto findOperationForUserAndType(String idOrderOrigin, String idUser, String typeOperation);
     java.math.BigDecimal sumBufferedMarginActive(String idUser, String walletId, java.math.BigDecimal safety);
+    java.math.BigDecimal sumBufferedMarginActiveForUser(String idUser, java.math.BigDecimal safety);
 }

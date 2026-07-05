@@ -2,6 +2,7 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.dto.CopyOperationEventRecordCommand;
 import com.apunto.engine.entity.CopyOperationEventEntity;
+import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.repository.CopyOperationEventRepository;
 import com.apunto.engine.outbox.service.MetricCopyOperationOutboxService;
 import com.apunto.engine.service.CopyOperationEventService;
@@ -140,9 +141,7 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
     }
 
     private String normalizeExecutionMode(String mode) {
-        if (mode == null || mode.isBlank()) return "LIVE";
-        String normalized = mode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
-        return "SHADOW".equals(normalized) ? "SHADOW" : "LIVE";
+        return UserCopyAllocationEntity.normalizeExecutionMode(mode);
     }
 
     private String normalizeStrategy(String strategy) {

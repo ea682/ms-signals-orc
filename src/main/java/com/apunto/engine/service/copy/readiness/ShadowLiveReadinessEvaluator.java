@@ -63,15 +63,115 @@ public class ShadowLiveReadinessEvaluator {
         if (reasons.isEmpty()) {
             return new ShadowLiveReadinessDecision(
                     ShadowLiveReadinessStatus.APPROVED_FOR_LIVE,
-                    List.of("SHADOW_READINESS_APPROVED")
+                    List.of("SHADOW_READINESS_APPROVED"),
+                    "LIVE",
+                    normalizeRiskClass(safe.riskClass()),
+                    safe.evidenceScore(),
+                    List.of(),
+                    List.of(),
+                    new ShadowLiveReadinessDecision.CapitalDecision(
+                            "ALLOCATE",
+                            properties.getMicroLiveBaseCapitalUSDT(),
+                            properties.getMicroLiveMaxCapitalUSDT(),
+                            BigDecimal.ONE,
+                            false,
+                            List.of("SHADOW_READINESS_APPROVED")
+                    )
+            );
+        }
+
+        List<String> hardBlockers = reasons.stream()
+                .filter(this::isHardBlocker)
+                .map(Reason::code)
+                .distinct()
+                .toList();
+        List<String> softWarnings = reasons.stream()
+                .filter(reason -> !isHardBlocker(reason))
+                .map(Reason::code)
+                .distinct()
+                .toList();
+        List<String> reasonCodes = reasons.stream().map(Reason::code).distinct().toList();
+
+        if (hardBlockers.isEmpty() && microLiveEligible(safe)) {
+            return new ShadowLiveReadinessDecision(
+                    ShadowLiveReadinessStatus.MICRO_LIVE_READY,
+                    reasonCodes,
+                    "MICRO_LIVE",
+                    normalizeRiskClass(safe.riskClass()),
+                    safe.evidenceScore(),
+                    hardBlockers,
+                    softWarnings,
+                    new ShadowLiveReadinessDecision.CapitalDecision(
+                            "MICRO_ALLOCATE",
+                            properties.getMicroLiveBaseCapitalUSDT(),
+                            properties.getMicroLiveMaxCapitalUSDT(),
+                            BigDecimal.ONE,
+                            false,
+                            softWarnings
+                    )
             );
         }
 
         ShadowLiveReadinessStatus status = highestSeverity(reasons);
         return new ShadowLiveReadinessDecision(
                 status,
-                reasons.stream().map(Reason::code).distinct().toList()
+                reasonCodes,
+                "SHADOW",
+                normalizeRiskClass(safe.riskClass()),
+                safe.evidenceScore(),
+                hardBlockers,
+                softWarnings,
+                new ShadowLiveReadinessDecision.CapitalDecision(
+                        "NO_ALLOCATE",
+                        BigDecimal.ZERO,
+                        BigDecimal.ZERO,
+                        BigDecimal.ZERO,
+                        false,
+                        reasonCodes
+                )
         );
+    }
+
+    private boolean isHardBlocker(Reason reason) {
+        return reason.status() == ShadowLiveReadinessStatus.BLOCKED
+                || reason.status() == ShadowLiveReadinessStatus.NOT_READY;
+    }
+
+    private boolean microLiveEligible(ShadowLiveReadinessInput input) {
+        final String riskClass = normalizeRiskClass(input.riskClass());
+        if ("D".equals(riskClass)) return false;
+        boolean completeCyclesOk = completeCycles(input) >= properties.getMinMicroLiveCompleteCycles();
+        boolean meaningfulMovementsOk = meaningfulMovements(input) >= properties.getMinMicroLiveMeaningfulMovements();
+        boolean evidenceOk = input.evidenceScore() != null
+                && input.evidenceScore().compareTo(microThreshold(riskClass)) >= 0;
+        return completeCyclesOk || meaningfulMovementsOk || evidenceOk;
+    }
+
+    private long completeCycles(ShadowLiveReadinessInput input) {
+        if (input.completeCycles() != null) return Math.max(0, input.completeCycles());
+        return 0;
+    }
+
+    private long meaningfulMovements(ShadowLiveReadinessInput input) {
+        if (input.meaningfulMovements() != null) return Math.max(0, input.meaningfulMovements());
+        return 0;
+    }
+
+    private BigDecimal microThreshold(String riskClass) {
+        return switch (riskClass) {
+            case "A" -> properties.getEvidenceMicroThresholdA();
+            case "C" -> properties.getEvidenceMicroThresholdC();
+            case "D" -> properties.getEvidenceMicroThresholdD();
+            default -> properties.getEvidenceMicroThresholdB();
+        };
+    }
+
+    private String normalizeRiskClass(String value) {
+        final String normalized = normalize(value);
+        if ("A".equals(normalized) || "B".equals(normalized) || "C".equals(normalized) || "D".equals(normalized)) {
+            return normalized;
+        }
+        return "B";
     }
 
     private void addLatencyReasons(ShadowLiveReadinessInput input, List<Reason> reasons) {

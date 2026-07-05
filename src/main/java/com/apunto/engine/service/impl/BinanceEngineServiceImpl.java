@@ -34,6 +34,8 @@ import com.apunto.engine.service.copy.accounting.CopyAccountingResult;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingAdapter;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingInput;
 import com.apunto.engine.service.copy.accounting.PositionDeltaType;
+import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocation;
+import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocator;
 import com.apunto.engine.service.copy.leverage.CopyLeverageAuditCalculator;
 import com.apunto.engine.service.copy.leverage.CopyLeverageAuditInput;
 import com.apunto.engine.service.copy.leverage.CopyLeverageSnapshot;
@@ -98,6 +100,7 @@ import static java.math.BigDecimal.ONE;
 public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCopyExecutionService {
 
     private static final double DEFAULT_BASE_CAPITAL = 1_000.0;
+    private static final int MICRO_LIVE_MAX_CAPITAL_USDT = 100;
     private static final BigDecimal MIN_NOTIONAL_FALLBACK = new BigDecimal("5");
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal REBALANCE_TOLERANCE_PCT = new BigDecimal("0.02");
@@ -196,6 +199,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     @Value("${engine.copy.wallet-reserve-pct:0.01}")
     private BigDecimal walletReservePct;
+
+    @Value("${copy.capital-allocator.safety-reserve-pct:0.10}")
+    private BigDecimal globalCapitalSafetyReservePct;
 
     @Value("${engine.copy.sizing.base-capital-cap:10000}")
     private double sizingBaseCapitalCap;
@@ -1696,9 +1702,43 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (share == null || !Double.isFinite(share) || share <= 0) {
             return ZERO;
         }
-        return BigDecimal.valueOf(resolveCopyCapital(userDetail, allocation))
-                .multiply(BigDecimal.valueOf(Math.max(0.0, Math.min(1.0, share))));
+        return resolveStrategyMarginBudget(
+                resolveCopyCapital(userDetail, allocation),
+                share,
+                executionModeOf(allocation),
+                resolveCapitalAsset(userDetail).name()
+        ).amount();
     }
+
+    static BigDecimal resolveStrategyMarginBudget(int copyCapital, double capitalShare, String executionMode) {
+        return resolveStrategyMarginBudget(copyCapital, capitalShare, executionMode, FuturesCapitalAsset.defaultAsset().name()).amount();
+    }
+
+    static StrategyMarginBudget resolveStrategyMarginBudget(int copyCapital, double capitalShare, String executionMode, String capitalCurrency) {
+        final int safeCopyCapital = Math.max(0, copyCapital);
+        final String mode = UserCopyAllocationEntity.normalizeExecutionMode(executionMode);
+        final String safeCurrency = FuturesCapitalAsset.fromNullable(capitalCurrency).name();
+        final BigDecimal amount;
+        if ("MICRO_LIVE".equals(mode)) {
+            amount = BigDecimal.valueOf(Math.min(safeCopyCapital, MICRO_LIVE_MAX_CAPITAL_USDT))
+                    .setScale(12, RoundingMode.HALF_UP);
+        } else {
+            final double safeShare = Double.isFinite(capitalShare)
+                    ? Math.max(0.0, Math.min(1.0, capitalShare))
+                    : 0.0;
+            amount = BigDecimal.valueOf(safeCopyCapital)
+                    .multiply(BigDecimal.valueOf(safeShare))
+                    .setScale(12, RoundingMode.HALF_UP);
+        }
+        return new StrategyMarginBudget(amount, safeCurrency, safeCurrency, safeCurrency);
+    }
+
+    record StrategyMarginBudget(
+            BigDecimal amount,
+            String capitalCurrency,
+            String quoteAsset,
+            String collateralAsset
+    ) {}
 
     private int resolveCopyCapital(UserDetailDto userDetail, UserCopyAllocationEntity allocation) {
         if (userDetail == null || userDetail.getDetail() == null) {
@@ -1710,7 +1750,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (capital == null) {
             capital = userDetail.getDetail().getCapital();
         }
-        return capital == null ? 0 : Math.max(0, capital);
+        int resolved = capital == null ? 0 : Math.max(0, capital);
+        if (isMicroLiveMode(allocation)) {
+            return Math.min(resolved, MICRO_LIVE_MAX_CAPITAL_USDT);
+        }
+        return resolved;
+    }
+
+    private int resolveRuntimeCapital(UserDetailDto userDetail) {
+        if (userDetail == null || userDetail.getDetail() == null || userDetail.getDetail().getCapital() == null) {
+            return 0;
+        }
+        return Math.max(0, userDetail.getDetail().getCapital());
     }
 
     private int resolveUserLeverage(UserDetailDto userDetail) {
@@ -3758,8 +3809,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final int copyCapital = resolveCopyCapital(userDetail, allocation);
-        final BigDecimal walletMarginBudget = BigDecimal.valueOf(copyCapital)
-                .multiply(BigDecimal.valueOf(capitalShare));
+        final FuturesCapitalAsset capitalAsset = resolveCapitalAsset(userDetail);
+        final StrategyMarginBudget strategyBudget = resolveStrategyMarginBudget(
+                copyCapital,
+                capitalShare,
+                executionModeOf(allocation),
+                capitalAsset.name()
+        );
+        final BigDecimal walletMarginBudget = strategyBudget.amount();
         if (walletMarginBudget.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_BUDGET, originId, userId, walletId);
             throw new SkipExecutionException(
@@ -3985,6 +4042,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     )
             );
         }
+        validateSymbolCapitalAsset(symbolInfo, capitalAsset);
 
         final SymbolRules rules = extractRules(symbolInfo);
         CopyMinNotionalPolicy minNotionalPolicy = CopyMinNotionalPolicy.skip();
@@ -4248,6 +4306,43 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
+        final BigDecimal globalUsedMargin = copyOperationService.sumBufferedMarginActiveForUser(userId, safety);
+        final CopyGlobalCapitalAllocation globalCapital = CopyGlobalCapitalAllocator.evaluate(
+                BigDecimal.valueOf(resolveRuntimeCapital(userDetail)),
+                globalUsedMargin,
+                globalCapitalSafetyReservePct,
+                marginRequired,
+                capitalAsset.name()
+        );
+        if (!globalCapital.allowNewExposure()) {
+            log.warn("event=operation.open.preflight_blocked originId={} userId={} wallet={} symbol={} reasonCode={} capitalCurrency={} availableBalance={} usedMargin={} safetyReserve={} marginRequired={} availableAfterRequired={} copyImpact=no_new_exposure",
+                    originId,
+                    userId,
+                    walletId,
+                    symbol,
+                    globalCapital.reasonCode(),
+                    globalCapital.capitalCurrency(),
+                    globalCapital.availableBalanceAmount().toPlainString(),
+                    globalCapital.usedMarginAmount().toPlainString(),
+                    globalCapital.safetyReserveAmount().toPlainString(),
+                    globalCapital.requiredMarginAmount().toPlainString(),
+                    globalCapital.availableAfterRequiredAmount().toPlainString());
+            throw new SkipExecutionException(
+                    globalCapital.reasonCode(),
+                    "Capital global insuficiente para abrir nueva exposicion",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "symbol", symbol,
+                            "capitalCurrency", globalCapital.capitalCurrency(),
+                            "availableBalance", globalCapital.availableBalanceAmount(),
+                            "usedMargin", globalCapital.usedMarginAmount(),
+                            "safetyReserve", globalCapital.safetyReserveAmount(),
+                            "marginRequired", globalCapital.requiredMarginAmount(),
+                            "availableAfterRequired", globalCapital.availableAfterRequiredAmount()
+                    )
+            );
+        }
+
         final String userWalletKey = userWalletKey(userId, walletId);
 
         log.debug(LOG_PREP_PREPARED,
@@ -4470,6 +4565,30 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         String quote = normalizeSymbolKey(symbolInfo.getQuoteAsset());
         String margin = normalizeSymbolKey(symbolInfo.getMarginAsset());
         return symbol != null && quote != null && margin != null && symbol.endsWith(quote) && quote.equals(margin);
+    }
+
+    static void validateSymbolCapitalAsset(BinanceFuturesSymbolInfoClientDto symbolInfo, FuturesCapitalAsset capitalAsset) {
+        final String symbol = normalizeAssetCode(symbolInfo == null ? null : symbolInfo.getSymbol());
+        final String quote = normalizeAssetCode(symbolInfo == null ? null : symbolInfo.getQuoteAsset());
+        final String margin = normalizeAssetCode(symbolInfo == null ? null : symbolInfo.getMarginAsset());
+        final String expected = (capitalAsset == null ? FuturesCapitalAsset.defaultAsset() : capitalAsset).name();
+        if (symbol == null || quote == null || margin == null || !quote.equals(margin) || !expected.equals(quote)) {
+            throw new SkipExecutionException(
+                    "PRE_FLIGHT_BLOCKED_QUOTE_ASSET",
+                    "El contrato Binance no coincide con la moneda de capital del usuario",
+                    LogFmt.kv(
+                            "symbol", symbol,
+                            "quoteAsset", quote,
+                            "marginAsset", margin,
+                            "expectedCapitalAsset", expected
+                    )
+            );
+        }
+    }
+
+    private static String normalizeAssetCode(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        return raw.trim().toUpperCase(Locale.ROOT);
     }
 
 
@@ -5050,15 +5169,17 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private String executionModeOf(UserCopyAllocationEntity allocation) {
-        if (allocation == null || allocation.getExecutionMode() == null || allocation.getExecutionMode().isBlank()) {
-            return "LIVE";
-        }
-        String mode = allocation.getExecutionMode().trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
-        return "SHADOW".equals(mode) ? "SHADOW" : "LIVE";
+        return UserCopyAllocationEntity.normalizeExecutionMode(
+                allocation == null ? null : allocation.getExecutionMode()
+        );
     }
 
     private boolean isShadowMode(UserCopyAllocationEntity allocation) {
         return allocation != null && allocation.isShadowMode();
+    }
+
+    private boolean isMicroLiveMode(UserCopyAllocationEntity allocation) {
+        return "MICRO_LIVE".equals(executionModeOf(allocation));
     }
 
     private UUID parseUuid(String value) {

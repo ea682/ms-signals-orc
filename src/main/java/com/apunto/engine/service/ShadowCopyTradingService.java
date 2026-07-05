@@ -23,4 +23,8 @@ public interface ShadowCopyTradingService {
     boolean isSeparateShadowEnabled();
 
     boolean isLivePromotable(UUID idUser, MetricaWalletDto candidate);
+
+    default boolean isMicroLivePromotable(UUID idUser, MetricaWalletDto candidate) {
+        return false;
+    }
 }

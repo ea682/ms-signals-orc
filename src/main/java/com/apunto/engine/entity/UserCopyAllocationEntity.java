@@ -286,6 +286,8 @@ public class UserCopyAllocationEntity {
         String t = normalize(value);
         if (t == null) return "LIVE";
         String mode = t.toUpperCase(java.util.Locale.ROOT).replace('-', '_');
-        return "SHADOW".equals(mode) ? "SHADOW" : "LIVE";
+        if ("SHADOW".equals(mode)) return "SHADOW";
+        if ("MICRO_LIVE".equals(mode)) return "MICRO_LIVE";
+        return "LIVE";
     }
 }
