@@ -20,7 +20,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
             from UserCopyAllocationEntity uca
             where uca.idUser = :idUser
               and lower(uca.walletId) in :walletIds
-              and uca.executionMode = 'LIVE'
+              and uca.executionMode in ('LIVE', 'MICRO_LIVE')
             """)
     List<UserCopyAllocationEntity> findAllByIdUserAndWalletIdIn(@Param("idUser") UUID idUser, @Param("walletIds") List<String> walletIds);
 
@@ -34,7 +34,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and uca.endsAt is null
               and uca.isActive = true
               and uca.status = :status
-              and uca.executionMode = 'LIVE'
+              and uca.executionMode in ('LIVE', 'MICRO_LIVE')
             """)
     Optional<UserCopyAllocationEntity> findActiveAllocationForUserWalletStrategy(
             @Param("idUser") UUID idUser,
@@ -48,7 +48,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
             from UserCopyAllocationEntity uca
             where uca.idUser = :idUser
               and uca.endsAt is null
-              and uca.executionMode = 'LIVE'
+              and uca.executionMode in ('LIVE', 'MICRO_LIVE')
             """)
     List<UserCopyAllocationEntity> findActiveByIdUser(@Param("idUser") UUID idUser);
 
@@ -57,7 +57,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
             from UserCopyAllocationEntity uca
             where uca.idUser = :idUser
               and uca.endsAt is null
-              and uca.executionMode = 'LIVE'
+              and uca.executionMode in ('LIVE', 'MICRO_LIVE')
             """)
     List<UserCopyAllocationEntity> findAllByIdUserAndEndsAtIsNull(@Param("idUser") UUID idUser);
 
@@ -68,7 +68,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and ends_at is null
               and is_active = true
               and lower(status) = 'active'
-              and COALESCE(execution_mode, 'LIVE') = 'LIVE'
+              and COALESCE(execution_mode, 'LIVE') in ('LIVE', 'MICRO_LIVE')
             """, nativeQuery = true)
     List<UserCopyAllocationEntity> findActiveByWalletId(@Param("walletId") String walletId);
 
@@ -80,7 +80,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and uca.endsAt is null
               and uca.isActive = true
               and uca.status = :status
-              and uca.executionMode = 'LIVE'
+              and uca.executionMode in ('LIVE', 'MICRO_LIVE')
             """)
     List<UserCopyAllocationEntity> findActiveAllocationsForUserWallet(
             @Param("idUser") UUID idUser,
@@ -95,7 +95,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and lower(uca.walletId) = lower(:walletId)
               and uca.copyStrategyCode = :strategyCode
               and uca.endsAt is null
-              and uca.executionMode = 'LIVE'
+              and uca.executionMode in ('LIVE', 'MICRO_LIVE')
             """)
     Optional<UserCopyAllocationEntity> findOpenAllocationForUserWalletStrategy(
             @Param("idUser") UUID idUser,
@@ -112,7 +112,7 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and uca.scopeType = :scopeType
               and uca.scopeValue = :scopeValue
               and uca.endsAt is null
-              and uca.executionMode = 'LIVE'
+              and uca.executionMode in ('LIVE', 'MICRO_LIVE')
             """)
     Optional<UserCopyAllocationEntity> findOpenAllocationForUserWalletStrategyScope(
             @Param("idUser") UUID idUser,

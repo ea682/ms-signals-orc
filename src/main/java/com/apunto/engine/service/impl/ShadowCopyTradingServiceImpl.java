@@ -196,6 +196,18 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     @Value("${metric-wallet.shadow.warmup-minutes:60}")
     private long shadowWarmupMinutes;
 
+    @Value("${copy.live-readiness.evidence-micro-threshold-a:55}")
+    private double evidenceMicroThresholdA = 55.0;
+
+    @Value("${copy.live-readiness.evidence-micro-threshold-b:60}")
+    private double evidenceMicroThresholdB = 60.0;
+
+    @Value("${copy.live-readiness.evidence-micro-threshold-c:70}")
+    private double evidenceMicroThresholdC = 70.0;
+
+    @Value("${copy.live-readiness.evidence-micro-threshold-d:80}")
+    private double evidenceMicroThresholdD = 80.0;
+
     @Override
     @Transactional
     public void syncShadowAllocations(UUID idUser, List<MetricaWalletDto> candidates, int userMaxWallet, OffsetDateTime now) {
@@ -679,6 +691,15 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             );
             return false;
         }
+        if (hasRealJewelDataWarning(candidate, "DATA_STALE_BLOCKS_LIVE")
+                || hasRealJewelDataWarning(candidate, "DATA_STALE_BLOCKS_REAL_OPEN")) {
+            log.warn(
+                    "event=metric_candidate_stale_live_blocked reasonCode=DATA_STALE_BLOCKS_LIVE walletId={} strategyCode={} shadowImpact=SHADOW_ALLOWED liveImpact=LIVE_BLOCKED",
+                    walletId(candidate),
+                    strategyCode(candidate)
+            );
+            return false;
+        }
         MetricaWalletDto.CopyGuardDto guard = copyGuard(candidate);
         String action = copyGuardAction(candidate);
         String status = copyGuardStatus(candidate);
@@ -701,6 +722,54 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return false;
         }
         return !"SHADOW_REJECTED".equals(shadowStatus(idUser, candidate));
+    }
+
+    @Override
+    public boolean isMicroLivePromotable(UUID idUser, MetricaWalletDto candidate) {
+        if (!separateShadowEnabled) {
+            return true;
+        }
+        if (candidate == null || !copyStrategyRuntimeRouter.isLiveEligibleJoyasCandidate(candidate)) {
+            return false;
+        }
+        if (summaryDecisionNotFinal(candidate)) {
+            return false;
+        }
+        if (simulationAuditFailed(candidate)) {
+            return false;
+        }
+        if (hasRealJewelDataWarning(candidate, "DATA_STALE_BLOCKS_REAL_OPEN")) {
+            return false;
+        }
+        if (hasRealJewelHardBlockers(candidate)) {
+            return false;
+        }
+        MetricaWalletDto.CopyGuardDto guard = copyGuard(candidate);
+        String action = copyGuardAction(candidate);
+        String status = copyGuardStatus(candidate);
+        if (guard != null && Boolean.FALSE.equals(guard.getAllowNewEntries())) {
+            return false;
+        }
+        if ("SHADOW_ONLY".equals(action) || "PAUSE_OPEN".equals(action) || "DISABLED".equals(action)) {
+            return false;
+        }
+        if ("SHADOW_ONLY".equals(status) || "DATA_RISK".equals(status) || "DISABLED".equals(status)) {
+            return false;
+        }
+        String riskClass = realJewelRiskClass(candidate);
+        if ("D".equals(riskClass)) {
+            return false;
+        }
+        MetricaWalletDto.RealJewelDto realJewel = candidate.getRealJewel();
+        String recommendedMode = normalizeStatus(realJewel == null ? null : realJewel.getRecommendedExecutionMode());
+        if ("MICRO_LIVE".equals(recommendedMode) || Boolean.TRUE.equals(realJewel == null ? null : realJewel.getCanMicroLive())) {
+            return true;
+        }
+        if ("REDUCE_CAPITAL".equals(action)) {
+            return true;
+        }
+        Double evidenceScore = realJewel == null ? null : realJewel.getEvidenceScore();
+        return evidenceScore != null && evidenceScore >= microLiveEvidenceThreshold(riskClass);
     }
 
     private boolean recordShadowForAllocation(
@@ -1998,6 +2067,43 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .filter(s -> !s.isBlank())
                 .limit(20)
                 .collect(Collectors.joining("|"));
+    }
+
+    private static boolean hasRealJewelHardBlockers(MetricaWalletDto dto) {
+        MetricaWalletDto.RealJewelDto jewel = dto == null ? null : dto.getRealJewel();
+        return hasNonBlank(jewel == null ? null : jewel.getHardBlockers())
+                || hasNonBlank(jewel == null ? null : jewel.getHardRejectReasons());
+    }
+
+    private static boolean hasRealJewelDataWarning(MetricaWalletDto dto, String expected) {
+        MetricaWalletDto.RealJewelDto jewel = dto == null ? null : dto.getRealJewel();
+        String code = normalizeStatus(expected);
+        if (jewel == null || jewel.getDataWarnings() == null || code == null) {
+            return false;
+        }
+        return jewel.getDataWarnings().stream()
+                .filter(Objects::nonNull)
+                .map(ShadowCopyTradingServiceImpl::normalizeStatus)
+                .anyMatch(code::equals);
+    }
+
+    private static boolean hasNonBlank(List<String> values) {
+        return values != null && values.stream().anyMatch(value -> value != null && !value.isBlank());
+    }
+
+    private static String realJewelRiskClass(MetricaWalletDto dto) {
+        MetricaWalletDto.RealJewelDto jewel = dto == null ? null : dto.getRealJewel();
+        String riskClass = normalizeStatus(jewel == null ? null : jewel.getRiskClass());
+        return riskClass == null ? "B" : riskClass;
+    }
+
+    private double microLiveEvidenceThreshold(String riskClass) {
+        return switch (riskClass) {
+            case "A" -> evidenceMicroThresholdA;
+            case "C" -> evidenceMicroThresholdC;
+            case "D" -> evidenceMicroThresholdD;
+            default -> evidenceMicroThresholdB;
+        };
     }
 
     private static MetricaWalletDto.CopyGuardDto copyGuard(MetricaWalletDto dto) {

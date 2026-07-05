@@ -19,6 +19,10 @@ class ShadowLiveReadinessEvaluatorTest {
         assertEquals(ShadowLiveReadinessStatus.APPROVED_FOR_LIVE, decision.status());
         assertTrue(decision.approvedForLive());
         assertEquals("SHADOW_READINESS_APPROVED", decision.primaryReasonCode());
+        assertEquals("LIVE", decision.recommendedExecutionMode());
+        assertEquals(new BigDecimal("100"), decision.capitalDecision().baseCapitalUSDT());
+        assertEquals(new BigDecimal("100"), decision.capitalDecision().maxCapitalUSDT());
+        assertEquals(false, decision.capitalDecision().canScale());
     }
 
     @Test
@@ -29,6 +33,89 @@ class ShadowLiveReadinessEvaluatorTest {
 
         assertEquals(ShadowLiveReadinessStatus.BLOCKED, decision.status());
         assertTrue(decision.reasonCodes().contains("COPY_GUARD_BLOCKED"));
+        assertTrue(decision.hardBlockers().contains("COPY_GUARD_BLOCKED"));
+        assertEquals("SHADOW", decision.recommendedExecutionMode());
+    }
+
+    @Test
+    void allowsMicroLiveWhenEvidenceIsHighButClosedPositionsAreLow() {
+        ShadowLiveReadinessDecision decision = evaluator.evaluate(baseReady()
+                .closedPositions(0L)
+                .meaningfulMovements(120L)
+                .evidenceScore(bd("75"))
+                .riskClass("B")
+                .build());
+
+        assertEquals(ShadowLiveReadinessStatus.MICRO_LIVE_READY, decision.status());
+        assertEquals("MICRO_LIVE", decision.recommendedExecutionMode());
+        assertEquals("B", decision.riskClass());
+        assertTrue(decision.softWarnings().contains("NEEDS_MORE_CLOSED_POSITIONS"));
+        assertTrue(decision.reasonCodes().contains("NEEDS_MORE_CLOSED_POSITIONS"));
+        assertTrue(decision.hardBlockers().isEmpty());
+        assertEquals(new BigDecimal("100"), decision.capitalDecision().maxCapitalUSDT());
+        assertEquals(false, decision.capitalDecision().canScale());
+    }
+
+    @Test
+    void keepsSmallSlippageSampleAsMicroLiveWarningWhenNoHardBlockerExists() {
+        ShadowLiveReadinessDecision decision = evaluator.evaluate(baseReady()
+                .slippageSampleSize(3L)
+                .meaningfulMovements(120L)
+                .evidenceScore(bd("75"))
+                .riskClass("B")
+                .build());
+
+        assertEquals(ShadowLiveReadinessStatus.MICRO_LIVE_READY, decision.status());
+        assertEquals("MICRO_LIVE", decision.recommendedExecutionMode());
+        assertTrue(decision.softWarnings().contains("NEEDS_MORE_SLIPPAGE_DATA"));
+        assertTrue(decision.dataWarnings().contains("NEEDS_MORE_SLIPPAGE_DATA"));
+        assertTrue(decision.hardBlockers().isEmpty());
+        assertEquals(false, decision.capitalDecision().canScale());
+    }
+
+    @Test
+    void allowsMicroLiveWithCompleteCyclesEvenWhenMovementCountIsMissing() {
+        ShadowLiveReadinessDecision decision = evaluator.evaluate(baseReady()
+                .closedPositions(0L)
+                .completeCycles(3L)
+                .meaningfulMovements(null)
+                .evidenceScore(bd("10"))
+                .riskClass("B")
+                .build());
+
+        assertEquals(ShadowLiveReadinessStatus.MICRO_LIVE_READY, decision.status());
+        assertEquals("MICRO_LIVE", decision.recommendedExecutionMode());
+        assertTrue(decision.softWarnings().contains("NEEDS_MORE_CLOSED_POSITIONS"));
+    }
+
+    @Test
+    void allowsMicroLiveWithEvidenceScoreEvenWhenMovementCountIsLow() {
+        ShadowLiveReadinessDecision decision = evaluator.evaluate(baseReady()
+                .closedPositions(0L)
+                .completeCycles(0L)
+                .meaningfulMovements(1L)
+                .evidenceScore(bd("75"))
+                .riskClass("B")
+                .build());
+
+        assertEquals(ShadowLiveReadinessStatus.MICRO_LIVE_READY, decision.status());
+        assertEquals("MICRO_LIVE", decision.recommendedExecutionMode());
+        assertTrue(decision.softWarnings().contains("NEEDS_MORE_CLOSED_POSITIONS"));
+    }
+
+    @Test
+    void needsMoreDataWhenHybridMicroEvidenceIsInsufficient() {
+        ShadowLiveReadinessDecision decision = evaluator.evaluate(baseReady()
+                .closedPositions(0L)
+                .completeCycles(0L)
+                .meaningfulMovements(1L)
+                .evidenceScore(bd("10"))
+                .riskClass("B")
+                .build());
+
+        assertEquals(ShadowLiveReadinessStatus.NEEDS_MORE_DATA, decision.status());
+        assertEquals("SHADOW", decision.recommendedExecutionMode());
+        assertTrue(decision.softWarnings().contains("NEEDS_MORE_CLOSED_POSITIONS"));
     }
 
     @Test

@@ -44,7 +44,7 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
             WHERE c.id_user = :idUser
               AND c.parsymbol IS NOT NULL
               AND trim(c.parsymbol) <> ''
-              AND COALESCE(c.execution_mode, 'LIVE') = 'LIVE'
+              AND COALESCE(c.execution_mode, 'LIVE') in ('LIVE', 'MICRO_LIVE')
               AND COALESCE(c.is_shadow, false) = false
               AND c.date_creation >= now() - (:lookbackDays * interval '1 day')
             ORDER BY UPPER(c.parsymbol)
@@ -62,7 +62,7 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
             WHERE c.user_copy_allocation_id = :allocationId
               AND c.parsymbol IS NOT NULL
               AND trim(c.parsymbol) <> ''
-              AND COALESCE(c.execution_mode, 'LIVE') = 'LIVE'
+              AND COALESCE(c.execution_mode, 'LIVE') in ('LIVE', 'MICRO_LIVE')
               AND COALESCE(c.is_shadow, false) = false
               AND c.date_creation >= now() - (:lookbackDays * interval '1 day')
             ORDER BY UPPER(c.parsymbol)
@@ -147,4 +147,15 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
     java.math.BigDecimal sumBufferedMarginActive(@Param("idUser") String idUser,
                                                  @Param("walletId") String walletId,
                                                  @Param("safety") java.math.BigDecimal safety);
+
+    @Query(value = """
+            SELECT COALESCE(SUM((size_usd / NULLIF(leverage, 0)) * (1 + :safety)), 0)
+            FROM futuros_operaciones.copy_operation
+            WHERE id_user = :idUser
+              AND is_active = true
+              AND COALESCE(is_shadow, false) = false
+              AND COALESCE(execution_mode, 'LIVE') IN ('LIVE', 'MICRO_LIVE')
+            """, nativeQuery = true)
+    java.math.BigDecimal sumBufferedMarginActiveForUser(@Param("idUser") String idUser,
+                                                        @Param("safety") java.math.BigDecimal safety);
 }
