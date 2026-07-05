@@ -9,6 +9,8 @@ import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserDetailService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
+import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +20,7 @@ import java.lang.reflect.Proxy;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -41,7 +44,8 @@ class UserCopyAllocationServiceImplTest {
                 repository(),
                 () -> List.of(activeUser(userId, 1)),
                 new CopyStrategyRuntimeRouter(),
-                shadowService(shadowSyncCalls, syncedShadowCandidates)
+                shadowService(shadowSyncCalls, syncedShadowCandidates),
+                defaultSymbolResolver()
         );
         setField(service, "entityManager", entityManager());
 
@@ -83,7 +87,8 @@ class UserCopyAllocationServiceImplTest {
                 repository(saved),
                 () -> List.of(activeUser(userId, 1)),
                 new CopyStrategyRuntimeRouter(),
-                shadowService(new AtomicInteger(), new AtomicReference<>(), false, true, linked)
+                shadowService(new AtomicInteger(), new AtomicReference<>(), false, true, linked),
+                defaultSymbolResolver()
         );
         setField(service, "entityManager", entityManager());
 
@@ -125,7 +130,8 @@ class UserCopyAllocationServiceImplTest {
                 repository(saved),
                 () -> List.of(activeUser(userId, 1)),
                 new CopyStrategyRuntimeRouter(),
-                shadowService(new AtomicInteger(), new AtomicReference<>(), false, false, new AtomicReference<>())
+                shadowService(new AtomicInteger(), new AtomicReference<>(), false, false, new AtomicReference<>()),
+                defaultSymbolResolver()
         );
         setField(service, "entityManager", entityManager());
 
@@ -164,7 +170,8 @@ class UserCopyAllocationServiceImplTest {
                 repository(saved),
                 () -> List.of(activeUser(userId, 1)),
                 new CopyStrategyRuntimeRouter(),
-                shadowService(new AtomicInteger(), new AtomicReference<>(), false, true, new AtomicReference<>())
+                shadowService(new AtomicInteger(), new AtomicReference<>(), false, true, new AtomicReference<>()),
+                defaultSymbolResolver()
         );
         setField(service, "entityManager", entityManager());
 
@@ -179,9 +186,9 @@ class UserCopyAllocationServiceImplTest {
     }
 
     @Test
-    void syncDistributionSkipsSymbolSpecialistWhenQuoteAssetMismatchesUserCapitalAsset() throws Exception {
+    void syncDistributionResolvesSymbolSpecialistTargetForUserCapitalAsset() throws Exception {
         UUID userId = UUID.randomUUID();
-        MetricaWalletDto incompatibleSymbol = symbolMetric("0xbtc", "BTCUSDT");
+        MetricaWalletDto sourceSymbol = symbolMetric("0xbtc", "BTCUSDT");
         MetricaWalletDto compatibleMovement = metric("0xmovement", "MOVEMENT_ALL");
         AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
 
@@ -189,17 +196,136 @@ class UserCopyAllocationServiceImplTest {
                 repository(saved),
                 () -> List.of(activeUser(userId, 2, "USDC")),
                 new CopyStrategyRuntimeRouter(),
-                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>())
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                resolver(Map.of("BTCUSDT|USDC", CopySymbolResolution.resolved(
+                        "BTCUSDT",
+                        "BTCUSDC",
+                        "BTC",
+                        "USDC",
+                        "USDC",
+                        false
+                )))
         );
         setField(service, "entityManager", entityManager());
 
-        service.syncDistribution(List.of(incompatibleSymbol, compatibleMovement), List.of(incompatibleSymbol, compatibleMovement));
+        service.syncDistribution(List.of(sourceSymbol, compatibleMovement), List.of(sourceSymbol, compatibleMovement));
+
+        assertEquals(1, saved.get().stream()
+                .filter(e -> "SYMBOL_SPECIALIST".equals(e.getCopyStrategyCode()))
+                .count());
+        UserCopyAllocationEntity symbolAllocation = saved.get().stream()
+                .filter(e -> "SYMBOL_SPECIALIST".equals(e.getCopyStrategyCode()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("BTCUSDT", symbolAllocation.getScopeValue());
+        assertEquals("BTCUSDT", symbolAllocation.getSourceSymbol());
+        assertEquals("BTCUSDC", symbolAllocation.getTargetSymbol());
+        assertEquals("USDC", symbolAllocation.getCapitalAsset());
+        assertEquals("RESOLVED", symbolAllocation.getSymbolResolutionStatus());
+    }
+
+    @Test
+    void syncDistributionSkipsOnlyUnavailableTargetSymbols() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto missingTarget = symbolMetric("0xhype", "HYPEUSDT");
+        MetricaWalletDto availableTarget = symbolMetric("0xeth", "ETHUSDT");
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved),
+                () -> List.of(activeUser(userId, 3, "USDC")),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                resolver(Map.of(
+                        "HYPEUSDT|USDC", CopySymbolResolution.skipped(
+                                "HYPEUSDT",
+                                "HYPEUSDC",
+                                "HYPE",
+                                "USDC",
+                                "USDC",
+                                "SYMBOL_TARGET_NOT_AVAILABLE"
+                        ),
+                        "ETHUSDT|USDC", CopySymbolResolution.resolved(
+                                "ETHUSDT",
+                                "ETHUSDC",
+                                "ETH",
+                                "USDC",
+                                "USDC",
+                                false
+                        )
+                ))
+        );
+        setField(service, "entityManager", entityManager());
+
+        service.syncDistribution(List.of(missingTarget, availableTarget), List.of(missingTarget, availableTarget));
+
+        assertTrue(saved.get().stream()
+                .noneMatch(e -> "HYPEUSDT".equals(e.getSourceSymbol())));
+        UserCopyAllocationEntity eth = saved.get().stream()
+                .filter(e -> "ETHUSDT".equals(e.getSourceSymbol()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("ETHUSDC", eth.getTargetSymbol());
+    }
+
+    @Test
+    void syncDistributionDefaultsMissingCapitalAssetToUsdtForSymbolResolution() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto sourceSymbol = symbolMetric("0xbtc", "BTCUSDT");
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved),
+                () -> List.of(activeUser(userId, 1, null)),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                resolver(Map.of("BTCUSDT|USDT", CopySymbolResolution.resolved(
+                        "BTCUSDT",
+                        "BTCUSDT",
+                        "BTC",
+                        "USDT",
+                        "USDT",
+                        false
+                )))
+        );
+        setField(service, "entityManager", entityManager());
+
+        service.syncDistribution(List.of(sourceSymbol), List.of(sourceSymbol));
+
+        UserCopyAllocationEntity allocation = saved.get().stream()
+                .filter(e -> "SYMBOL_SPECIALIST".equals(e.getCopyStrategyCode()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("BTCUSDT", allocation.getTargetSymbol());
+        assertEquals("USDT", allocation.getCapitalAsset());
+    }
+
+    @Test
+    void syncDistributionSkipsInvalidCapitalAssetForSymbolSpecialist() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto sourceSymbol = symbolMetric("0xbtc", "BTCUSDT");
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved),
+                () -> List.of(activeUser(userId, 1, "EUR")),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                resolver(Map.of("BTCUSDT|EUR", CopySymbolResolution.skipped(
+                        "BTCUSDT",
+                        null,
+                        null,
+                        null,
+                        "EUR",
+                        "SYMBOL_CAPITAL_ASSET_INVALID"
+                )))
+        );
+        setField(service, "entityManager", entityManager());
+
+        service.syncDistribution(List.of(sourceSymbol), List.of(sourceSymbol));
 
         assertTrue(saved.get().stream()
                 .noneMatch(e -> "SYMBOL_SPECIALIST".equals(e.getCopyStrategyCode())));
-        assertEquals(1, saved.get().stream()
-                .filter(e -> "MOVEMENT_ALL".equals(e.getCopyStrategyCode()))
-                .count());
     }
 
     private static UserCopyAllocationRepository repository() {
@@ -339,6 +465,34 @@ class UserCopyAllocationServiceImplTest {
                         .build())
                 .capitalShare(1.0)
                 .build();
+    }
+
+    private static CopySymbolResolver defaultSymbolResolver() {
+        return (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(
+                sourceSymbol,
+                sourceSymbol,
+                sourceSymbol,
+                capitalAsset,
+                capitalAsset,
+                false
+        );
+    }
+
+    private static CopySymbolResolver resolver(Map<String, CopySymbolResolution> results) {
+        return (sourceSymbol, capitalAsset) -> {
+            CopySymbolResolution resolution = results.get(sourceSymbol + "|" + capitalAsset);
+            if (resolution != null) {
+                return resolution;
+            }
+            return CopySymbolResolution.skipped(
+                    sourceSymbol,
+                    sourceSymbol == null ? null : sourceSymbol + capitalAsset,
+                    sourceSymbol,
+                    capitalAsset,
+                    capitalAsset,
+                    "SYMBOL_TARGET_NOT_AVAILABLE"
+            );
+        };
     }
 
     private static EntityManager entityManager() {

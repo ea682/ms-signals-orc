@@ -171,6 +171,8 @@ public class BinanceFuturesSymbolCatalogService implements BinanceFuturesSymbolC
             snapshot = loaded;
             log.info("event=binance.symbol_catalog.refresh_ok phase={} apiKeyConfigured={} authMode=PUBLIC_OR_OPTIONAL_HEADER symbols={} aliases={} ambiguousAliases={} ttlMs={} elapsedMs={}",
                     safeLog(phase), apiKeyConfigured, loaded.bySymbol().size(), loaded.aliasToCanonical().size(), loaded.ambiguousAliases().size(), ttlMs, elapsedMs(startedNs));
+            log.info("copy.symbol_resolver.cache_refreshed exchange=BINANCE_FUTURES symbols={} ttlMs={}",
+                    loaded.bySymbol().size(), ttlMs);
             return loaded;
         } catch (RuntimeException ex) {
             CatalogSnapshot stale = snapshot;
