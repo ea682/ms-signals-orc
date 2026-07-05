@@ -144,6 +144,24 @@ public class UserCopyAllocationEntity {
     @Column(name = "source_ranking_version", length = 80)
     private String sourceRankingVersion;
 
+    @Column(name = "source_symbol", length = 64)
+    private String sourceSymbol;
+
+    @Column(name = "target_symbol", length = 64)
+    private String targetSymbol;
+
+    @Column(name = "capital_asset", length = 4)
+    private String capitalAsset;
+
+    @Column(name = "resolved_quote_asset", length = 8)
+    private String resolvedQuoteAsset;
+
+    @Column(name = "symbol_resolution_status", length = 32)
+    private String symbolResolutionStatus;
+
+    @Column(name = "symbol_resolution_reason", length = 80)
+    private String symbolResolutionReason;
+
     public enum Status {
         ACTIVE,
         EXIT_ONLY,
@@ -175,6 +193,12 @@ public class UserCopyAllocationEntity {
         scopeType = normalizeScopeType(scopeType);
         scopeValue = normalizeScopeValue(scopeValue);
         strategyKey = normalizeStrategyKey(strategyKey, walletId, copyStrategyCode, scopeType, scopeValue);
+        sourceSymbol = normalizeUpper(sourceSymbol);
+        targetSymbol = normalizeUpper(targetSymbol);
+        capitalAsset = normalizeUpper(capitalAsset);
+        resolvedQuoteAsset = normalizeUpper(resolvedQuoteAsset);
+        symbolResolutionStatus = normalizeUpper(symbolResolutionStatus);
+        symbolResolutionReason = normalizeUpper(symbolResolutionReason);
 
         if (strategyScore != null) {
             strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
@@ -208,6 +232,12 @@ public class UserCopyAllocationEntity {
         scopeType = normalizeScopeType(scopeType);
         scopeValue = normalizeScopeValue(scopeValue);
         strategyKey = normalizeStrategyKey(strategyKey, walletId, copyStrategyCode, scopeType, scopeValue);
+        sourceSymbol = normalizeUpper(sourceSymbol);
+        targetSymbol = normalizeUpper(targetSymbol);
+        capitalAsset = normalizeUpper(capitalAsset);
+        resolvedQuoteAsset = normalizeUpper(resolvedQuoteAsset);
+        symbolResolutionStatus = normalizeUpper(symbolResolutionStatus);
+        symbolResolutionReason = normalizeUpper(symbolResolutionReason);
 
         if (strategyScore != null) {
             strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
@@ -235,6 +265,11 @@ public class UserCopyAllocationEntity {
         if (s == null) return null;
         String t = s.trim();
         return t.isEmpty() ? null : t;
+    }
+
+    private static String normalizeUpper(String s) {
+        String t = normalize(s);
+        return t == null ? null : t.toUpperCase(java.util.Locale.ROOT);
     }
 
     private static String normalizeStrategyCode(String s) {
