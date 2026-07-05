@@ -8,6 +8,9 @@ import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
+import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
+import com.apunto.engine.shared.enums.FuturesCapitalAsset;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PostConstruct;
@@ -47,6 +50,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     private final UserDetailService userDetailService;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     private final ShadowCopyTradingService shadowCopyTradingService;
+    private final CopySymbolResolver copySymbolResolver;
     @PersistenceContext
     private EntityManager entityManager;
 
@@ -127,10 +131,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 continue;
             }
 
-            final List<MetricaWalletDto> userLiveSource = filterSymbolSpecialistByCapitalAsset(liveSource, user, idUser, "LIVE");
+            final Map<String, CopySymbolResolution> symbolResolutionByAllocationKey = new HashMap<>();
+            final List<MetricaWalletDto> userLiveSource = filterSymbolSpecialistByCapitalAsset(
+                    liveSource,
+                    user,
+                    idUser,
+                    "LIVE",
+                    symbolResolutionByAllocationKey
+            );
             final List<MetricaWalletDto> userShadowSource = shadowSource == liveSource
                     ? userLiveSource
-                    : filterSymbolSpecialistByCapitalAsset(shadowSource, user, idUser, "SHADOW");
+                    : filterSymbolSpecialistByCapitalAsset(shadowSource, user, idUser, "SHADOW", null);
 
             shadowCopyTradingService.syncShadowAllocations(idUser, userShadowSource, maxWallet, now);
 
@@ -286,9 +297,10 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 final String strategyCode = strategyCode(dto);
                 final String scopeType = scopeType(dto);
                 final String scopeValue = scopeValue(dto, strategyCode);
+                final CopySymbolResolution symbolResolution = symbolResolutionByAllocationKey.get(allocationKey);
                 CopyExecutionDecision decision = realExecutionByAllocationKey.get(allocationKey);
                 String resolvedExecutionMode = decision == null ? targetExecutionMode(dto) : decision.executionMode();
-                newDist.put(allocationKey, new Dist(walletId, strategyCode, strategySlug(dto), strategyLabel(dto), copyMode(dto), sourceEndpoint(dto), rankWithinStrategy(dto), globalRank(dto), strategyScore(dto), scopeType, scopeValue, strategyKey(walletId, strategyCode, scopeType, scopeValue), resolvedExecutionMode, scaledPct, score));
+                newDist.put(allocationKey, new Dist(walletId, strategyCode, strategySlug(dto), strategyLabel(dto), copyMode(dto), sourceEndpoint(dto), rankWithinStrategy(dto), globalRank(dto), strategyScore(dto), scopeType, scopeValue, strategyKey(walletId, strategyCode, scopeType, scopeValue), resolvedExecutionMode, scaledPct, score, symbolResolution));
             }
 
             final List<String> newWalletIdList = newDist.values().stream()
@@ -352,6 +364,24 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 entity.setScopeType(d.scopeType());
                 entity.setScopeValue(d.scopeValue());
                 entity.setStrategyKey(d.strategyKey());
+                entity.setSourceSymbol(d.sourceSymbol());
+                entity.setTargetSymbol(d.targetSymbol());
+                entity.setCapitalAsset(d.capitalAsset());
+                entity.setResolvedQuoteAsset(d.resolvedQuoteAsset());
+                entity.setSymbolResolutionStatus(d.symbolResolutionStatus());
+                entity.setSymbolResolutionReason(d.symbolResolutionReason());
+                if (d.sourceSymbol() != null || d.targetSymbol() != null) {
+                    log.info(
+                            "user_copy_allocation.created sourceSymbol={} targetSymbol={} executionMode={} userId={} walletId={} strategyCode={} allocationKey={}",
+                            d.sourceSymbol(),
+                            d.targetSymbol(),
+                            d.targetExecutionMode(),
+                            idUser,
+                            walletId,
+                            d.strategyCode(),
+                            allocationKey
+                    );
+                }
                 final String targetMode = executionModeForTarget(d.targetExecutionMode());
                 if ("MICRO_LIVE".equals(targetMode) || "LIVE".equals(targetMode)) {
                     entity.setExecutionMode(targetMode);
@@ -668,17 +698,15 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             List<MetricaWalletDto> source,
             UserDetailDto user,
             UUID idUser,
-            String syncPlane
+            String syncPlane,
+            Map<String, CopySymbolResolution> resolvedByAllocationKey
     ) {
         if (source == null || source.isEmpty()) {
             return List.of();
         }
-        final String capitalAsset = normalizeCapitalAsset(user == null || user.getDetail() == null
+        final String capitalAsset = capitalAssetForResolution(user == null || user.getDetail() == null
                 ? null
                 : user.getDetail().getCapitalAsset());
-        if (capitalAsset == null) {
-            return source;
-        }
         List<MetricaWalletDto> out = new ArrayList<>(source.size());
         for (MetricaWalletDto dto : source) {
             if (dto == null) {
@@ -690,28 +718,24 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 continue;
             }
             final String symbol = normalizeSymbolScope(scopeValue(dto, strategyCode));
-            if (symbol == null) {
+            final CopySymbolResolution resolution = copySymbolResolver.resolve(symbol, capitalAsset);
+            if (!resolution.resolved()) {
                 log.warn(
-                        "event=user_copy_allocation.symbol_specialist_skipped userId={} strategyCode={} reasonCode=SYMBOL_SPECIALIST_BUG_SYMBOL_MISSING syncPlane={} copyImpact=allocation_skipped",
-                        idUser,
-                        strategyCode,
-                        syncPlane
-                );
-                continue;
-            }
-            final String quoteAsset = quoteAssetFromSymbol(symbol);
-            if (quoteAsset != null && !capitalAsset.equals(quoteAsset)) {
-                log.warn(
-                        "event=user_copy_allocation.symbol_specialist_skipped userId={} walletId={} strategyCode={} symbol={} capitalAsset={} quoteAsset={} reasonCode=SYMBOL_SKIPPED_QUOTE_ASSET_MISMATCH syncPlane={} copyImpact=allocation_skipped",
+                        "event=user_copy_allocation.symbol_specialist_skipped userId={} walletId={} strategyCode={} sourceSymbol={} targetSymbol={} capitalAsset={} reasonCode={} syncPlane={} copyImpact=allocation_skipped",
                         idUser,
                         dto.getWallet() == null ? null : dto.getWallet().getIdWallet(),
                         strategyCode,
                         symbol,
+                        resolution.targetSymbol(),
                         capitalAsset,
-                        quoteAsset,
+                        resolution.reasonCode(),
                         syncPlane
                 );
                 continue;
+            }
+            final String allocationKey = allocationKey(dto);
+            if (resolvedByAllocationKey != null && allocationKey != null) {
+                resolvedByAllocationKey.put(allocationKey, resolution);
             }
             out.add(dto);
         }
@@ -972,10 +996,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         return s.trim();
     }
 
-    private static String normalizeCapitalAsset(String value) {
-        if (value == null || value.isBlank()) return null;
-        String normalized = value.trim().toUpperCase(Locale.ROOT);
-        return "USDT".equals(normalized) || "USDC".equals(normalized) ? normalized : null;
+    private static String capitalAssetForResolution(String value) {
+        if (value == null || value.isBlank()) {
+            return FuturesCapitalAsset.defaultAsset().name();
+        }
+        return value.trim().toUpperCase(Locale.ROOT);
     }
 
     private static String normalizeSymbolScope(String value) {
@@ -985,14 +1010,6 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             return null;
         }
         return normalized;
-    }
-
-    private static String quoteAssetFromSymbol(String symbol) {
-        String normalized = normalizeSymbolScope(symbol);
-        if (normalized == null) return null;
-        if (normalized.endsWith("USDC")) return "USDC";
-        if (normalized.endsWith("USDT")) return "USDT";
-        return null;
     }
 
     private static String firstNonBlank(String... values) {
@@ -1055,12 +1072,37 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             String strategyKey,
             String targetExecutionMode,
             BigDecimal pct,
-            Integer score
+            Integer score,
+            CopySymbolResolution symbolResolution
     ) {
         Dist {
             Objects.requireNonNull(walletId, "walletId");
             Objects.requireNonNull(strategyCode, "strategyCode");
             Objects.requireNonNull(pct, "pct");
+        }
+
+        String sourceSymbol() {
+            return symbolResolution == null ? null : symbolResolution.sourceSymbol();
+        }
+
+        String targetSymbol() {
+            return symbolResolution == null ? null : symbolResolution.targetSymbol();
+        }
+
+        String capitalAsset() {
+            return symbolResolution == null ? null : symbolResolution.capitalAsset();
+        }
+
+        String resolvedQuoteAsset() {
+            return symbolResolution == null ? null : symbolResolution.quoteAsset();
+        }
+
+        String symbolResolutionStatus() {
+            return symbolResolution == null ? null : (symbolResolution.resolved() ? "RESOLVED" : "SKIPPED");
+        }
+
+        String symbolResolutionReason() {
+            return symbolResolution == null ? null : symbolResolution.reasonCode();
         }
     }
 
