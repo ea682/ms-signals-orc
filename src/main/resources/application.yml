@@ -131,12 +131,21 @@ copy:
     enabled: ${COPY_LIVE_ENABLED:false}
     canary-enabled: ${COPY_LIVE_CANARY_ENABLED:false}
     dry-run: ${COPY_LIVE_DRY_RUN:true}
+    max-capital-amount: ${COPY_LIVE_MAX_CAPITAL_AMOUNT:100}
+    scale-enabled: ${COPY_LIVE_SCALE_ENABLED:false}
     whitelist:
       user-ids: ${COPY_LIVE_WHITELIST_USER_IDS:}
       wallet-ids: ${COPY_LIVE_WHITELIST_WALLET_IDS:}
       symbols: ${COPY_LIVE_WHITELIST_SYMBOLS:}
       allocation-ids: ${COPY_LIVE_WHITELIST_ALLOCATION_IDS:}
       strategy-codes: ${COPY_LIVE_WHITELIST_STRATEGY_CODES:}
+  micro-live:
+    enabled: ${COPY_MICRO_LIVE_ENABLED:true}
+    max-capital-amount: ${COPY_MICRO_LIVE_MAX_CAPITAL_AMOUNT:100}
+  capital-allocator:
+    enabled: ${COPY_CAPITAL_ALLOCATOR_ENABLED:true}
+    scale-enabled: ${COPY_CAPITAL_ALLOCATOR_SCALE_ENABLED:false}
+    safety-reserve-pct: ${COPY_CAPITAL_ALLOCATOR_SAFETY_RESERVE_PCT:0.10}
   live-readiness:
     min-closed-positions: ${COPY_LIVE_READINESS_MIN_CLOSED_POSITIONS:50}
     min-profit-factor: ${COPY_LIVE_READINESS_MIN_PROFIT_FACTOR:1.3}
@@ -158,6 +167,12 @@ copy:
     max-effective-leverage-x: ${COPY_LIVE_READINESS_MAX_EFFECTIVE_LEVERAGE_X:5}
     max-live-notional-usd-per-order: ${COPY_LIVE_READINESS_MAX_LIVE_NOTIONAL_USD_PER_ORDER:10}
     max-live-required-margin-usd-per-order: ${COPY_LIVE_READINESS_MAX_LIVE_REQUIRED_MARGIN_USD_PER_ORDER:10}
+    min-micro-live-complete-cycles: ${COPY_LIVE_READINESS_MICRO_LIVE_MIN_COMPLETE_CYCLES:3}
+    min-micro-live-meaningful-movements: ${COPY_LIVE_READINESS_MICRO_LIVE_MIN_MEANINGFUL_MOVEMENTS:30}
+    evidence-micro-threshold-a: ${COPY_LIVE_READINESS_MICRO_LIVE_EVIDENCE_SCORE_A:55}
+    evidence-micro-threshold-b: ${COPY_LIVE_READINESS_MICRO_LIVE_EVIDENCE_SCORE_B:60}
+    evidence-micro-threshold-c: ${COPY_LIVE_READINESS_MICRO_LIVE_EVIDENCE_SCORE_C:70}
+    evidence-micro-threshold-d: ${COPY_LIVE_READINESS_MICRO_LIVE_EVIDENCE_SCORE_D:80}
   shadow:
     async:
       enabled: ${COPY_SHADOW_ASYNC_ENABLED:true}

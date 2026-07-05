@@ -76,6 +76,36 @@ class ShadowCopyTradingServiceImplTest {
         assertFalse(service.isLivePromotable(user, metric("0xabc", "RECENT_30D")));
     }
 
+    @Test
+    void riskClassDDoesNotOpenMicroLiveDirectly() throws Exception {
+        UUID user = UUID.randomUUID();
+        ShadowCopyTradingServiceImpl service = service(
+                Map.of(user, shadowAllocation(10L, user)),
+                Map.of(10L, 5L),
+                Map.of(10L, new BigDecimal("1.25"))
+        );
+        MetricaWalletDto metric = metric("0xabc", "MOVEMENT_ALL").toBuilder()
+                .decisionFinal(true)
+                .realJewel(MetricaWalletDto.RealJewelDto.builder()
+                        .strategyCode("MOVEMENT_ALL")
+                        .scopeType("ALL")
+                        .scopeValue("ALL")
+                        .recommendedExecutionMode("MICRO_LIVE")
+                        .riskClass("D")
+                        .evidenceScore(99.0)
+                        .canMicroLive(true)
+                        .hardBlockers(List.of())
+                        .copyGuard(MetricaWalletDto.CopyGuardDto.builder()
+                                .action("ALLOW")
+                                .status("OK")
+                                .allowNewEntries(true)
+                                .build())
+                        .build())
+                .build();
+
+        assertFalse(service.isMicroLivePromotable(user, metric));
+    }
+
 
     @Test
     void recordShadowEventRunsWithoutLiveAndKeepsProfilesIndependent() throws Exception {

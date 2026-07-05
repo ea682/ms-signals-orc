@@ -29,6 +29,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -126,16 +127,32 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 continue;
             }
 
-            shadowCopyTradingService.syncShadowAllocations(idUser, shadowSource, maxWallet, now);
+            final List<MetricaWalletDto> userLiveSource = filterSymbolSpecialistByCapitalAsset(liveSource, user, idUser, "LIVE");
+            final List<MetricaWalletDto> userShadowSource = shadowSource == liveSource
+                    ? userLiveSource
+                    : filterSymbolSpecialistByCapitalAsset(shadowSource, user, idUser, "SHADOW");
+
+            shadowCopyTradingService.syncShadowAllocations(idUser, userShadowSource, maxWallet, now);
 
             entityManager.flush();
             entityManager.clear();
 
-            final List<MetricaWalletDto> liveCandidates = shadowCopyTradingService.isSeparateShadowEnabled()
-                    ? liveSource.stream().filter(dto -> shadowCopyTradingService.isLivePromotable(idUser, dto)).toList()
-                    : liveSource;
+            final boolean separateShadowEnabled = shadowCopyTradingService.isSeparateShadowEnabled();
+            final Map<String, CopyExecutionDecision> realExecutionByAllocationKey = new HashMap<>();
+            final List<MetricaWalletDto> liveCandidates = separateShadowEnabled
+                    ? userLiveSource.stream()
+                    .filter(dto -> {
+                        CopyExecutionDecision decision = resolveCopyExecutionDecision(idUser, dto);
+                        String key = allocationKey(dto);
+                        if (decision.openable() && key != null) {
+                            realExecutionByAllocationKey.put(key, decision);
+                        }
+                        return decision.openable();
+                    })
+                    .toList()
+                    : userLiveSource;
             final Map<String, LivePauseDecision> pauseByAllocationKey = shadowCopyTradingService.isSeparateShadowEnabled()
-                    ? livePauseDecisions(idUser, shadowSource)
+                    ? livePauseDecisions(idUser, userShadowSource)
                     : Map.of();
             final Set<String> liveCandidateKeys = liveCandidates.stream()
                     .map(this::allocationKey)
@@ -269,7 +286,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 final String strategyCode = strategyCode(dto);
                 final String scopeType = scopeType(dto);
                 final String scopeValue = scopeValue(dto, strategyCode);
-                newDist.put(allocationKey, new Dist(walletId, strategyCode, strategySlug(dto), strategyLabel(dto), copyMode(dto), sourceEndpoint(dto), rankWithinStrategy(dto), globalRank(dto), strategyScore(dto), scopeType, scopeValue, strategyKey(walletId, strategyCode, scopeType, scopeValue), targetExecutionMode(dto), scaledPct, score));
+                CopyExecutionDecision decision = realExecutionByAllocationKey.get(allocationKey);
+                String resolvedExecutionMode = decision == null ? targetExecutionMode(dto) : decision.executionMode();
+                newDist.put(allocationKey, new Dist(walletId, strategyCode, strategySlug(dto), strategyLabel(dto), copyMode(dto), sourceEndpoint(dto), rankWithinStrategy(dto), globalRank(dto), strategyScore(dto), scopeType, scopeValue, strategyKey(walletId, strategyCode, scopeType, scopeValue), resolvedExecutionMode, scaledPct, score));
             }
 
             final List<String> newWalletIdList = newDist.values().stream()
@@ -304,11 +323,12 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     entity = null;
                 }
                 if (entity == null) {
+                    final String targetMode = executionModeForTarget(d.targetExecutionMode());
                     entity = UserCopyAllocationEntity.builder()
                             .idUser(idUser)
                             .walletId(walletId)
                             .isActive(true)
-                            .executionMode(shadowCopyTradingService.isSeparateShadowEnabled() ? "LIVE" : executionModeForTarget(d.targetExecutionMode()))
+                            .executionMode(shadowCopyTradingService.isSeparateShadowEnabled() && !"MICRO_LIVE".equals(targetMode) ? "LIVE" : targetMode)
                             .build();
                 }
 
@@ -332,8 +352,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 entity.setScopeType(d.scopeType());
                 entity.setScopeValue(d.scopeValue());
                 entity.setStrategyKey(d.strategyKey());
-                if (!shadowCopyTradingService.isSeparateShadowEnabled() && "SHADOW".equals(d.targetExecutionMode())) {
-                    entity.setExecutionMode("SHADOW");
+                final String targetMode = executionModeForTarget(d.targetExecutionMode());
+                if ("MICRO_LIVE".equals(targetMode) || "LIVE".equals(targetMode)) {
+                    entity.setExecutionMode(targetMode);
+                } else if (!shadowCopyTradingService.isSeparateShadowEnabled() && "SHADOW".equals(targetMode)) {
+                    entity.setExecutionMode(targetMode);
                 } else if (entity.getExecutionMode() == null || entity.getExecutionMode().isBlank()) {
                     entity.setExecutionMode(shadowCopyTradingService.isSeparateShadowEnabled() ? "LIVE" : normalizedDefaultExecutionMode());
                 }
@@ -387,7 +410,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                             .filter(Objects::nonNull)
                             .filter(UserCopyAllocationEntity::isActive)
                             .filter(e -> e.getStatus() == UserCopyAllocationEntity.Status.ACTIVE)
-                            .filter(e -> "LIVE".equalsIgnoreCase(e.getExecutionMode()))
+                            .filter(e -> isRealExecutionMode(e.getExecutionMode()))
                             .toList()
             );
             repository.saveAllAndFlush(toSave);
@@ -641,13 +664,69 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         return clean.length() > 160 ? clean.substring(0, 160) : clean;
     }
 
+    private List<MetricaWalletDto> filterSymbolSpecialistByCapitalAsset(
+            List<MetricaWalletDto> source,
+            UserDetailDto user,
+            UUID idUser,
+            String syncPlane
+    ) {
+        if (source == null || source.isEmpty()) {
+            return List.of();
+        }
+        final String capitalAsset = normalizeCapitalAsset(user == null || user.getDetail() == null
+                ? null
+                : user.getDetail().getCapitalAsset());
+        if (capitalAsset == null) {
+            return source;
+        }
+        List<MetricaWalletDto> out = new ArrayList<>(source.size());
+        for (MetricaWalletDto dto : source) {
+            if (dto == null) {
+                continue;
+            }
+            final String strategyCode = strategyCode(dto);
+            if (!"SYMBOL_SPECIALIST".equals(strategyCode)) {
+                out.add(dto);
+                continue;
+            }
+            final String symbol = normalizeSymbolScope(scopeValue(dto, strategyCode));
+            if (symbol == null) {
+                log.warn(
+                        "event=user_copy_allocation.symbol_specialist_skipped userId={} strategyCode={} reasonCode=SYMBOL_SPECIALIST_BUG_SYMBOL_MISSING syncPlane={} copyImpact=allocation_skipped",
+                        idUser,
+                        strategyCode,
+                        syncPlane
+                );
+                continue;
+            }
+            final String quoteAsset = quoteAssetFromSymbol(symbol);
+            if (quoteAsset != null && !capitalAsset.equals(quoteAsset)) {
+                log.warn(
+                        "event=user_copy_allocation.symbol_specialist_skipped userId={} walletId={} strategyCode={} symbol={} capitalAsset={} quoteAsset={} reasonCode=SYMBOL_SKIPPED_QUOTE_ASSET_MISMATCH syncPlane={} copyImpact=allocation_skipped",
+                        idUser,
+                        dto.getWallet() == null ? null : dto.getWallet().getIdWallet(),
+                        strategyCode,
+                        symbol,
+                        capitalAsset,
+                        quoteAsset,
+                        syncPlane
+                );
+                continue;
+            }
+            out.add(dto);
+        }
+        return out;
+    }
+
     private Map<String, LivePauseDecision> livePauseDecisions(UUID idUser, List<MetricaWalletDto> candidates) {
         if (candidates == null || candidates.isEmpty()) {
             return Map.of();
         }
         Map<String, LivePauseDecision> out = new HashMap<>();
         for (MetricaWalletDto dto : candidates) {
-            if (dto == null || shadowCopyTradingService.isLivePromotable(idUser, dto)) {
+            if (dto == null
+                    || shadowCopyTradingService.isLivePromotable(idUser, dto)
+                    || shadowCopyTradingService.isMicroLivePromotable(idUser, dto)) {
                 continue;
             }
             String key = allocationKey(dto);
@@ -657,6 +736,35 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             out.putIfAbsent(key, livePauseDecision(dto));
         }
         return out;
+    }
+
+    private CopyExecutionDecision resolveCopyExecutionDecision(UUID idUser, MetricaWalletDto dto) {
+        if (dto == null) {
+            return CopyExecutionDecision.blocked("NULL_CANDIDATE");
+        }
+        String target = targetExecutionMode(dto);
+        if ("SHADOW".equals(target)) {
+            return CopyExecutionDecision.blocked("TARGET_SHADOW");
+        }
+        if ("MICRO_LIVE".equals(target)) {
+            return shadowCopyTradingService.isMicroLivePromotable(idUser, dto)
+                    ? CopyExecutionDecision.open("MICRO_LIVE")
+                    : CopyExecutionDecision.blocked("MICRO_LIVE_NOT_PROMOTABLE");
+        }
+        if ("LIVE".equals(target)) {
+            if (shadowCopyTradingService.isLivePromotable(idUser, dto)) {
+                return CopyExecutionDecision.open("LIVE");
+            }
+            return shadowCopyTradingService.isMicroLivePromotable(idUser, dto)
+                    ? CopyExecutionDecision.open("MICRO_LIVE")
+                    : CopyExecutionDecision.blocked("LIVE_NOT_PROMOTABLE");
+        }
+        if (shadowCopyTradingService.isLivePromotable(idUser, dto)) {
+            return CopyExecutionDecision.open("LIVE");
+        }
+        return shadowCopyTradingService.isMicroLivePromotable(idUser, dto)
+                ? CopyExecutionDecision.open("MICRO_LIVE")
+                : CopyExecutionDecision.blocked("NO_REAL_EXECUTION_MODE");
     }
 
     private LivePauseDecision livePauseDecision(MetricaWalletDto dto) {
@@ -797,12 +905,19 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     }
 
     private static String targetExecutionMode(MetricaWalletDto dto) {
+        String recommended = dto != null && dto.getRealJewel() != null
+                ? dto.getRealJewel().getRecommendedExecutionMode()
+                : null;
+        String recommendedMode = normalizeExecutionModeTarget(recommended);
+        if ("SHADOW".equals(recommendedMode) || "MICRO_LIVE".equals(recommendedMode) || "LIVE".equals(recommendedMode)) {
+            return recommendedMode;
+        }
         MetricaWalletDto.CopyGuardDto guard = copyGuard(dto);
         if (guard == null || guard.getTargetExecutionMode() == null) {
             return "KEEP";
         }
-        String value = guard.getTargetExecutionMode().trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
-        return "SHADOW".equals(value) ? "SHADOW" : "KEEP";
+        String value = normalizeExecutionModeTarget(guard.getTargetExecutionMode());
+        return "SHADOW".equals(value) || "MICRO_LIVE".equals(value) || "LIVE".equals(value) ? value : "KEEP";
     }
 
     private static MetricaWalletDto.CopyGuardDto copyGuard(MetricaWalletDto dto) {
@@ -857,6 +972,29 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         return s.trim();
     }
 
+    private static String normalizeCapitalAsset(String value) {
+        if (value == null || value.isBlank()) return null;
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        return "USDT".equals(normalized) || "USDC".equals(normalized) ? normalized : null;
+    }
+
+    private static String normalizeSymbolScope(String value) {
+        if (value == null || value.isBlank()) return null;
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        if ("ALL".equals(normalized) || "DEFAULT".equals(normalized) || "SYMBOL_SPECIALIST".equals(normalized)) {
+            return null;
+        }
+        return normalized;
+    }
+
+    private static String quoteAssetFromSymbol(String symbol) {
+        String normalized = normalizeSymbolScope(symbol);
+        if (normalized == null) return null;
+        if (normalized.endsWith("USDC")) return "USDC";
+        if (normalized.endsWith("USDT")) return "USDT";
+        return null;
+    }
+
     private static String firstNonBlank(String... values) {
         if (values == null) return null;
         for (String value : values) {
@@ -867,11 +1005,29 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     private String normalizedDefaultExecutionMode() {
         String value = defaultExecutionMode == null ? "" : defaultExecutionMode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
-        return "LIVE".equals(value) ? "LIVE" : "SHADOW";
+        if ("LIVE".equals(value)) return "LIVE";
+        if ("MICRO_LIVE".equals(value)) return "MICRO_LIVE";
+        return "SHADOW";
     }
 
     private String executionModeForTarget(String targetExecutionMode) {
-        return "SHADOW".equals(targetExecutionMode) ? "SHADOW" : normalizedDefaultExecutionMode();
+        String value = normalizeExecutionModeTarget(targetExecutionMode);
+        if ("SHADOW".equals(value) || "MICRO_LIVE".equals(value) || "LIVE".equals(value)) return value;
+        return normalizedDefaultExecutionMode();
+    }
+
+    private static boolean isRealExecutionMode(String executionMode) {
+        String value = normalizeExecutionModeTarget(executionMode);
+        return "LIVE".equals(value) || "MICRO_LIVE".equals(value);
+    }
+
+    private static String normalizeExecutionModeTarget(String value) {
+        if (value == null || value.isBlank()) return "KEEP";
+        String normalized = value.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        if ("SHADOW".equals(normalized) || "MICRO_LIVE".equals(normalized) || "LIVE".equals(normalized)) {
+            return normalized;
+        }
+        return "KEEP";
     }
 
     private BigDecimal reentryPct(BigDecimal pct) {
@@ -905,6 +1061,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             Objects.requireNonNull(walletId, "walletId");
             Objects.requireNonNull(strategyCode, "strategyCode");
             Objects.requireNonNull(pct, "pct");
+        }
+    }
+
+    private record CopyExecutionDecision(String executionMode, boolean openable, String reasonCode) {
+
+        private static CopyExecutionDecision open(String executionMode) {
+            return new CopyExecutionDecision(executionMode, true, null);
+        }
+
+        private static CopyExecutionDecision blocked(String reasonCode) {
+            return new CopyExecutionDecision("SHADOW", false, reasonCode);
         }
     }
 
