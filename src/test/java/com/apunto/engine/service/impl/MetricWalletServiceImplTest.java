@@ -6,6 +6,8 @@ import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import org.junit.jupiter.api.Test;
+import org.springframework.web.client.RestClientResponseException;
+import org.springframework.web.service.annotation.GetExchange;
 
 import java.lang.reflect.Method;
 import java.time.Duration;
@@ -19,6 +21,53 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MetricWalletServiceImplTest {
+
+    @Test
+    void metricWalletClientUsesCanonicalJoyasEndpointPath() throws Exception {
+        Method method = MetricWalletsInfoClient.class.getMethod("joyas", int.class, int.class, String.class);
+        GetExchange exchange = method.getAnnotation(GetExchange.class);
+
+        assertNotNull(exchange);
+        assertEquals("/operaciones/metrica/joyas", exchange.value());
+    }
+
+    @Test
+    void joyasHistoryRequestUsesConfiguredLimitDayzAndSimulationParams() throws Exception {
+        CapturingMetricClient client = new CapturingMetricClient(List.of(metricForHistory("0xabc")));
+        MetricWalletServiceImpl service = service(client, 30, 45, "summary");
+
+        Object snapshot = loadSnapshot(service, 300, 30);
+
+        assertEquals(30, client.lastLimit);
+        assertEquals(45, client.lastDayz);
+        assertEquals("summary", client.lastSimulation);
+        assertEquals(1, snapshotSize(snapshot));
+    }
+
+    @Test
+    void emptyJoyasResponseReturnsEmptySnapshotWithoutCallingLegacyEndpoint() throws Exception {
+        CapturingMetricClient client = new CapturingMetricClient(List.of());
+        MetricWalletServiceImpl service = service(client, 30, 45, "summary");
+
+        Object snapshot = loadSnapshot(service, 300, 30);
+
+        assertEquals(1, client.joyasCalls);
+        assertEquals(0, client.allPositionHistoryCalls);
+        assertEquals(0, snapshotSize(snapshot));
+    }
+
+    @Test
+    void joyasEndpoint404ReturnsEmptySnapshotWithoutMixingItWithSuccessfulEmptyResponse() throws Exception {
+        CapturingMetricClient client = new CapturingMetricClient(List.of());
+        client.throwNotFound = true;
+        MetricWalletServiceImpl service = service(client, 30, 45, "summary");
+
+        Object snapshot = loadSnapshot(service, 300, 30);
+
+        assertEquals(1, client.joyasCalls);
+        assertEquals(0, client.allPositionHistoryCalls);
+        assertEquals(0, snapshotSize(snapshot));
+    }
 
     @Test
     void realJewelReduceCapitalGuardAllowsCopyWithMultiplier() throws Exception {
@@ -162,8 +211,12 @@ class MetricWalletServiceImplTest {
     }
 
     private static MetricWalletServiceImpl service() {
+        return service(new FakeMetricClient(), 3, 30, "summary");
+    }
+
+    private static MetricWalletServiceImpl service(MetricWalletsInfoClient client, int joyasLimit, int joyasDayz, String joyasSimulation) {
         return new MetricWalletServiceImpl(
-                new FakeMetricClient(),
+                client,
                 new FakeAllocationService(),
                 new CopyStrategyRuntimeRouter(),
                 300,
@@ -176,9 +229,9 @@ class MetricWalletServiceImplTest {
                 0.90,
                 false,
                 "joyas",
-                3,
-                30,
-                "summary",
+                joyasLimit,
+                joyasDayz,
+                joyasSimulation,
                 1.0,
                 true,
                 false,
@@ -191,6 +244,18 @@ class MetricWalletServiceImplTest {
                 0.25,
                 "1w,2w,1mo"
         );
+    }
+
+    private static Object loadSnapshot(MetricWalletServiceImpl service, Integer limit, Integer dayz) throws Exception {
+        Method method = MetricWalletServiceImpl.class.getDeclaredMethod("loadAllPositionHistory", Integer.class, Integer.class);
+        method.setAccessible(true);
+        return method.invoke(service, limit, dayz);
+    }
+
+    private static int snapshotSize(Object snapshot) throws Exception {
+        Method method = snapshot.getClass().getDeclaredMethod("size");
+        method.setAccessible(true);
+        return (int) method.invoke(snapshot);
     }
 
     private static CopyStrategyGuardDecision evaluate(MetricWalletServiceImpl service, MetricaWalletDto metric) throws Exception {
@@ -228,9 +293,62 @@ class MetricWalletServiceImplTest {
         }
 
         @Override
-        public List<MetricaWalletDto> joyas(int limitWallet, int limit, int dayz, String simulation) {
+        public List<MetricaWalletDto> joyas(int limit, int dayz, String simulation) {
             return List.of();
         }
+    }
+
+    private static final class CapturingMetricClient implements MetricWalletsInfoClient {
+        private final List<MetricaWalletDto> joyasResponse;
+        private int joyasCalls;
+        private int allPositionHistoryCalls;
+        private int lastLimit;
+        private int lastDayz;
+        private String lastSimulation;
+        private boolean throwNotFound;
+
+        private CapturingMetricClient(List<MetricaWalletDto> joyasResponse) {
+            this.joyasResponse = joyasResponse;
+        }
+
+        @Override
+        public List<MetricaWalletDto> allPositionHistory(int limit, int dayz) {
+            allPositionHistoryCalls++;
+            return List.of();
+        }
+
+        @Override
+        public List<MetricaWalletDto> joyas(int limit, int dayz, String simulation) {
+            joyasCalls++;
+            lastLimit = limit;
+            lastDayz = dayz;
+            lastSimulation = simulation;
+            if (throwNotFound) {
+                throw new RestClientResponseException("not found", 404, "Not Found", null, null, null);
+            }
+            return joyasResponse;
+        }
+    }
+
+    private static MetricaWalletDto metricForHistory(String walletId) {
+        return MetricaWalletDto.builder()
+                .wallet(MetricaWalletDto.WalletDto.builder()
+                        .idWallet(walletId)
+                        .countOperationBreakdown(MetricaWalletDto.CountOperationBreakdownDto.builder()
+                                .strategyCode("MOVEMENT_ALL")
+                                .scopeType("strategy")
+                                .scopeValue("MOVEMENT_ALL")
+                                .build())
+                        .build())
+                .strategy(MetricaWalletDto.StrategyDto.builder()
+                        .strategyCode("MOVEMENT_ALL")
+                .build())
+                .scoring(MetricaWalletDto.ScoringDto.builder()
+                        .decisionMetricConservative(75)
+                        .decisionMetricScalping(70)
+                        .decisionMetricAggressive(70)
+                        .build())
+                .build();
     }
 
     private static final class FakeAllocationService implements UserCopyAllocationService {
