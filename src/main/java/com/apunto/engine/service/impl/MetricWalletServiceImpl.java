@@ -20,6 +20,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -37,6 +38,8 @@ import java.util.concurrent.atomic.AtomicReference;
 @Service
 @Slf4j
 public class MetricWalletServiceImpl implements MetricWalletService {
+
+    private static final String JOYAS_ENDPOINT = "/operaciones/metrica/joyas";
 
     private final int historyLimit;
     private final int dayzLimit;
@@ -460,10 +463,49 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         List<MetricaWalletDto> resp;
         try {
             if ("joyas".equals(historySource)) {
-                resp = metricWalletsInfoClient.joyas(limit, joyasLimit, joyasDayz, joyasSimulation);
+                log.info(
+                        "event=metric_wallets.fetch_joyas_request path={} limit={} dayz={} simulation={}",
+                        JOYAS_ENDPOINT,
+                        joyasLimit,
+                        joyasDayz,
+                        joyasSimulation
+                );
+                resp = metricWalletsInfoClient.joyas(joyasLimit, joyasDayz, joyasSimulation);
             } else {
                 resp = metricWalletsInfoClient.allPositionHistory(limit, dayz);
             }
+        } catch (RestClientResponseException ex) {
+            long durationMs = elapsedMs(startNs);
+            int statusCode = ex.getStatusCode().value();
+            if ("joyas".equals(historySource) && statusCode == 404) {
+                log.warn(
+                        "event=metric_wallets.joyas_endpoint_not_found endpoint={} statusCode={} reasonCode=METRICS_JOYAS_ENDPOINT_NOT_FOUND limit={} dayz={} simulation={} durationMs={} errClass={} errMsg=\"{}\"",
+                        JOYAS_ENDPOINT,
+                        statusCode,
+                        joyasLimit,
+                        joyasDayz,
+                        joyasSimulation,
+                        durationMs,
+                        ex.getClass().getSimpleName(),
+                        safeErr(ex)
+                );
+            } else {
+                log.warn(
+                        "event=metric_wallets.history_client_failed source={} endpoint={} statusCode={} limit={} dayz={} joyasLimit={} joyasDayz={} simulation={} durationMs={} errClass={} errMsg=\"{}\"",
+                        historySource,
+                        "joyas".equals(historySource) ? JOYAS_ENDPOINT : "/operaciones/metrica",
+                        statusCode,
+                        limit,
+                        dayz,
+                        joyasLimit,
+                        joyasDayz,
+                        joyasSimulation,
+                        durationMs,
+                        ex.getClass().getSimpleName(),
+                        safeErr(ex)
+                );
+            }
+            return HistorySnapshot.empty();
         } catch (RestClientException | IllegalStateException | IllegalArgumentException ex) {
             long durationMs = elapsedMs(startNs);
             log.warn("event=metric_wallets.history_client_failed source={} limit={} dayz={} joyasLimit={} joyasDayz={} durationMs={} errClass={} errMsg=\"{}\"", historySource, limit, dayz, joyasLimit, joyasDayz, durationMs, ex.getClass().getSimpleName(), safeErr(ex));
@@ -481,18 +523,43 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         if (!resp.isEmpty()) {
             HistorySnapshot snapshot = HistorySnapshot.from(resp, copyStrategyRuntimeRouter);
             lastKnownGoodHistory.set(snapshot);
-            log.debug(
-                    "event=metric_wallets.history_loaded source={} limit={} size={} indexedByAllocation={} indexedByWallet={} durationMs={}",
-                    historySource,
-                    limit,
-                    snapshot.size(),
-                    snapshot.index().allocationSize(),
-                    snapshot.index().walletSize(),
-                    durationMs
-            );
+            if ("joyas".equals(historySource)) {
+                log.info(
+                        "event=metric_wallets.history_loaded source=joyas endpoint={} limit={} dayz={} simulation={} size={} indexedByAllocation={} indexedByWallet={} durationMs={}",
+                        JOYAS_ENDPOINT,
+                        joyasLimit,
+                        joyasDayz,
+                        joyasSimulation,
+                        snapshot.size(),
+                        snapshot.index().allocationSize(),
+                        snapshot.index().walletSize(),
+                        durationMs
+                );
+            } else {
+                log.debug(
+                        "event=metric_wallets.history_loaded source={} limit={} size={} indexedByAllocation={} indexedByWallet={} durationMs={}",
+                        historySource,
+                        limit,
+                        snapshot.size(),
+                        snapshot.index().allocationSize(),
+                        snapshot.index().walletSize(),
+                        durationMs
+                );
+            }
             return snapshot;
         } else {
-            log.warn("event=metric_wallets.history_empty_response limit={} durationMs={}", limit, durationMs);
+            if ("joyas".equals(historySource)) {
+                log.warn(
+                        "event=metric_wallets.history_empty_response endpoint={} limit={} dayz={} simulation={} statusCode=200 responseSize=0 reasonCode=METRICS_JOYAS_EMPTY_RESPONSE durationMs={}",
+                        JOYAS_ENDPOINT,
+                        joyasLimit,
+                        joyasDayz,
+                        joyasSimulation,
+                        durationMs
+                );
+            } else {
+                log.warn("event=metric_wallets.history_empty_response limit={} durationMs={}", limit, durationMs);
+            }
         }
 
         log.debug("event=metric_wallets.history_loaded source={} limit={} size={} durationMs={}", historySource, limit, size, durationMs);
