@@ -26,6 +26,17 @@ class BinanceEngineServiceCapitalPolicyTest {
     }
 
     @Test
+    void microLiveBudgetDoesNotRequirePositiveCapitalShare() {
+        BigDecimal budget = BinanceEngineServiceImpl.resolveStrategyMarginBudget(
+                1_000,
+                0.0,
+                "MICRO_LIVE"
+        );
+
+        assertEquals(new BigDecimal("100.000000000000"), budget);
+    }
+
+    @Test
     void microLiveBudgetCannotExceedAvailableUserCapital() {
         BigDecimal budget = BinanceEngineServiceImpl.resolveStrategyMarginBudget(
                 60,

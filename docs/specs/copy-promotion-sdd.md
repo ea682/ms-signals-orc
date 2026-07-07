@@ -54,6 +54,25 @@ La asignacion creada desde SHADOW debe:
 
 `SHADOW_ONLY` / `SUMMARY_NOT_FINAL_LIVE_BLOCKED` bloquea LIVE directo, pero no debe pausar una allocation `MICRO_LIVE` ya creada desde una promocion SHADOW validada para MICRO_LIVE. Si el sync de `/joyas` ve `shadow_live_validation_failed action=SHADOW_ONLY status=SHADOW_ONLY`, debe mantener o reactivar la allocation `MICRO_LIVE` enlazada al SHADOW, con reason `MICRO_LIVE_NOT_PAUSED_BY_SHADOW_ONLY`. Riesgos reales como `DATA_RISK`, `PAUSE_OPEN`, usuario/API/capital invalido o hard blockers siguen pudiendo pausar o bloquear segun corresponda.
 
+#### Sizing MICRO_LIVE
+
+MICRO_LIVE no usa `allocation_pct` para definir el tamano real de orden.
+
+El presupuesto real de MICRO_LIVE se resuelve con `budgetMode=FIXED_USD`:
+
+- `budgetUsd = min(copy.micro-live.max-capital-usd, accountCapitalUsd)`.
+- El default productivo es `copy.micro-live.max-capital-usd=100`.
+- `allocation_pct` puede seguir existiendo por compatibilidad/constraints, pero no define sizing real para MICRO_LIVE.
+- Si `accountCapitalUsd <= 0`, se bloquea con `INSUFFICIENT_BALANCE_FOR_MICRO_LIVE`.
+- Si `0 < accountCapitalUsd < 100`, se permite usar el disponible como limite maximo y se registra explicitamente como presupuesto fijo limitado por saldo.
+
+Reason codes:
+
+- `MICRO_LIVE_FIXED_BUDGET_USD`
+- `MICRO_LIVE_BUDGET_APPLIED`
+- `MICRO_LIVE_NOT_USING_ALLOCATION_PCT`
+- `INSUFFICIENT_BALANCE_FOR_MICRO_LIVE`
+
 La promocion es idempotente. Si una carrera de concurrencia crea primero la asignacion, el segundo intento no rompe el job: re-lee la asignacion existente, enlaza el SHADOW si hace falta y audita `SHADOW_PROMOTION_NOOP` con reason `ALREADY_PROMOTED`.
 
 Si ya existe una asignacion MICRO_LIVE/LIVE abierta para la misma unidad estrategica, la idempotencia tiene prioridad sobre la validacion de capital actual: el SHADOW se enlaza como `ALREADY_PROMOTED` y no debe degradarse a `NO_CAPITAL_CONFIG`.
@@ -106,7 +125,37 @@ LIVE queda protegido por la etapa MICRO_LIVE.
 
 La implementacion actual promociona la misma asignacion abierta de `MICRO_LIVE` a `LIVE` porque el indice unico activo protege una sola fila abierta por usuario, wallet, estrategia y scope. Esto evita duplicidad de ejecucion.
 
+#### Sizing LIVE
+
+LIVE si usa `allocation_pct`.
+
+El presupuesto real de LIVE se resuelve con `budgetMode=WEIGHTED_PERCENTAGE`:
+
+- `budgetUsd = accountCapitalUsd * allocationPct`.
+- `allocationPct` viene de ranking/score/peso y representa distribucion del capital LIVE disponible.
+- Dos wallets LIVE con `allocation_pct=0.51` y `allocation_pct=0.49` sobre `capital=1000` reciben `510` y `490`.
+- LIVE nunca se limita a 100 USD solo por ser copy trading.
+
+Reason code:
+
+- `LIVE_WEIGHTED_ALLOCATION_PCT`
+
 Si se requiere en el futuro cerrar la fila MICRO_LIVE y crear una fila LIVE nueva, debe agregarse una migracion de ciclo de vida explicita y un vinculo historico adicional para no romper la unicidad ni duplicar ordenes.
+
+### Capital Binance Futures
+
+`detail_user.capital` representa el `availableBalance` del `capital_asset` configurado en USD-M Futures.
+
+La columna actual esta modelada como entero (`Integer` en la entidad), por lo tanto el valor persistido se redondea hacia abajo. Ejemplo: si Binance devuelve `availableBalance=896.65303430` para `USDC`, se persiste `capital=896` y se loguea el decimal completo como `availableBalance`.
+
+El scheduler de capital:
+
+- Corre con `futures.capital-maintenance.fixed-delay-ms=600000` por defecto.
+- Selecciona usuarios activos con API Binance activa.
+- Consulta el asset configurado en `capital_asset`.
+- No pisa capital con cero ante errores de Binance.
+- Actualiza cache runtime para que copy-trading use el valor nuevo sin esperar TTL.
+- Loguea `oldCapital`, `newCapital`, `walletBalance`, `availableBalance`, `marginBalance`, `endpoint`, `decision` y `reasonCode`.
 
 ## Reason codes obligatorios
 
@@ -140,12 +189,19 @@ Si se requiere en el futuro cerrar la fila MICRO_LIVE y crear una fila LIVE nuev
 - `MICRO_LIVE_ALREADY_EXISTS`
 - `MICRO_LIVE_ACTIVATED`
 - `MICRO_LIVE_NOT_PAUSED_BY_SHADOW_ONLY`
+- `MICRO_LIVE_FIXED_BUDGET_USD`
+- `MICRO_LIVE_BUDGET_APPLIED`
+- `MICRO_LIVE_NOT_USING_ALLOCATION_PCT`
+- `INSUFFICIENT_BALANCE_FOR_MICRO_LIVE`
+- `LIVE_WEIGHTED_ALLOCATION_PCT`
 - `SHADOW_PROMOTION_STATUS_RECORDED`
 - `SHADOW_PROMOTION_STATUS_SKIPPED_INVALID_DB_STATUS`
 - `PROMOTED_TO_MICRO_LIVE_RECORDED_AS_REASON`
 - `SHADOW_STATUS_CONSTRAINT_SAFE`
 - `MICRO_LIVE_SHADOW_VALIDATION_FAILED`
 - `MICRO_LIVE_PAUSED_BY_REAL_RISK`
+- `CAPITAL_REFRESH_FAILED`
+- `SKIPPED_API_KEY_INACTIVE`
 - `MICRO_LIVE_ALLOCATION_CREATED`
 - `MICRO_LIVE_ALLOCATION_ALREADY_EXISTS`
 - `NO_CAPITAL_CONFIG`
@@ -176,6 +232,13 @@ Eventos de promocion:
 - `event=copy.promotion.micro_live.not_paused_by_shadow_only`
 - `event=user_copy_allocation.micro_live.activated`
 - `event=user_copy_allocation.micro_live.paused`
+- `event=copy.budget.resolved`
+- `event=futures.capital_maintenance.started`
+- `event=futures.capital_maintenance.user.selected`
+- `event=futures.capital_maintenance.binance.balance.fetched`
+- `event=futures.capital_maintenance.capital.updated`
+- `event=futures.capital_maintenance.skipped`
+- `event=futures.capital_maintenance.failed`
 - `event=copy.promotion.shadow_to_micro.candidate_failed`
 - `event=copy.promotion.shadow_to_micro.finished`
 - `event=copy.promotion.micro_to_live.created`
