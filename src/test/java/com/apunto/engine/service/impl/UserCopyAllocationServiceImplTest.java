@@ -104,6 +104,47 @@ class UserCopyAllocationServiceImplTest {
     }
 
     @Test
+    void syncDistributionMapsJoyasLegacyCopyModeBeforePersistingAllocation() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto candidate = metric("0xabc", "MOVEMENT_ALL", "copy_movement_all_events");
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved),
+                () -> List.of(activeUser(userId, 1)),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                defaultSymbolResolver()
+        );
+        setField(service, "entityManager", entityManager());
+
+        service.syncDistribution(List.of(candidate), List.of(candidate));
+
+        assertEquals(1, saved.get().size());
+        assertEquals("copy_all_metric_movements", saved.get().get(0).getCopyMode());
+    }
+
+    @Test
+    void syncDistributionSkipsInvalidJoyasCopyModeMappingWithoutPersistingAllocation() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto candidate = metric("0xabc", "UNKNOWN_PROFILE", "SKIP");
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved),
+                () -> List.of(activeUser(userId, 1)),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                defaultSymbolResolver()
+        );
+        setField(service, "entityManager", entityManager());
+
+        service.syncDistribution(List.of(candidate), List.of(candidate));
+
+        assertTrue(saved.get().isEmpty());
+    }
+
+    @Test
     void syncDistributionDoesNotCreateMicroLiveWhenHardBlockerExists() throws Exception {
         UUID userId = UUID.randomUUID();
         MetricaWalletDto blocked = metric("0xabc", "MOVEMENT_ALL").toBuilder()
@@ -183,6 +224,55 @@ class UserCopyAllocationServiceImplTest {
         assertEquals(0, saved.get().stream()
                 .filter(e -> "LIVE".equals(e.getExecutionMode()))
                 .count());
+    }
+
+    @Test
+    void syncDistributionRequiresMicroLiveByDefaultEvenWhenLiveReady() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto liveCandidate = liveReadyMetric("0xabc", "MOVEMENT_ALL");
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved),
+                () -> List.of(activeUser(userId, 1)),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                defaultSymbolResolver()
+        );
+        setField(service, "entityManager", entityManager());
+
+        service.syncDistribution(List.of(liveCandidate), List.of(liveCandidate));
+
+        assertEquals(1, saved.get().stream()
+                .filter(e -> "MICRO_LIVE".equals(e.getExecutionMode()))
+                .count());
+        assertEquals(0, saved.get().stream()
+                .filter(e -> "LIVE".equals(e.getExecutionMode()))
+                .count());
+    }
+
+    @Test
+    void syncDistributionAllowsDirectLiveOnlyWithExplicitPolicy() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto liveCandidate = liveReadyMetric("0xabc", "MOVEMENT_ALL");
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved),
+                () -> List.of(activeUser(userId, 1)),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
+                defaultSymbolResolver()
+        );
+        setField(service, "entityManager", entityManager());
+        setField(service, "directLivePolicy", "ALLOW_DIRECT_LIVE_FOR_LIVE_READY");
+
+        service.syncDistribution(List.of(liveCandidate), List.of(liveCandidate));
+
+        assertEquals(1, saved.get().stream()
+                .filter(e -> "LIVE".equals(e.getExecutionMode()))
+                .count());
+        assertEquals("copy_all_metric_movements", saved.get().get(0).getCopyMode());
     }
 
     @Test
@@ -420,6 +510,10 @@ class UserCopyAllocationServiceImplTest {
     }
 
     private static MetricaWalletDto metric(String walletId, String strategyCode) {
+        return metric(walletId, strategyCode, null);
+    }
+
+    private static MetricaWalletDto metric(String walletId, String strategyCode, String copyMode) {
         return MetricaWalletDto.builder()
                 .wallet(MetricaWalletDto.WalletDto.builder()
                         .idWallet(walletId)
@@ -431,6 +525,7 @@ class UserCopyAllocationServiceImplTest {
                         .build())
                 .strategy(MetricaWalletDto.StrategyDto.builder()
                         .strategyCode(strategyCode)
+                        .copyMode(copyMode)
                         .build())
                 .capitalShare(1.0)
                 .build();
@@ -464,6 +559,30 @@ class UserCopyAllocationServiceImplTest {
                                 .build())
                         .build())
                 .capitalShare(1.0)
+                .build();
+    }
+
+    private static MetricaWalletDto liveReadyMetric(String walletId, String strategyCode) {
+        return metric(walletId, strategyCode, "copy_movement_all_events").toBuilder()
+                .decisionFinal(true)
+                .realJewel(MetricaWalletDto.RealJewelDto.builder()
+                        .strategyCode(strategyCode)
+                        .scopeType("ALL")
+                        .scopeValue("ALL")
+                        .recommendedExecutionMode("LIVE")
+                        .riskClass("A")
+                        .evidenceScore(95.0)
+                        .canMicroLive(true)
+                        .canLive(true)
+                        .hardBlockers(List.of())
+                        .copyGuard(MetricaWalletDto.CopyGuardDto.builder()
+                                .action("ALLOW")
+                                .status("OK")
+                                .allowNewEntries(true)
+                                .allowReductions(true)
+                                .allowCloses(true)
+                                .build())
+                        .build())
                 .build();
     }
 

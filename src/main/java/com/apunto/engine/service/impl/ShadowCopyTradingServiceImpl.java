@@ -28,6 +28,8 @@ import com.apunto.engine.service.copy.accounting.PositionDeltaClassificationInpu
 import com.apunto.engine.service.copy.accounting.PositionDeltaType;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.service.copy.observability.CopyFlowTiming;
+import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
+import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver.CopyModeResolution;
 import com.apunto.engine.shared.enums.PositionSide;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -295,7 +297,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             ShadowWalletProfileValidationEntity validation = upsertProfileValidation(profile.getId(), profileStatus, validationReason, effectiveNow);
             entity.setCopyStrategySlug(strategySlug(dto));
             entity.setCopyStrategyLabel(strategyLabel(dto));
-            entity.setCopyMode(copyMode(dto));
+            entity.setCopyMode(resolveShadowCopyMode(strategyCode, copyMode(dto)));
             entity.setStrategySourceEndpoint(sourceEndpoint(dto));
             entity.setWalletProfileId(profile.getId());
             entity.setShadowValidationId(validation.getId());
@@ -2266,6 +2268,21 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
 
     private String copyMode(MetricaWalletDto dto) {
         return dto == null || dto.getStrategy() == null ? null : dto.getStrategy().getCopyMode();
+    }
+
+    private String resolveShadowCopyMode(String strategyCode, String sourceCopyMode) {
+        CopyModeResolution resolution = UserCopyAllocationCopyModeResolver.resolve(strategyCode, sourceCopyMode);
+        if (resolution.valid()) {
+            return resolution.copyMode();
+        }
+        log.warn(
+                "event=shadow_copy_allocation.copy_mode.rejected strategyCode={} sourceCopyMode={} resolvedCopyMode={} reasonCode={} shadowImpact=copy_mode_not_persisted",
+                strategyCode,
+                sourceCopyMode,
+                resolution.copyMode(),
+                resolution.reasonCode()
+        );
+        return null;
     }
 
     private String sourceEndpoint(MetricaWalletDto dto) {

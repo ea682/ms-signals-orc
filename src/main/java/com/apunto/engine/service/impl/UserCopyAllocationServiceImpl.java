@@ -8,6 +8,8 @@ import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
+import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver.CopyModeResolution;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
 import com.apunto.engine.shared.enums.FuturesCapitalAsset;
@@ -68,6 +70,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     @Value("${metric-wallet.allocation.max-profiles-per-wallet:1}")
     private int maxProfilesPerWallet;
+
+    @Value("${metric-wallet.allocation.direct-live-policy:REQUIRE_MICRO_LIVE}")
+    private String directLivePolicy;
 
     private volatile Cache<String, List<UserCopyAllocationEntity>> activeByWalletCache;
     private volatile Cache<UUID, List<UserCopyAllocationEntity>> activeByUserCache;
@@ -351,12 +356,41 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                         && entity.getStatus() != UserCopyAllocationEntity.Status.ACTIVE
                         && entity.getStatus() != UserCopyAllocationEntity.Status.DISABLED_MANUAL
                         && entity.getStatus() != UserCopyAllocationEntity.Status.CLOSED;
+                CopyModeResolution copyModeResolution = UserCopyAllocationCopyModeResolver.resolve(d.strategyCode(), d.copyMode());
+                if (!copyModeResolution.valid()) {
+                    log.warn(
+                            "event=user_copy_allocation.copy_mode.rejected userId={} walletId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} reasonCode={} executionMode={} decision=SKIP",
+                            idUser,
+                            walletId,
+                            d.strategyCode(),
+                            d.scopeType(),
+                            d.scopeValue(),
+                            safeReason(d.copyMode()),
+                            copyModeResolution.copyMode(),
+                            copyModeResolution.reasonCode(),
+                            d.targetExecutionMode()
+                    );
+                    continue;
+                }
+                log.info(
+                        "event=user_copy_allocation.copy_mode.resolved userId={} walletId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} reasonCode={} constraintReasonCode={} executionMode={} decision=ALLOW",
+                        idUser,
+                        walletId,
+                        d.strategyCode(),
+                        d.scopeType(),
+                        d.scopeValue(),
+                        safeReason(d.copyMode()),
+                        copyModeResolution.copyMode(),
+                        copyModeResolution.reasonCode(),
+                        copyModeResolution.constraintReasonCode(),
+                        d.targetExecutionMode()
+                );
                 entity.setAllocationPct(reentry ? reentryPct(d.pct()) : d.pct());
                 entity.setScore(d.score());
                 entity.setCopyStrategyCode(d.strategyCode());
                 entity.setCopyStrategySlug(d.strategySlug());
                 entity.setCopyStrategyLabel(d.strategyLabel());
-                entity.setCopyMode(d.copyMode());
+                entity.setCopyMode(copyModeResolution.copyMode());
                 entity.setStrategySourceEndpoint(d.sourceEndpoint());
                 entity.setRankWithinStrategy(d.rankWithinStrategy());
                 entity.setGlobalRank(d.globalRank());
@@ -776,19 +810,77 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     : CopyExecutionDecision.blocked("MICRO_LIVE_NOT_PROMOTABLE");
         }
         if ("LIVE".equals(target)) {
-            if (shadowCopyTradingService.isLivePromotable(idUser, dto)) {
+            boolean livePromotable = shadowCopyTradingService.isLivePromotable(idUser, dto);
+            DirectLivePolicyDecision policyDecision = directLivePolicyDecision(idUser, dto, target, livePromotable);
+            if (policyDecision.allowed()) {
                 return CopyExecutionDecision.open("LIVE");
             }
             return shadowCopyTradingService.isMicroLivePromotable(idUser, dto)
                     ? CopyExecutionDecision.open("MICRO_LIVE")
-                    : CopyExecutionDecision.blocked("LIVE_NOT_PROMOTABLE");
+                    : CopyExecutionDecision.blocked(policyDecision.reasonCode());
         }
-        if (shadowCopyTradingService.isLivePromotable(idUser, dto)) {
+        boolean livePromotable = shadowCopyTradingService.isLivePromotable(idUser, dto);
+        DirectLivePolicyDecision policyDecision = directLivePolicyDecision(idUser, dto, target, livePromotable);
+        if (policyDecision.allowed()) {
             return CopyExecutionDecision.open("LIVE");
         }
         return shadowCopyTradingService.isMicroLivePromotable(idUser, dto)
                 ? CopyExecutionDecision.open("MICRO_LIVE")
                 : CopyExecutionDecision.blocked("NO_REAL_EXECUTION_MODE");
+    }
+
+    private DirectLivePolicyDecision directLivePolicyDecision(UUID idUser, MetricaWalletDto dto, String requestedTarget, boolean livePromotable) {
+        String policy = normalizeDirectLivePolicy(directLivePolicy);
+        String walletId = walletId(dto);
+        String strategyCode = strategyCode(dto);
+        String scopeType = scopeType(dto);
+        String scopeValue = scopeValue(dto, strategyCode);
+        if (!"LIVE".equals(normalizeExecutionModeTarget(requestedTarget))) {
+            return new DirectLivePolicyDecision(false, "MICRO_LIVE_REQUIRED_BY_POLICY", policy);
+        }
+        if (!livePromotable) {
+            log.info(
+                    "event=copy.promotion.direct_live.policy_checked userId={} walletId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=LIVE decision=REJECT reasonCode=LIVE_NOT_READY_FROM_SHADOW policy={} requestedTarget={}",
+                    idUser,
+                    walletId,
+                    strategyCode,
+                    scopeType,
+                    scopeValue,
+                    safeReason(copyMode(dto)),
+                    null,
+                    policy,
+                    requestedTarget
+            );
+            return new DirectLivePolicyDecision(false, "LIVE_NOT_READY_FROM_SHADOW", policy);
+        }
+        if (!"ALLOW_DIRECT_LIVE_FOR_LIVE_READY".equals(policy)) {
+            log.info(
+                    "event=copy.promotion.direct_live.policy_checked userId={} walletId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=LIVE decision=REJECT reasonCode=MICRO_LIVE_REQUIRED_BY_POLICY policy={} requestedTarget={}",
+                    idUser,
+                    walletId,
+                    strategyCode,
+                    scopeType,
+                    scopeValue,
+                    safeReason(copyMode(dto)),
+                    null,
+                    policy,
+                    requestedTarget
+            );
+            return new DirectLivePolicyDecision(false, "MICRO_LIVE_REQUIRED_BY_POLICY", policy);
+        }
+        log.info(
+                "event=copy.promotion.direct_live.policy_checked userId={} walletId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=LIVE decision=ALLOW reasonCode=DIRECT_LIVE_ALLOWED_BY_POLICY policy={} requestedTarget={}",
+                idUser,
+                walletId,
+                strategyCode,
+                scopeType,
+                scopeValue,
+                safeReason(copyMode(dto)),
+                null,
+                policy,
+                requestedTarget
+        );
+        return new DirectLivePolicyDecision(true, "DIRECT_LIVE_ALLOWED_BY_POLICY", policy);
     }
 
     private LivePauseDecision livePauseDecision(MetricaWalletDto dto) {
@@ -865,6 +957,10 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         if (dto == null || dto.getWallet() == null) return null;
         String strategyCode = strategyCode(dto);
         return allocationKey(dto.getWallet().getIdWallet(), strategyCode, scopeType(dto), scopeValue(dto, strategyCode));
+    }
+
+    private static String walletId(MetricaWalletDto dto) {
+        return dto == null || dto.getWallet() == null ? null : normalize(dto.getWallet().getIdWallet());
     }
 
     private String allocationKey(UserCopyAllocationEntity entity) {
@@ -1047,6 +1143,16 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         return "KEEP";
     }
 
+    private static String normalizeDirectLivePolicy(String value) {
+        if (value == null || value.isBlank()) {
+            return "REQUIRE_MICRO_LIVE";
+        }
+        String normalized = value.trim().toUpperCase(Locale.ROOT).replace('-', '_');
+        return "ALLOW_DIRECT_LIVE_FOR_LIVE_READY".equals(normalized)
+                ? "ALLOW_DIRECT_LIVE_FOR_LIVE_READY"
+                : "REQUIRE_MICRO_LIVE";
+    }
+
     private BigDecimal reentryPct(BigDecimal pct) {
         if (pct == null) return ZERO.setScale(6, RoundingMode.HALF_UP);
         return pct.multiply(BigDecimal.valueOf(clamp01(shadowReentryCapitalMultiplier))).setScale(6, RoundingMode.HALF_UP);
@@ -1115,6 +1221,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         private static CopyExecutionDecision blocked(String reasonCode) {
             return new CopyExecutionDecision("SHADOW", false, reasonCode);
         }
+    }
+
+    private record DirectLivePolicyDecision(
+            boolean allowed,
+            String reasonCode,
+            String policy
+    ) {
     }
 
     private record LivePauseDecision(
