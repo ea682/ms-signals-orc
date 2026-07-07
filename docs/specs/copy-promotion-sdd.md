@@ -40,6 +40,8 @@ MICRO_LIVE ejecuta ordenes reales con capital acotado. Es la etapa de validacion
 La asignacion creada desde SHADOW debe:
 
 - Usar `execution_mode=MICRO_LIVE`.
+- Usar un `copy_mode` permitido por `chk_user_copy_allocation_copy_mode`.
+- Resolver `copy_mode` desde `copy_strategy_code` y solo usar `sourceCopyMode` como compatibilidad controlada. Nunca debe persistir `SKIP`, `copy_movement_all_events`, `copy_short_events`, `copy_long_events` ni otro valor que no pertenezca al set permitido por DB.
 - Usar capital inicial limitado por `COPY_MICRO_LIVE_INITIAL_CAPITAL_USD` y `COPY_MICRO_LIVE_MAX_CAPITAL_USD`.
 - Mantener `linked_shadow_allocation_id`.
 - Mantener `source_symbol`, `target_symbol`, `capital_asset` y estado de resolucion de simbolo.
@@ -52,6 +54,46 @@ La promocion es idempotente. Si una carrera de concurrencia crea primero la asig
 Si ya existe una asignacion MICRO_LIVE/LIVE abierta para la misma unidad estrategica, la idempotencia tiene prioridad sobre la validacion de capital actual: el SHADOW se enlaza como `ALREADY_PROMOTED` y no debe degradarse a `NO_CAPITAL_CONFIG`.
 
 Si una carrera de concurrencia crea primero `user_wallet_copy_plan`, el promoter debe re-leerlo y continuar con la allocation MICRO_LIVE. Un plan existente valido debe auditarse/loguearse como reusado, no duplicarse.
+
+Valores permitidos para `user_copy_allocation.copy_mode`:
+
+- `copy_all_metric_movements`
+- `copy_only_short_events`
+- `copy_only_long_events`
+- `copy_open_and_full_close_only`
+- `copy_first_open_final_close`
+- `copy_strategy_filtered_events`
+- `copy_only_flip_events`
+
+Mapeo productivo:
+
+- `MOVEMENT_ALL` -> `copy_all_metric_movements`
+- `SHORT_ONLY` -> `copy_only_short_events`
+- `LONG_ONLY` -> `copy_only_long_events`
+- `OPEN_CLOSE_ONLY`, `OPEN_AND_FULL_CLOSE_ONLY`, `PURE_OPEN_CLOSE` -> `copy_open_and_full_close_only`
+- `FIRST_OPEN_FINAL_CLOSE` -> `copy_first_open_final_close`
+- `FLIP_ONLY` -> `copy_only_flip_events`
+- Estrategias filtradas soportadas, por ejemplo `SYMBOL_SPECIALIST`, `LOW_LEVERAGE_ONLY`, `TOP_SYMBOLS_ONLY`, `MAJORS_ONLY`, `HIGH_LIQUIDITY_ONLY`, `HIGH_QUALITY_SYMBOLS_ONLY`, `SWING_ONLY` -> `copy_strategy_filtered_events`
+
+Si la estrategia no es reconocida y el `sourceCopyMode` tampoco puede mapearse a un valor permitido, la candidata debe rechazarse con `INVALID_COPY_MODE_MAPPING` y el batch debe continuar.
+
+### SHADOW -> LIVE directo
+
+El flujo por defecto es siempre `SUMMARY -> SHADOW -> MICRO_LIVE -> LIVE`.
+
+`SHADOW -> LIVE` directo queda bloqueado por defecto con `directLivePolicy=REQUIRE_MICRO_LIVE`.
+
+Solo se permite intentar `SHADOW -> LIVE` si:
+
+- `copy.promotion.default-target-mode=LIVE`.
+- `copy.promotion.direct-live-policy=ALLOW_DIRECT_LIVE_FOR_LIVE_READY`.
+- La asignacion SHADOW no viene de summary puro y tiene evidencia runtime suficiente.
+- `last_validation_reason` indica una validacion LIVE explicita, por ejemplo `LIVE_READY_FROM_SHADOW` o `shadow_filters_passed`.
+- Pasa los mismos gates de usuario, capital, API, max wallet, copy guard, symbol resolver y `copy_mode` seguro.
+
+Si la policy no lo permite, se rechaza con `MICRO_LIVE_REQUIRED_BY_POLICY` o `DIRECT_LIVE_DISABLED_BY_POLICY`. Si la policy lo permite pero la evidencia no alcanza para LIVE, se rechaza con `LIVE_NOT_READY_FROM_SHADOW`.
+
+Nunca se permite `SUMMARY -> LIVE`.
 
 ### LIVE
 
@@ -76,6 +118,18 @@ Si se requiere en el futuro cerrar la fila MICRO_LIVE y crear una fila LIVE nuev
 - `CAPITAL_CONFIG_MISSING_FROM_USER_DETAIL`
 - `COPY_PLAN_CREATED`
 - `COPY_PLAN_ALREADY_EXISTS`
+- `COPY_MODE_RESOLVED`
+- `COPY_MODE_MAPPING_FALLBACK`
+- `COPY_MODE_CONSTRAINT_SAFE`
+- `INVALID_COPY_MODE_MAPPING`
+- `DIRECT_LIVE_DISABLED_BY_POLICY`
+- `DIRECT_LIVE_ALLOWED_BY_POLICY`
+- `MICRO_LIVE_REQUIRED_BY_POLICY`
+- `LIVE_READY_FROM_SHADOW`
+- `LIVE_NOT_READY_FROM_SHADOW`
+- `LIVE_ALLOCATION_CREATED`
+- `LIVE_ALLOCATION_ALREADY_EXISTS`
+- `MICRO_TO_LIVE_COPY_MODE_RESOLVED`
 - `MICRO_LIVE_ALLOCATION_CREATED`
 - `MICRO_LIVE_ALLOCATION_ALREADY_EXISTS`
 - `NO_CAPITAL_CONFIG`
@@ -92,6 +146,13 @@ Eventos de promocion:
 - `event=copy.promotion.shadow_to_micro.started`
 - `event=copy.promotion.shadow_candidate.evaluated`
 - `event=copy.promotion.shadow_to_micro.rejected`
+- `event=copy.promotion.copy_mode.resolved`
+- `event=copy.promotion.micro_to_live.copy_mode.resolved`
+- `event=copy.promotion.direct_live.policy_checked`
+- `event=copy.promotion.shadow_to_live.created`
+- `event=copy.promotion.shadow_to_live.rejected`
+- `event=copy.promotion.micro_to_live.created`
+- `event=copy.promotion.micro_to_live.rejected`
 - `event=copy.promotion.shadow_to_micro.created`
 - `event=copy.promotion.shadow_to_micro.noop`
 - `event=copy.promotion.shadow_to_micro.candidate_failed`

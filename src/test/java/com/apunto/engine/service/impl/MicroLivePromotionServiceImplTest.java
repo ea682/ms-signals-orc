@@ -5,8 +5,10 @@ import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.repository.CopyOperationEventRepository;
 import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
+import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationHandler;
@@ -44,6 +46,7 @@ class MicroLivePromotionServiceImplTest {
         assertEquals("LIVE", saved.get().getExecutionMode());
         assertEquals("PROMOTED_MICRO_TO_LIVE", saved.get().getStatusReason());
         assertEquals(UserCopyAllocationEntity.Status.ACTIVE, saved.get().getStatus());
+        assertEquals("copy_all_metric_movements", saved.get().getCopyMode());
         assertTrue(audits.stream().anyMatch(a -> "LIVE_CREATED".equals(a.getDecision())));
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_CLOSED_FOR_LIVE".equals(a.getDecision())
                 && allocation.getId().equals(a.getMicroLiveAllocationId())));
@@ -82,6 +85,98 @@ class MicroLivePromotionServiceImplTest {
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_NOT_READY_ERROR_RATE".equals(a.getReasonCode())));
     }
 
+    @Test
+    void microLiveLegacyCopyModeIsRemappedBeforeCreatingLive() {
+        UserCopyAllocationEntity allocation = microLiveAllocation("MOVEMENT_ALL", "copy_movement_all_events");
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        MicroLivePromotionServiceImpl service = service(allocation, 12L, 0L, "7.5", 8, saved, audits);
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.promoted());
+        assertEquals("LIVE", saved.get().getExecutionMode());
+        assertEquals("copy_all_metric_movements", saved.get().getCopyMode());
+    }
+
+    @Test
+    void microLiveSkipCopyModeIsResolvedFromStrategyAndNotPersisted() {
+        UserCopyAllocationEntity allocation = microLiveAllocation("MOVEMENT_ALL", "SKIP");
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        MicroLivePromotionServiceImpl service = service(allocation, 12L, 0L, "7.5", 8, saved, audits);
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.promoted());
+        assertEquals("copy_all_metric_movements", saved.get().getCopyMode());
+    }
+
+    @Test
+    void microLiveShortAndLongStrategiesResolveDbAllowedCopyModes() {
+        assertMicroLiveCopyMode("SHORT_ONLY", null, "copy_only_short_events");
+        assertMicroLiveCopyMode("LONG_ONLY", null, "copy_only_long_events");
+    }
+
+    @Test
+    void microLiveInvalidCopyModeMappingRejectsCandidate() {
+        UserCopyAllocationEntity allocation = microLiveAllocation("UNKNOWN_PROFILE", "SKIP");
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        MicroLivePromotionServiceImpl service = service(allocation, 12L, 0L, "7.5", 8, saved, audits);
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals("INVALID_COPY_MODE_MAPPING", saved.get().getStatusReason());
+        assertTrue(audits.stream().anyMatch(a -> "INVALID_COPY_MODE_MAPPING".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void existingLiveAllocationIsNoopAndDoesNotDuplicate() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        UserCopyAllocationEntity existingLive = liveAllocation(allocation);
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                allocationRepository(allocation, existingLive, saved, false),
+                eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits),
+                properties()
+        );
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.skipped());
+        assertEquals(0, result.promoted());
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_PROMOTION_NOOP".equals(a.getDecision())
+                && "LIVE_ALLOCATION_ALREADY_EXISTS".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void duplicateLiveConstraintIsTreatedAsNoopWhenLiveAppearsOnRequery() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        UserCopyAllocationEntity existingLive = liveAllocation(allocation);
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                allocationRepository(allocation, existingLive, saved, true),
+                eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits),
+                properties()
+        );
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.skipped());
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_PROMOTION_NOOP".equals(a.getDecision())));
+    }
+
     private static MicroLivePromotionServiceImpl service(
             UserCopyAllocationEntity allocation,
             long events,
@@ -110,14 +205,19 @@ class MicroLivePromotionServiceImplTest {
     }
 
     private static UserCopyAllocationEntity microLiveAllocation() {
+        return microLiveAllocation("MOVEMENT_ALL", null);
+    }
+
+    private static UserCopyAllocationEntity microLiveAllocation(String strategyCode, String copyMode) {
         return UserCopyAllocationEntity.builder()
                 .id(400L)
                 .idUser(UUID.randomUUID())
                 .walletId("0xabc")
-                .copyStrategyCode("MOVEMENT_ALL")
+                .copyStrategyCode(strategyCode)
+                .copyMode(copyMode)
                 .scopeType("strategy")
-                .scopeValue("MOVEMENT_ALL")
-                .strategyKey("0xabc|MOVEMENT_ALL|strategy|MOVEMENT_ALL")
+                .scopeValue(strategyCode)
+                .strategyKey("0xabc|" + strategyCode + "|strategy|" + strategyCode)
                 .allocationPct(new BigDecimal("0.500000"))
                 .status(UserCopyAllocationEntity.Status.ACTIVE)
                 .isActive(true)
@@ -128,17 +228,65 @@ class MicroLivePromotionServiceImplTest {
                 .build();
     }
 
+    private static UserCopyAllocationEntity liveAllocation(UserCopyAllocationEntity micro) {
+        return UserCopyAllocationEntity.builder()
+                .id(401L)
+                .idUser(micro.getIdUser())
+                .walletId(micro.getWalletId())
+                .copyStrategyCode(micro.getCopyStrategyCode())
+                .copyMode("copy_all_metric_movements")
+                .scopeType(micro.getScopeType())
+                .scopeValue(micro.getScopeValue())
+                .allocationPct(micro.getAllocationPct())
+                .status(UserCopyAllocationEntity.Status.ACTIVE)
+                .isActive(true)
+                .executionMode("LIVE")
+                .build();
+    }
+
+    private static void assertMicroLiveCopyMode(String strategyCode, String sourceCopyMode, String expectedCopyMode) {
+        UserCopyAllocationEntity allocation = microLiveAllocation(strategyCode, sourceCopyMode);
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        MicroLivePromotionServiceImpl service = service(allocation, 12L, 0L, "7.5", 8, saved, new ArrayList<>());
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.promoted());
+        assertEquals(expectedCopyMode, saved.get().getCopyMode());
+    }
+
     private static UserCopyAllocationRepository allocationRepository(
             UserCopyAllocationEntity allocation,
             AtomicReference<UserCopyAllocationEntity> saved
     ) {
+        return allocationRepository(allocation, null, saved, false);
+    }
+
+    private static UserCopyAllocationRepository allocationRepository(
+            UserCopyAllocationEntity allocation,
+            UserCopyAllocationEntity existingLive,
+            AtomicReference<UserCopyAllocationEntity> saved,
+            boolean throwDuplicateOnLiveSave
+    ) {
+        AtomicReference<Boolean> firstLiveLookup = new AtomicReference<>(true);
         return proxy(UserCopyAllocationRepository.class, (method, args) -> {
             if ("findMicroLivePromotionCandidates".equals(method.getName())) return List.of(allocation);
-            if ("findOpenLiveAllocationForUserWalletStrategyScope".equals(method.getName())) return Optional.empty();
+            if ("findOpenLiveAllocationForUserWalletStrategyScope".equals(method.getName())) {
+                if (existingLive == null) return Optional.empty();
+                return throwDuplicateOnLiveSave && firstLiveLookup.getAndSet(false)
+                        ? Optional.empty()
+                        : Optional.of(existingLive);
+            }
             if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
                 UserCopyAllocationEntity entity = (UserCopyAllocationEntity) args[0];
+                if ("LIVE".equals(entity.getExecutionMode()) && throwDuplicateOnLiveSave) {
+                    throw new DataIntegrityViolationException("duplicate live");
+                }
                 if (entity.getId() == null) {
                     entity.setId(401L);
+                }
+                if ("LIVE".equals(entity.getExecutionMode())) {
+                    assertTrue(UserCopyAllocationCopyModeResolver.isAllowedCopyMode(entity.getCopyMode()));
                 }
                 saved.set(entity);
                 return entity;
