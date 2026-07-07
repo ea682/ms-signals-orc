@@ -108,16 +108,47 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                         decision.allowed() ? 100 : 0,
                         elapsedMs(candidateNs)
                 );
+                if (!decision.allowed() && "ALREADY_PROMOTED".equals(decision.reasonCode())) {
+                    skipped++;
+                    Optional<UserCopyAllocationEntity> existing = existingAllocation(shadow);
+                    existing.ifPresent(allocation -> linkShadowToExisting(shadow, allocation, now));
+                    audit(shadow, decision, existing.orElse(null), "SHADOW_PROMOTION_NOOP");
+                    log.info(
+                            "event=copy.promotion.micro_live.noop userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode=MICRO_LIVE decision=NOOP reasonCode={} elapsedMs={}",
+                            shadow.getIdUser(),
+                            shadow.getWalletId(),
+                            shadow.getId(),
+                            shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
+                            decision.reasonCode(),
+                            elapsedMs(candidateNs)
+                    );
+                    log.info(
+                            "event=copy.promotion.shadow_to_micro.noop userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode=MICRO_LIVE decision=NOOP reasonCode={} elapsedMs={}",
+                            shadow.getIdUser(),
+                            shadow.getWalletId(),
+                            shadow.getId(),
+                            shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
+                            decision.reasonCode(),
+                            elapsedMs(candidateNs)
+                    );
+                    continue;
+                }
                 if (!decision.allowed()) {
                     rejected++;
                     markRejected(shadow, decision, now);
                     audit(shadow, decision, null, "SHADOW_PROMOTION_REJECTED");
                     log.info(
-                            "event=copy.promotion.shadow_to_micro.rejected userId={} walletId={} shadowAllocationId={} strategy={} executionMode=SHADOW decision=REJECT reasonCode={} elapsedMs={} details={}",
+                            "event=copy.promotion.shadow_to_micro.rejected userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode=SHADOW decision=REJECT reasonCode={} elapsedMs={} details={}",
                             shadow.getIdUser(),
                             shadow.getWalletId(),
                             shadow.getId(),
                             shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
                             decision.reasonCode(),
                             elapsedMs(candidateNs),
                             decision.details()
@@ -129,13 +160,31 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 created++;
                 audit(shadow, decision, output.allocation(), "MICRO_LIVE_CREATED");
                 log.info(
-                        "event=copy.promotion.shadow_to_micro.created userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} planId={} strategy={} sourceSymbol={} targetSymbol={} executionMode=MICRO_LIVE decision=CREATED reasonCode={} capital={} elapsedMs={}",
+                        "event=copy.promotion.micro_live.created userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} planId={} strategyCode={} scopeType={} scopeValue={} sourceSymbol={} targetSymbol={} executionMode=MICRO_LIVE decision=CREATED reasonCode={} capital={} elapsedMs={}",
                         shadow.getIdUser(),
                         shadow.getWalletId(),
                         shadow.getId(),
                         output.allocation().getId(),
                         output.plan().getId(),
                         shadow.getCopyStrategyCode(),
+                        shadow.getScopeType(),
+                        shadow.getScopeValue(),
+                        decision.symbolResolution() == null ? sourceSymbol(shadow) : decision.symbolResolution().sourceSymbol(),
+                        decision.symbolResolution() == null ? null : decision.symbolResolution().targetSymbol(),
+                        decision.reasonCode(),
+                        decision.microLiveCapital(),
+                        elapsedMs(candidateNs)
+                );
+                log.info(
+                        "event=copy.promotion.shadow_to_micro.created userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} planId={} strategyCode={} scopeType={} scopeValue={} sourceSymbol={} targetSymbol={} executionMode=MICRO_LIVE decision=CREATED reasonCode={} capital={} elapsedMs={}",
+                        shadow.getIdUser(),
+                        shadow.getWalletId(),
+                        shadow.getId(),
+                        output.allocation().getId(),
+                        output.plan().getId(),
+                        shadow.getCopyStrategyCode(),
+                        shadow.getScopeType(),
+                        shadow.getScopeValue(),
                         decision.symbolResolution() == null ? sourceSymbol(shadow) : decision.symbolResolution().sourceSymbol(),
                         decision.symbolResolution() == null ? null : decision.symbolResolution().targetSymbol(),
                         decision.reasonCode(),
@@ -153,12 +202,25 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     linkShadowToExisting(shadow, existing.get(), now);
                     audit(shadow, noop, existing.get(), "SHADOW_PROMOTION_NOOP");
                     log.info(
-                            "event=copy.promotion.shadow_to_micro.noop userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategy={} executionMode=MICRO_LIVE decision=NOOP reasonCode=ALREADY_PROMOTED elapsedMs={}",
+                            "event=copy.promotion.micro_live.noop userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode=MICRO_LIVE decision=NOOP reasonCode=ALREADY_PROMOTED elapsedMs={}",
                             shadow.getIdUser(),
                             shadow.getWalletId(),
                             shadow.getId(),
                             existing.get().getId(),
                             shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
+                            elapsedMs(candidateNs)
+                    );
+                    log.info(
+                            "event=copy.promotion.shadow_to_micro.noop userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode=MICRO_LIVE decision=NOOP reasonCode=ALREADY_PROMOTED elapsedMs={}",
+                            shadow.getIdUser(),
+                            shadow.getWalletId(),
+                            shadow.getId(),
+                            existing.get().getId(),
+                            shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
                             elapsedMs(candidateNs)
                     );
                     continue;
@@ -216,8 +278,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         if (shadow.getIdUser() == null) {
             return rejected("NO_ACTIVE_USER", shadow);
         }
-        if (shadow.getAllocationPct() == null || shadow.getAllocationPct().compareTo(ZERO) <= 0) {
-            return rejected("NO_CAPITAL_CONFIG", shadow);
+        Optional<UserCopyAllocationEntity> existing = existingAllocation(shadow);
+        if (existing.isPresent()) {
+            return PromotionDecision.rejected("ALREADY_PROMOTED", details(shadow, null, extras(
+                    "microLiveAllocationReasonCode", "MICRO_LIVE_ALLOCATION_ALREADY_EXISTS",
+                    "existingAllocationId", existing.get().getId()
+            )));
         }
 
         UserEntity user = userRepository.findById(shadow.getIdUser()).orElse(null);
@@ -233,25 +299,33 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             return rejected("NO_ACTIVE_BINANCE_API_KEY", shadow);
         }
 
-        int capital = detail.getCapital() == null ? 0 : detail.getCapital();
-        if (capital <= 0) {
-            return rejected("NO_CAPITAL_CONFIG", shadow);
-        }
-        int maxWallet = detail.getMaxWallet() == null ? 0 : detail.getMaxWallet();
-        if (maxWallet <= 0) {
-            return rejected("NO_CAPITAL_CONFIG", shadow);
-        }
-
-        Optional<UserCopyAllocationEntity> existing = existingAllocation(shadow);
-        if (existing.isPresent()) {
-            return rejected("ALREADY_PROMOTED", shadow);
+        CapitalConfig capitalConfig = resolveCapitalConfig(detail);
+        log.info(
+                "event=copy.promotion.capital_config.resolved userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} reasonCode={} executionMode=SHADOW decision={} capital={} capitalAsset={} maxWallet={}",
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                shadow.getId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                capitalConfig.reasonCode(),
+                capitalConfig.valid() ? "ALLOW" : "REJECT",
+                capitalConfig.capital(),
+                safe(capitalConfig.capitalAsset()),
+                capitalConfig.maxWallet()
+        );
+        if (!capitalConfig.valid()) {
+            return PromotionDecision.rejected("NO_CAPITAL_CONFIG", details(shadow, null, extras(
+                    "capitalConfigReasonCode", "CAPITAL_CONFIG_MISSING_FROM_USER_DETAIL",
+                    "capitalConfigFailure", capitalConfig.reasonCode()
+            )));
         }
 
         long activeExecutionAllocations = allocationRepository.countActiveExecutionAllocationsByUser(shadow.getIdUser());
-        if (activeExecutionAllocations >= maxWallet) {
+        if (activeExecutionAllocations >= capitalConfig.maxWallet()) {
             return PromotionDecision.rejected("MAX_WALLET_REACHED", details(shadow, null, extras(
                     "activeExecutionAllocations", activeExecutionAllocations,
-                    "maxWallet", maxWallet
+                    "maxWallet", capitalConfig.maxWallet()
             )));
         }
 
@@ -266,11 +340,11 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
 
         CopySymbolResolution symbolResolution;
         try {
-            symbolResolution = resolveSymbol(shadow, detail);
+            symbolResolution = resolveSymbol(shadow, capitalConfig.capitalAsset());
         } catch (RuntimeException ex) {
             return PromotionDecision.rejected("SYMBOL_RESOLVER_FAILED", details(shadow, evidence, extras(
                     "sourceSymbol", sourceSymbol(shadow),
-                    "capitalAsset", capitalAsset(detail),
+                    "capitalAsset", capitalConfig.capitalAsset(),
                     "errorClass", ex.getClass().getSimpleName(),
                     "error", safe(ex.getMessage())
             )));
@@ -286,12 +360,13 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             );
         }
 
-        BigDecimal microCapital = microLiveCapital(BigDecimal.valueOf(capital));
+        BigDecimal microCapital = microLiveCapital(BigDecimal.valueOf(capitalConfig.capital()));
         return PromotionDecision.allowed(details(shadow, evidence, extras(
-                "capital", capital,
-                "maxWallet", maxWallet,
+                "capital", capitalConfig.capital(),
+                "maxWallet", capitalConfig.maxWallet(),
                 "microLiveCapital", microCapital,
-                "capitalAsset", capitalAsset(detail),
+                "capitalAsset", capitalConfig.capitalAsset(),
+                "capitalConfigReasonCode", "CAPITAL_CONFIG_FOUND_FROM_USER_DETAIL",
                 "sourceSymbol", symbolResolution == null ? null : symbolResolution.sourceSymbol(),
                 "targetSymbol", symbolResolution == null ? null : symbolResolution.targetSymbol()
         )), detail, evidence, symbolResolution, microCapital);
@@ -340,30 +415,9 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         BigDecimal allocationPct = firstPositive(shadow.getTargetLiveAllocationPct(), shadow.getAllocationPct(), new BigDecimal("0.000001"));
         BigDecimal microCapital = decision.microLiveCapital();
 
-        UserWalletCopyPlanEntity plan = planRepository.findByIdUserAndWalletLc(shadow.getIdUser(), normalizeWallet(shadow.getWalletId()))
-                .orElseGet(() -> UserWalletCopyPlanEntity.builder()
-                        .idUser(shadow.getIdUser())
-                        .walletLc(normalizeWallet(shadow.getWalletId()))
-                        .createdAt(now)
-                        .build());
-        plan.setAllocationPct(allocationPct);
-        plan.setScore(shadow.getDecisionScore());
-        plan.setStatus("ACTIVE");
-        plan.setActive(true);
-        plan.setMetricVersion(1);
-        plan.setMaxWallet(detail.getMaxWallet());
-        plan.setUserCapitalUsd(BigDecimal.valueOf(Math.max(0, detail.getCapital() == null ? 0 : detail.getCapital())).setScale(8, RoundingMode.HALF_UP));
-        plan.setAllocatedCapitalUsd(microCapital.setScale(8, RoundingMode.HALF_UP));
-        plan.setCopyMinNotionalMode(detail.getCopyMinNotionalMode() == null ? "INHERIT" : detail.getCopyMinNotionalMode().name());
-        plan.setCopyMinNotionalMaxUsdt(detail.getCopyMinNotionalMaxUsdt());
-        plan.setCopyMinNotionalMinScore(detail.getCopyMinNotionalMinScore());
-        plan.setCopyMinNotionalMinHistoryDays(detail.getCopyMinNotionalMinHistoryDays());
-        plan.setCopyMinNotionalMinOperations(detail.getCopyMinNotionalMinOperations());
-        plan.setReason(decision.details());
-        plan.setSyncedToRuntime(true);
-        plan.setRuntimeSyncedAt(now);
-        plan.setUpdatedAt(now);
-        plan = planRepository.saveAndFlush(plan);
+        PlanResolution planResolution = resolveCopyPlan(shadow, detail, decision, now, allocationPct, microCapital);
+        UserWalletCopyPlanEntity plan = planResolution.plan();
+        decision.details().put("copyPlanReasonCode", planResolution.reasonCode());
 
         CopySymbolResolution symbol = decision.symbolResolution();
         UserCopyAllocationEntity allocation = UserCopyAllocationEntity.builder()
@@ -394,7 +448,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 .sourceRankingVersion(shadow.getSourceRankingVersion())
                 .sourceSymbol(symbol == null ? null : symbol.sourceSymbol())
                 .targetSymbol(symbol == null ? null : symbol.targetSymbol())
-                .capitalAsset(symbol == null ? capitalAsset(detail) : symbol.capitalAsset())
+                .capitalAsset(symbol == null ? validCapitalAsset(detail) : symbol.capitalAsset())
                 .resolvedQuoteAsset(symbol == null ? null : symbol.quoteAsset())
                 .symbolResolutionStatus(symbol == null ? null : "RESOLVED")
                 .symbolResolutionReason(symbol == null ? null : symbol.reasonCode())
@@ -405,6 +459,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 .copyMinNotionalMinOperations(detail.getCopyMinNotionalMinOperations())
                 .build();
         allocation = allocationRepository.saveAndFlush(allocation);
+        decision.details().put("microLiveAllocationReasonCode", "MICRO_LIVE_ALLOCATION_CREATED");
 
         shadow.setLinkedLiveAllocationId(allocation.getId());
         shadow.setPromotedToLiveAt(now);
@@ -413,6 +468,88 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         shadow.setUpdatedAt(now);
         shadowAllocationRepository.saveAndFlush(shadow);
         return new PromotionOutput(plan, allocation);
+    }
+
+    private PlanResolution resolveCopyPlan(
+            ShadowCopyAllocationEntity shadow,
+            DetailUserEntity detail,
+            PromotionDecision decision,
+            OffsetDateTime now,
+            BigDecimal allocationPct,
+            BigDecimal microCapital
+    ) {
+        String walletLc = normalizeWallet(shadow.getWalletId());
+        Optional<UserWalletCopyPlanEntity> existing = planRepository.findByIdUserAndWalletLc(shadow.getIdUser(), walletLc);
+        boolean alreadyExists = existing.isPresent();
+        UserWalletCopyPlanEntity plan = existing.orElseGet(() -> UserWalletCopyPlanEntity.builder()
+                .idUser(shadow.getIdUser())
+                .walletLc(walletLc)
+                .createdAt(now)
+                .build());
+        applyPlanFields(plan, shadow, detail, decision, now, allocationPct, microCapital);
+        try {
+            plan = planRepository.saveAndFlush(plan);
+            String reasonCode = alreadyExists ? "COPY_PLAN_ALREADY_EXISTS" : "COPY_PLAN_CREATED";
+            logCopyPlanResolved(shadow, plan, reasonCode, alreadyExists ? "REUSED" : "CREATED");
+            return new PlanResolution(plan, reasonCode);
+        } catch (DataIntegrityViolationException ex) {
+            if (alreadyExists) {
+                throw ex;
+            }
+            Optional<UserWalletCopyPlanEntity> concurrent = planRepository.findByIdUserAndWalletLc(shadow.getIdUser(), walletLc);
+            if (concurrent.isEmpty()) {
+                throw ex;
+            }
+            logCopyPlanResolved(shadow, concurrent.get(), "COPY_PLAN_ALREADY_EXISTS", "REUSED");
+            return new PlanResolution(concurrent.get(), "COPY_PLAN_ALREADY_EXISTS");
+        }
+    }
+
+    private void applyPlanFields(
+            UserWalletCopyPlanEntity plan,
+            ShadowCopyAllocationEntity shadow,
+            DetailUserEntity detail,
+            PromotionDecision decision,
+            OffsetDateTime now,
+            BigDecimal allocationPct,
+            BigDecimal microCapital
+    ) {
+        plan.setAllocationPct(allocationPct);
+        plan.setScore(shadow.getDecisionScore());
+        plan.setStatus("ACTIVE");
+        plan.setActive(true);
+        plan.setMetricVersion(1);
+        plan.setMaxWallet(detail.getMaxWallet());
+        plan.setUserCapitalUsd(BigDecimal.valueOf(Math.max(0, detail.getCapital() == null ? 0 : detail.getCapital())).setScale(8, RoundingMode.HALF_UP));
+        plan.setAllocatedCapitalUsd(microCapital.setScale(8, RoundingMode.HALF_UP));
+        plan.setCopyMinNotionalMode(detail.getCopyMinNotionalMode() == null ? "INHERIT" : detail.getCopyMinNotionalMode().name());
+        plan.setCopyMinNotionalMaxUsdt(detail.getCopyMinNotionalMaxUsdt());
+        plan.setCopyMinNotionalMinScore(detail.getCopyMinNotionalMinScore());
+        plan.setCopyMinNotionalMinHistoryDays(detail.getCopyMinNotionalMinHistoryDays());
+        plan.setCopyMinNotionalMinOperations(detail.getCopyMinNotionalMinOperations());
+        plan.setReason(decision.details());
+        plan.setSyncedToRuntime(true);
+        plan.setRuntimeSyncedAt(now);
+        plan.setUpdatedAt(now);
+    }
+
+    private void logCopyPlanResolved(ShadowCopyAllocationEntity shadow, UserWalletCopyPlanEntity plan, String reasonCode, String decision) {
+        String event = "COPY_PLAN_CREATED".equals(reasonCode)
+                ? "copy.promotion.copy_plan.created"
+                : "copy.promotion.copy_plan.reused";
+        log.info(
+                "event={} userId={} walletId={} shadowAllocationId={} planId={} strategyCode={} scopeType={} scopeValue={} reasonCode={} executionMode=MICRO_LIVE decision={}",
+                event,
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                shadow.getId(),
+                plan == null ? null : plan.getId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                reasonCode,
+                decision
+        );
     }
 
     private Evidence evidence(ShadowCopyAllocationEntity shadow, ShadowWalletProfileValidationEntity validation, OffsetDateTime now) {
@@ -443,12 +580,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         return new Evidence(days, events, skipped, errors, closed, pnl, drawdown, coverage);
     }
 
-    private CopySymbolResolution resolveSymbol(ShadowCopyAllocationEntity shadow, DetailUserEntity detail) {
+    private CopySymbolResolution resolveSymbol(ShadowCopyAllocationEntity shadow, String capitalAsset) {
         String sourceSymbol = sourceSymbol(shadow);
         if (sourceSymbol == null) {
             return null;
         }
-        return copySymbolResolver.resolve(sourceSymbol, capitalAsset(detail));
+        return copySymbolResolver.resolve(sourceSymbol, capitalAsset);
     }
 
     private void markRejected(ShadowCopyAllocationEntity shadow, PromotionDecision decision, OffsetDateTime now) {
@@ -655,7 +792,26 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         return null;
     }
 
-    private static String capitalAsset(DetailUserEntity detail) {
+    private CapitalConfig resolveCapitalConfig(DetailUserEntity detail) {
+        if (detail == null) {
+            return CapitalConfig.invalid("NO_ACTIVE_USER_DETAIL");
+        }
+        Integer capital = detail.getCapital();
+        if (capital == null || capital <= 0) {
+            return CapitalConfig.invalid("CAPITAL_MISSING_OR_NON_POSITIVE");
+        }
+        String capitalAsset = detail.getCapitalAsset();
+        if (!FuturesCapitalAsset.isAllowedStable(capitalAsset)) {
+            return CapitalConfig.invalid("CAPITAL_ASSET_MISSING_OR_INVALID");
+        }
+        Integer maxWallet = detail.getMaxWallet();
+        if (maxWallet == null || maxWallet <= 0) {
+            return CapitalConfig.invalid("MAX_WALLET_MISSING_OR_NON_POSITIVE");
+        }
+        return new CapitalConfig(true, "CAPITAL_CONFIG_FOUND_FROM_USER_DETAIL", capital, maxWallet, capitalAsset.trim().toUpperCase(Locale.ROOT));
+    }
+
+    private static String validCapitalAsset(DetailUserEntity detail) {
         return FuturesCapitalAsset.fromNullable(detail == null ? null : detail.getCapitalAsset()).name();
     }
 
@@ -704,6 +860,24 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             UserWalletCopyPlanEntity plan,
             UserCopyAllocationEntity allocation
     ) {
+    }
+
+    private record PlanResolution(
+            UserWalletCopyPlanEntity plan,
+            String reasonCode
+    ) {
+    }
+
+    private record CapitalConfig(
+            boolean valid,
+            String reasonCode,
+            Integer capital,
+            Integer maxWallet,
+            String capitalAsset
+    ) {
+        private static CapitalConfig invalid(String reasonCode) {
+            return new CapitalConfig(false, reasonCode, null, null, null);
+        }
     }
 
     private record Evidence(
