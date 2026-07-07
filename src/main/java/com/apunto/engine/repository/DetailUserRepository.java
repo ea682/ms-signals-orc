@@ -13,6 +13,42 @@ public interface DetailUserRepository extends JpaRepository<DetailUserEntity, UU
 
     DetailUserEntity findByUser_Id_AndUserActive(UUID user_id, boolean userActive);
 
+    DetailUserEntity findByUser_Id(UUID userId);
+
+    @Query("""
+            select count(distinct d.user.id)
+            from DetailUserEntity d
+            where d.userActive = true
+            """)
+    long countActiveDetailUsers();
+
+    @Query("""
+            select count(distinct d.user.id)
+            from DetailUserEntity d
+            where d.userActive = true
+              and d.apiKeyBinar = true
+            """)
+    long countActiveBinanceEnabledUsers();
+
+    @Query("""
+            select count(distinct d.user.id)
+            from DetailUserEntity d
+            where d.userActive = true
+              and d.apiKeyBinar = true
+              and coalesce(d.capital, 0) > 0
+            """)
+    long countActiveBinanceUsersWithCapital();
+
+    @Query("""
+            select count(distinct d.user.id)
+            from DetailUserEntity d
+            where d.userActive = true
+              and d.apiKeyBinar = true
+              and coalesce(d.capital, 0) > 0
+              and coalesce(d.maxWallet, 0) > 0
+            """)
+    long countActiveBinanceUsersWithCapitalAndMaxWallet();
+
     @Transactional
     @Modifying(clearAutomatically = false, flushAutomatically = true)
     @Query("update DetailUserEntity d set d.capital = :capital where d.id = :detailId")
