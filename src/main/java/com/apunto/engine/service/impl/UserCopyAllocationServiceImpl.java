@@ -249,8 +249,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     final String allocationKey = allocationKey(e);
                     LivePauseDecision pause = allocationKey == null ? null : pauseByAllocationKey.get(allocationKey);
                     if (pause != null) {
-                        applyLivePause(e, pause, now);
-                        paused++;
+                        if (activatePromotedMicroLiveWhenShadowOnlyPause(e, pause, now)) {
+                            toSave.add(e);
+                            continue;
+                        } else {
+                            applyLivePause(e, pause, now);
+                            paused++;
+                        }
                     } else {
                         e.setStatus(UserCopyAllocationEntity.Status.CLOSED);
                         e.setEndsAt(now);
@@ -447,13 +452,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             for (UserCopyAllocationEntity e : existingActive) {
                 if (e == null) continue;
                 if (!e.isActive()) continue;
-                if (e.getStatus() != UserCopyAllocationEntity.Status.ACTIVE) continue;
 
                 final String allocationKey = allocationKey(e);
                 if (allocationKey == null) continue;
+                LivePauseDecision pause = pauseByAllocationKey.get(allocationKey);
+                if (pause != null && activatePromotedMicroLiveWhenShadowOnlyPause(e, pause, now)) {
+                    toSave.add(e);
+                    continue;
+                }
+                if (e.getStatus() != UserCopyAllocationEntity.Status.ACTIVE) continue;
                 if (newAllocationKeys.contains(allocationKey)) continue;
 
-                LivePauseDecision pause = pauseByAllocationKey.get(allocationKey);
                 if (pause != null) {
                     applyLivePause(e, pause, now);
                     paused++;
@@ -934,6 +943,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     private void applyLivePause(UserCopyAllocationEntity entity, LivePauseDecision pause, OffsetDateTime now) {
         String safeReason = safeReason(pause.reason());
+        UserCopyAllocationEntity.Status oldStatus = entity.getStatus();
         boolean changed = entity.getStatus() != pause.status() || !Objects.equals(entity.getStatusReason(), safeReason);
         entity.setStatus(pause.status());
         entity.setStatusReason(safeReason);
@@ -951,6 +961,87 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     pause.status()
             );
         }
+        if ("MICRO_LIVE".equals(normalizeExecutionModeTarget(entity.getExecutionMode()))) {
+            log.warn(
+                    "event=user_copy_allocation.micro_live.paused userId={} walletId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode=MICRO_LIVE oldStatus={} newStatus={} reasonCode={} decision=PAUSED",
+                    entity.getIdUser(),
+                    entity.getWalletId(),
+                    entity.getId(),
+                    entity.getCopyStrategyCode(),
+                    entity.getScopeType(),
+                    entity.getScopeValue(),
+                    oldStatus,
+                    pause.status(),
+                    "MICRO_LIVE_PAUSED_BY_REAL_RISK"
+            );
+        }
+    }
+
+    private boolean activatePromotedMicroLiveWhenShadowOnlyPause(
+            UserCopyAllocationEntity entity,
+            LivePauseDecision pause,
+            OffsetDateTime now
+    ) {
+        if (!isPromotedMicroLiveFromShadow(entity) || !isShadowOnlyPause(pause)) {
+            return false;
+        }
+        UserCopyAllocationEntity.Status oldStatus = entity.getStatus();
+        String oldReason = entity.getStatusReason();
+        entity.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
+        entity.setStatusReason("MICRO_LIVE_NOT_PAUSED_BY_SHADOW_ONLY");
+        entity.setStatusCooldownUntil(null);
+        entity.setStatusUpdatedAt(now);
+        entity.setEndsAt(null);
+        entity.setUpdatedAt(now);
+        log.info(
+                "event=copy.promotion.micro_live.not_paused_by_shadow_only userId={} walletId={} shadowAllocationId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} copyGuardStatus={} copyGuardAction={} lastValidationReason={} executionMode=MICRO_LIVE oldStatus={} newStatus={} reasonCode={} decision=ALLOW",
+                entity.getIdUser(),
+                entity.getWalletId(),
+                entity.getLinkedShadowAllocationId(),
+                entity.getId(),
+                entity.getCopyStrategyCode(),
+                entity.getScopeType(),
+                entity.getScopeValue(),
+                "SHADOW_ONLY",
+                pause.reasonCode(),
+                oldReason,
+                oldStatus,
+                entity.getStatus(),
+                "MICRO_LIVE_NOT_PAUSED_BY_SHADOW_ONLY"
+        );
+        if (oldStatus != UserCopyAllocationEntity.Status.ACTIVE
+                || !Objects.equals(oldReason, entity.getStatusReason())) {
+            log.info(
+                    "event=user_copy_allocation.micro_live.activated userId={} walletId={} shadowAllocationId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode=MICRO_LIVE oldStatus={} newStatus={} reasonCode={} decision=ACTIVATED",
+                    entity.getIdUser(),
+                    entity.getWalletId(),
+                    entity.getLinkedShadowAllocationId(),
+                    entity.getId(),
+                    entity.getCopyStrategyCode(),
+                    entity.getScopeType(),
+                    entity.getScopeValue(),
+                    oldStatus,
+                    entity.getStatus(),
+                    "MICRO_LIVE_ACTIVATED"
+            );
+        }
+        return true;
+    }
+
+    private static boolean isPromotedMicroLiveFromShadow(UserCopyAllocationEntity entity) {
+        return entity != null
+                && "MICRO_LIVE".equals(normalizeExecutionModeTarget(entity.getExecutionMode()))
+                && (entity.getLinkedShadowAllocationId() != null || entity.getPromotedFromShadowAt() != null);
+    }
+
+    private static boolean isShadowOnlyPause(LivePauseDecision pause) {
+        if (pause == null) {
+            return false;
+        }
+        String reasonCode = normalizeStrategy(pause.reasonCode());
+        String reason = normalizeStrategy(pause.reason());
+        return "SHADOW_ONLY".equals(reasonCode)
+                || (reason != null && reason.contains("ACTION=SHADOW_ONLY") && reason.contains("STATUS=SHADOW_ONLY"));
     }
 
     private String allocationKey(MetricaWalletDto dto) {

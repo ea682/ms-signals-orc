@@ -49,6 +49,9 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal HUNDRED = new BigDecimal("100");
+    private static final String SHADOW_STATUS_VALIDATED = "SHADOW_VALIDATED";
+    private static final String SHADOW_STATUS_PROMOTED_TO_LIVE = "PROMOTED_TO_LIVE";
+    private static final String PROMOTED_TO_MICRO_REASON = "PROMOTED_TO_MICRO_LIVE_RECORDED_AS_REASON";
 
     private final ShadowCopyAllocationRepository shadowAllocationRepository;
     private final ShadowWalletProfileValidationRepository validationRepository;
@@ -523,13 +526,52 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         decision.details().put("LIVE".equals(targetExecutionMode) ? "liveAllocationReasonCode" : "microLiveAllocationReasonCode",
                 "LIVE".equals(targetExecutionMode) ? "LIVE_ALLOCATION_CREATED" : "MICRO_LIVE_ALLOCATION_CREATED");
 
+        recordShadowPostPromotion(shadow, allocation, targetExecutionMode, now, decision.details());
+        return new PromotionOutput(plan, allocation);
+    }
+
+    private void recordShadowPostPromotion(
+            ShadowCopyAllocationEntity shadow,
+            UserCopyAllocationEntity allocation,
+            String targetExecutionMode,
+            OffsetDateTime now,
+            Map<String, Object> details
+    ) {
+        String oldStatus = shadow.getStatus();
+        String oldReason = shadow.getLastValidationReason();
+        String executionMode = normalizeTargetMode(targetExecutionMode);
+        String newStatus = "LIVE".equals(executionMode) ? SHADOW_STATUS_PROMOTED_TO_LIVE : SHADOW_STATUS_VALIDATED;
+        String newReason = "LIVE".equals(executionMode) ? "LIVE_READY_FROM_SHADOW" : PROMOTED_TO_MICRO_REASON;
+
         shadow.setLinkedLiveAllocationId(allocation.getId());
         shadow.setPromotedToLiveAt(now);
-        shadow.setStatus("LIVE".equals(targetExecutionMode) ? "PROMOTED_TO_LIVE" : "PROMOTED_TO_MICRO_LIVE");
-        shadow.setLastValidationReason("LIVE".equals(targetExecutionMode) ? "LIVE_READY_FROM_SHADOW" : "SHADOW_VALIDATED_READY_FOR_MICRO");
+        shadow.setStatus(newStatus);
+        shadow.setLastValidationReason(newReason);
         shadow.setUpdatedAt(now);
+        if (details != null) {
+            details.put("shadowPromotionStatus", newStatus);
+            details.put("shadowPromotionReasonCode", newReason);
+            details.put("shadowStatusConstraintReasonCode", "SHADOW_STATUS_CONSTRAINT_SAFE");
+            details.put("shadowPromotionStatusRecorded", true);
+        }
         shadowAllocationRepository.saveAndFlush(shadow);
-        return new PromotionOutput(plan, allocation);
+        log.info(
+                "event=copy.promotion.shadow_post_promote.status_safe userId={} walletId={} shadowAllocationId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} copyGuardStatus={} copyGuardAction={} lastValidationReason={} executionMode={} oldStatus={} newStatus={} reasonCode={} decision=RECORDED",
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                shadow.getId(),
+                allocation.getId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                shadow.getCopyGuardStatus(),
+                shadow.getCopyGuardAction(),
+                oldReason,
+                executionMode,
+                oldStatus,
+                newStatus,
+                "SHADOW_STATUS_CONSTRAINT_SAFE"
+        );
     }
 
     private PlanResolution resolveCopyPlan(
@@ -733,12 +775,31 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         if (shadow == null || allocation == null) {
             return;
         }
+        String oldStatus = shadow.getStatus();
         shadow.setLinkedLiveAllocationId(allocation.getId());
         shadow.setPromotedToLiveAt(firstNonNull(shadow.getPromotedToLiveAt(), allocation.getPromotedFromShadowAt(), now));
-        shadow.setStatus("PROMOTED_TO_MICRO_LIVE");
+        String allocationMode = normalizeTargetMode(allocation.getExecutionMode());
+        shadow.setStatus("LIVE".equals(allocationMode) ? SHADOW_STATUS_PROMOTED_TO_LIVE : SHADOW_STATUS_VALIDATED);
         shadow.setLastValidationReason("ALREADY_PROMOTED");
         shadow.setUpdatedAt(now);
         shadowAllocationRepository.save(shadow);
+        log.info(
+                "event=copy.promotion.shadow_post_promote.status_safe userId={} walletId={} shadowAllocationId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} copyGuardStatus={} copyGuardAction={} lastValidationReason={} executionMode={} oldStatus={} newStatus={} reasonCode={} decision=NOOP",
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                shadow.getId(),
+                allocation.getId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                shadow.getCopyGuardStatus(),
+                shadow.getCopyGuardAction(),
+                shadow.getLastValidationReason(),
+                allocationMode,
+                oldStatus,
+                shadow.getStatus(),
+                "SHADOW_STATUS_CONSTRAINT_SAFE"
+        );
     }
 
     private void audit(
