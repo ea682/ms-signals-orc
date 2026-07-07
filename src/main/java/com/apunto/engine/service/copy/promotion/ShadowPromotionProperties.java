@@ -22,6 +22,7 @@ public class ShadowPromotionProperties {
     private boolean requireCopyGuardOpen = true;
     private boolean allowShadowOnlySummary = false;
     private String defaultTargetMode = "MICRO_LIVE";
+    private String directLivePolicy = "REQUIRE_MICRO_LIVE";
     private BigDecimal microLiveInitialCapitalUsd = new BigDecimal("100");
     private BigDecimal microLiveMaxCapitalUsd = new BigDecimal("100");
 
@@ -143,6 +144,14 @@ public class ShadowPromotionProperties {
 
     public void setDefaultTargetMode(String defaultTargetMode) {
         this.defaultTargetMode = defaultTargetMode;
+    }
+
+    public String getDirectLivePolicy() {
+        return directLivePolicy;
+    }
+
+    public void setDirectLivePolicy(String directLivePolicy) {
+        this.directLivePolicy = directLivePolicy;
     }
 
     public BigDecimal getMicroLiveInitialCapitalUsd() {

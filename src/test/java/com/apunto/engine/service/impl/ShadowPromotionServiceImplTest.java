@@ -20,6 +20,7 @@ import com.apunto.engine.repository.UserRepository;
 import com.apunto.engine.repository.UserWalletCopyPlanRepository;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionResult;
+import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -33,6 +34,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -43,6 +45,16 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ShadowPromotionServiceImplTest {
+
+    private static final Set<String> DB_ALLOWED_COPY_MODES = Set.of(
+            "copy_all_metric_movements",
+            "copy_only_short_events",
+            "copy_only_long_events",
+            "copy_open_and_full_close_only",
+            "copy_first_open_final_close",
+            "copy_strategy_filtered_events",
+            "copy_only_flip_events"
+    );
 
     @Test
     void approvedShadowCreatesPlanMicroLiveAllocationAndAudit() {
@@ -122,6 +134,209 @@ class ShadowPromotionServiceImplTest {
         assertEquals(new BigDecimal("100.00000000"), savedPlan.get().getAllocatedCapitalUsd());
         assertTrue(audits.stream().anyMatch(a -> "CAPITAL_CONFIG_FOUND_FROM_USER_DETAIL".equals(a.getReasonDetails().get("capitalConfigReasonCode"))));
         assertTrue(audits.stream().anyMatch(a -> "COPY_PLAN_CREATED".equals(a.getReasonDetails().get("copyPlanReasonCode"))));
+    }
+
+    @Test
+    void movementAllCreatesDbAllowedCopyMode() {
+        assertPromotedCopyMode("MOVEMENT_ALL", null, "copy_all_metric_movements");
+    }
+
+    @Test
+    void shortOnlyCreatesDbAllowedCopyMode() {
+        assertPromotedCopyMode("SHORT_ONLY", null, "copy_only_short_events");
+    }
+
+    @Test
+    void longOnlyCreatesDbAllowedCopyMode() {
+        assertPromotedCopyMode("LONG_ONLY", null, "copy_only_long_events");
+    }
+
+    @Test
+    void legacyMovementAllSourceCopyModeIsMappedToDbAllowedValue() {
+        assertPromotedCopyMode("MOVEMENT_ALL", "copy_movement_all_events", "copy_all_metric_movements");
+    }
+
+    @Test
+    void legacyShortSourceCopyModeIsMappedToDbAllowedValue() {
+        assertPromotedCopyMode("SHORT_ONLY", "copy_short_events", "copy_only_short_events");
+    }
+
+    @Test
+    void legacyLongSourceCopyModeIsMappedToDbAllowedValue() {
+        assertPromotedCopyMode("LONG_ONLY", "copy_long_events", "copy_only_long_events");
+    }
+
+    @Test
+    void skipSourceCopyModeIsNeverPersistedAsAllocationCopyMode() {
+        assertPromotedCopyMode("MOVEMENT_ALL", "SKIP", "copy_all_metric_movements");
+    }
+
+    @Test
+    void knownA445MovementAllCandidateCreatesMicroLiveWithConstraintSafeCopyMode() {
+        UUID userId = UUID.fromString("c01b3bc3-3c92-40fd-91d4-39bcae01bbe7");
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        shadow.setId(18L);
+        shadow.setWalletId("0xa445a0a15b1d50fa0c4bfe6796d9447e0da5329d");
+        shadow.setCopyMode("copy_movement_all_events");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertNotNull(savedAllocation.get());
+        assertEquals("0xa445a0a15b1d50fa0c4bfe6796d9447e0da5329d", savedAllocation.get().getWalletId());
+        assertEquals("MOVEMENT_ALL", savedAllocation.get().getCopyStrategyCode());
+        assertEquals("copy_all_metric_movements", savedAllocation.get().getCopyMode());
+        assertEquals("MICRO_LIVE", savedAllocation.get().getExecutionMode());
+        assertEquals(UserCopyAllocationEntity.Status.ACTIVE, savedAllocation.get().getStatus());
+        assertTrue(savedAllocation.get().isActive());
+        assertEquals(18L, savedAllocation.get().getLinkedShadowAllocationId());
+        assertTrue(audits.stream().anyMatch(a -> "COPY_MODE_CONSTRAINT_SAFE".equals(a.getReasonDetails().get("copyModeConstraintReasonCode"))));
+    }
+
+    @Test
+    void invalidCopyModeMappingRejectsOnlyThatCandidateAndBatchContinues() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity bad = readyShadow(userId, "UNKNOWN_PROFILE", "UNKNOWN_PROFILE");
+        bad.setId(11L);
+        bad.setCopyMode("SKIP");
+        ShadowCopyAllocationEntity good = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        good.setId(12L);
+        good.setCopyMode("copy_movement_all_events");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(bad, good),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertEquals(1, result.rejected());
+        assertEquals(12L, savedAllocation.get().getLinkedShadowAllocationId());
+        assertEquals("copy_all_metric_movements", savedAllocation.get().getCopyMode());
+        assertTrue(audits.stream().anyMatch(a -> "INVALID_COPY_MODE_MAPPING".equals(a.getReasonCode())));
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_CREATED".equals(a.getDecision())));
+    }
+
+    @Test
+    void shadowToLiveDirectIsRejectedWhenPolicyRequiresMicroLive() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        shadow.setLastValidationReason("LIVE_READY_FROM_SHADOW");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        ShadowPromotionProperties properties = promotionProperties();
+        properties.setDefaultTargetMode("LIVE");
+        properties.setDirectLivePolicy("REQUIRE_MICRO_LIVE");
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                properties
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_REQUIRED_BY_POLICY".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void shadowToLiveDirectIsRejectedWhenPolicyAllowsButShadowIsNotLiveReady() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        shadow.setLastValidationReason("SHADOW_VALIDATED_READY_FOR_MICRO");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        ShadowPromotionProperties properties = promotionProperties();
+        properties.setDefaultTargetMode("LIVE");
+        properties.setDirectLivePolicy("ALLOW_DIRECT_LIVE_FOR_LIVE_READY");
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                properties
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "LIVE_NOT_READY_FROM_SHADOW".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void shadowToLiveDirectCreatesLiveOnlyWhenPolicyAllowsAndShadowIsLiveReady() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        shadow.setLastValidationReason("LIVE_READY_FROM_SHADOW");
+        shadow.setCopyMode("copy_movement_all_events");
+        AtomicReference<UserWalletCopyPlanEntity> savedPlan = new AtomicReference<>();
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        ShadowPromotionProperties properties = promotionProperties();
+        properties.setDefaultTargetMode("LIVE");
+        properties.setDirectLivePolicy("ALLOW_DIRECT_LIVE_FOR_LIVE_READY");
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                savedPlan,
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                properties
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertNotNull(savedPlan.get());
+        assertNotNull(savedAllocation.get());
+        assertEquals("LIVE", savedAllocation.get().getExecutionMode());
+        assertEquals("copy_all_metric_movements", savedAllocation.get().getCopyMode());
+        assertEquals("PROMOTED_DIRECT_FROM_SHADOW", savedAllocation.get().getStatusReason());
+        assertEquals("PROMOTED_TO_LIVE", shadow.getStatus());
+        assertTrue(audits.stream().anyMatch(a -> "LIVE_ALLOCATION_CREATED".equals(a.getDecision())));
     }
 
     @Test
@@ -768,6 +983,21 @@ class ShadowPromotionServiceImplTest {
             CopySymbolResolver symbolResolver,
             long activeAllocationCount
     ) {
+        return service(shadows, validation, user, apiKey, savedPlan, savedAllocation, audits, symbolResolver, activeAllocationCount, promotionProperties());
+    }
+
+    private static ShadowPromotionServiceImpl service(
+            List<ShadowCopyAllocationEntity> shadows,
+            ShadowWalletProfileValidationEntity validation,
+            UserBundle user,
+            UserApiKeyEntity apiKey,
+            AtomicReference<UserWalletCopyPlanEntity> savedPlan,
+            AtomicReference<UserCopyAllocationEntity> savedAllocation,
+            List<CopyPromotionAuditEntity> audits,
+            CopySymbolResolver symbolResolver,
+            long activeAllocationCount,
+            ShadowPromotionProperties properties
+    ) {
         return new ShadowPromotionServiceImpl(
                 shadowRepository(shadows),
                 validationRepository(validation),
@@ -780,7 +1010,7 @@ class ShadowPromotionServiceImplTest {
                 allocationRepository(savedAllocation, activeAllocationCount),
                 auditRepository(audits),
                 symbolResolver,
-                promotionProperties()
+                properties
         );
     }
 
@@ -798,6 +1028,39 @@ class ShadowPromotionServiceImplTest {
         properties.setMicroLiveInitialCapitalUsd(new BigDecimal("100"));
         properties.setMicroLiveMaxCapitalUsd(new BigDecimal("100"));
         return properties;
+    }
+
+    private static void assertPromotedCopyMode(String strategyCode, String sourceCopyMode, String expectedCopyMode) {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, strategyCode, scopeForStrategy(strategyCode));
+        shadow.setCopyMode(sourceCopyMode);
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertNotNull(savedAllocation.get());
+        assertEquals(expectedCopyMode, savedAllocation.get().getCopyMode());
+        assertTrue(DB_ALLOWED_COPY_MODES.contains(savedAllocation.get().getCopyMode()));
+        assertTrue(audits.stream().anyMatch(a -> "COPY_MODE_CONSTRAINT_SAFE".equals(a.getReasonDetails().get("copyModeConstraintReasonCode"))));
+    }
+
+    private static String scopeForStrategy(String strategyCode) {
+        if ("SHORT_ONLY".equals(strategyCode)) return "SHORT";
+        if ("LONG_ONLY".equals(strategyCode)) return "LONG";
+        return "ALL";
     }
 
     private static ShadowCopyAllocationEntity readyShadow(UUID userId, String strategyCode, String scopeValue) {
@@ -948,6 +1211,8 @@ class ShadowPromotionServiceImplTest {
             if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
                 UserCopyAllocationEntity entity = (UserCopyAllocationEntity) args[0];
                 entity.setId(400L);
+                assertTrue(UserCopyAllocationCopyModeResolver.isAllowedCopyMode(entity.getCopyMode()),
+                        "copy_mode must satisfy chk_user_copy_allocation_copy_mode, actual=" + entity.getCopyMode());
                 savedAllocation.set(entity);
                 return entity;
             }
