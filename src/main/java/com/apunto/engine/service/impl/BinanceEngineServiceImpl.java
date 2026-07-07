@@ -34,6 +34,9 @@ import com.apunto.engine.service.copy.accounting.CopyAccountingResult;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingAdapter;
 import com.apunto.engine.service.copy.accounting.LiveCopyAccountingInput;
 import com.apunto.engine.service.copy.accounting.PositionDeltaType;
+import com.apunto.engine.service.copy.budget.CopyBudgetResolver;
+import com.apunto.engine.service.copy.budget.CopyBudgetResolver.CopyBudgetDecision;
+import com.apunto.engine.service.copy.budget.CopyBudgetResolver.CopyBudgetRequest;
 import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocation;
 import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocator;
 import com.apunto.engine.service.copy.leverage.CopyLeverageAuditCalculator;
@@ -187,6 +190,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private final CopyMinNotionalPolicyResolver copyMinNotionalPolicyResolver;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     private final LiveCopyAccountingAdapter liveCopyAccountingAdapter;
+    private final CopyBudgetResolver copyBudgetResolver;
 
     @Value("${binance.dispatch.delay-ms:0}")
     private long delayBetweenMs;
@@ -1701,17 +1705,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (userDetail == null || userDetail.getDetail() == null || walletMetric == null) {
             return ZERO;
         }
-        final Double share = walletMetric.getCapitalShare();
-        if (share == null || !Double.isFinite(share) || share <= 0) {
+        final String executionMode = executionModeOf(allocation);
+        final double allocationPct = allocationPctForBudget(walletMetric, allocation, executionMode);
+        if (!"MICRO_LIVE".equals(executionMode) && allocationPct <= 0.0) {
             return ZERO;
         }
-        return resolveStrategyMarginBudget(
-                resolveCopyCapital(userDetail, allocation),
-                share,
-                executionModeOf(allocation),
-                resolveCapitalAsset(userDetail).name(),
-                microLiveMaxCapitalUsd
-        ).amount();
+        CopyBudgetDecision decision = resolveCopyBudget(userDetail, walletMetric, allocation, allocationPct, executionMode);
+        return decision.allowed() ? decision.budgetUsd() : ZERO;
     }
 
     static BigDecimal resolveStrategyMarginBudget(int copyCapital, double capitalShare, String executionMode) {
@@ -1729,23 +1729,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             String capitalCurrency,
             int microLiveMaxCapitalUsd
     ) {
-        final int safeCopyCapital = Math.max(0, copyCapital);
-        final int safeMicroLiveMax = Math.max(0, microLiveMaxCapitalUsd);
-        final String mode = UserCopyAllocationEntity.normalizeExecutionMode(executionMode);
-        final String safeCurrency = FuturesCapitalAsset.fromNullable(capitalCurrency).name();
-        final BigDecimal amount;
-        if ("MICRO_LIVE".equals(mode)) {
-            amount = BigDecimal.valueOf(Math.min(safeCopyCapital, safeMicroLiveMax))
-                    .setScale(12, RoundingMode.HALF_UP);
-        } else {
-            final double safeShare = Double.isFinite(capitalShare)
-                    ? Math.max(0.0, Math.min(1.0, capitalShare))
-                    : 0.0;
-            amount = BigDecimal.valueOf(safeCopyCapital)
-                    .multiply(BigDecimal.valueOf(safeShare))
-                    .setScale(12, RoundingMode.HALF_UP);
-        }
-        return new StrategyMarginBudget(amount, safeCurrency, safeCurrency, safeCurrency);
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(
+                executionMode,
+                BigDecimal.valueOf(Math.max(0, copyCapital)),
+                allocationPctDecimal(capitalShare),
+                BigDecimal.valueOf(Math.max(0, microLiveMaxCapitalUsd)),
+                capitalCurrency
+        );
+        return new StrategyMarginBudget(decision.budgetUsd(), decision.capitalAsset(), decision.capitalAsset(), decision.capitalAsset());
     }
 
     record StrategyMarginBudget(
@@ -1765,11 +1756,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (capital == null) {
             capital = userDetail.getDetail().getCapital();
         }
-        int resolved = capital == null ? 0 : Math.max(0, capital);
-        if (isMicroLiveMode(allocation)) {
-            return Math.min(resolved, Math.max(0, microLiveMaxCapitalUsd));
-        }
-        return resolved;
+        return capital == null ? 0 : Math.max(0, capital);
     }
 
     private int resolveRuntimeCapital(UserDetailDto userDetail) {
@@ -3839,6 +3826,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String originId = originOperation.getIdOperacion().toString();
         final String userId = userDetail.getUser().getId().toString();
         final String walletId = walletMetric.getWallet().getIdWallet();
+        final String executionMode = executionModeOf(allocation);
 
         Double capitalShareRaw = walletMetric.getCapitalShare();
         if (capitalShareRaw == null || !Double.isFinite(capitalShareRaw)) {
@@ -3850,7 +3838,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
         double capitalShare = Math.max(0.0, Math.min(1.0, capitalShareRaw));
-        if (capitalShare <= 0.0) {
+        if (!"MICRO_LIVE".equals(executionMode) && capitalShare <= 0.0) {
             log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
             throw new SkipExecutionException(
                     "metric_invalid",
@@ -3860,19 +3848,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final int copyCapital = resolveCopyCapital(userDetail, allocation);
+        final CopyBudgetDecision budgetDecision = resolveCopyBudget(userDetail, walletMetric, allocation, capitalShare, executionMode);
+        final BigDecimal walletMarginBudget = budgetDecision.budgetUsd();
         final FuturesCapitalAsset capitalAsset = resolveCapitalAsset(userDetail);
-        final StrategyMarginBudget strategyBudget = resolveStrategyMarginBudget(
-                copyCapital,
-                capitalShare,
-                executionModeOf(allocation),
-                capitalAsset.name(),
-                microLiveMaxCapitalUsd
-        );
-        final BigDecimal walletMarginBudget = strategyBudget.amount();
         if (walletMarginBudget.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_BUDGET, originId, userId, walletId);
             throw new SkipExecutionException(
-                    "budget_invalid",
+                    budgetDecision.reasonCode(),
                     "Presupuesto inválido: walletMarginBudget <= 0",
                     com.apunto.engine.shared.util.LogFmt.kv(
                             "wallet", walletId,
@@ -5224,6 +5206,58 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return UserCopyAllocationEntity.normalizeExecutionMode(
                 allocation == null ? null : allocation.getExecutionMode()
         );
+    }
+
+    private CopyBudgetDecision resolveCopyBudget(UserDetailDto userDetail,
+                                                 MetricaWalletDto walletMetric,
+                                                 UserCopyAllocationEntity allocation,
+                                                 double allocationPct,
+                                                 String executionMode) {
+        final String walletId = walletMetric != null && walletMetric.getWallet() != null
+                ? walletMetric.getWallet().getIdWallet()
+                : null;
+        final UUID userId = userDetail != null && userDetail.getUser() != null ? userDetail.getUser().getId() : null;
+        final UUID detailUserId = userDetail != null && userDetail.getDetail() != null ? userDetail.getDetail().getId() : null;
+        final String strategyCode = allocation != null && allocation.getCopyStrategyCode() != null
+                ? allocation.getCopyStrategyCode()
+                : copyStrategyRuntimeRouter.strategyCodeOf(walletMetric);
+
+        return copyBudgetResolver.resolve(CopyBudgetRequest.builder()
+                .userId(userId)
+                .detailUserId(detailUserId)
+                .walletId(walletId)
+                .userCopyAllocationId(allocation == null ? null : allocation.getId())
+                .executionMode(executionMode)
+                .copyStrategyCode(strategyCode)
+                .accountCapitalUsd(BigDecimal.valueOf(resolveCopyCapital(userDetail, allocation)))
+                .allocationPct(allocationPctDecimal(allocationPct))
+                .microLiveFixedBudgetUsd(BigDecimal.valueOf(Math.max(0, microLiveMaxCapitalUsd)))
+                .capitalAsset(resolveCapitalAsset(userDetail).name())
+                .build());
+    }
+
+    private double allocationPctForBudget(MetricaWalletDto walletMetric, UserCopyAllocationEntity allocation, String executionMode) {
+        if (allocation != null && allocation.getAllocationPct() != null && allocation.getAllocationPct().compareTo(ZERO) > 0) {
+            return allocation.getAllocationPct().doubleValue();
+        }
+        if (walletMetric == null) {
+            return 0.0;
+        }
+        Double share = walletMetric.getCapitalShare();
+        if (share == null || !Double.isFinite(share)) {
+            return 0.0;
+        }
+        if ("MICRO_LIVE".equals(executionMode)) {
+            return Math.max(0.0, Math.min(1.0, share));
+        }
+        return share > 0.0 ? Math.max(0.0, Math.min(1.0, share)) : 0.0;
+    }
+
+    private static BigDecimal allocationPctDecimal(double value) {
+        if (!Double.isFinite(value) || value <= 0.0) {
+            return ZERO.setScale(12, RoundingMode.HALF_UP);
+        }
+        return BigDecimal.valueOf(Math.min(1.0, value)).setScale(12, RoundingMode.HALF_UP);
     }
 
     private boolean isShadowMode(UserCopyAllocationEntity allocation) {

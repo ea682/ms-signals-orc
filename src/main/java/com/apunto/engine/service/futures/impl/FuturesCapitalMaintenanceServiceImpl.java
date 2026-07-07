@@ -61,7 +61,7 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
         int skipped = 0;
         int failed = 0;
 
-        log.info("event=futures.capital_maintenance.start users={} minAvailable={} bnbMinRatio={} conversionRatio={} friendlyStep=voy_a_revisar_saldos_y_bnb_de_los_usuarios_activos",
+        log.info("event=futures.capital_maintenance.started users={} minAvailable={} bnbMinRatio={} conversionRatio={} friendlyStep=voy_a_revisar_saldos_y_bnb_de_los_usuarios_activos",
                 users.size(), minimumAvailableToConvert, minimumBnbRatio, conversionRatio);
 
         for (UserDetailDto user : users) {
@@ -75,12 +75,12 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
                 }
             } catch (SkipExecutionException ex) {
                 skipped++;
-                log.info("event=futures.capital_maintenance.user.skip userId={} reasonCode={} reason=\"{}\" details=\"{}\" friendlyStep=este_usuario_no_cumple_una_regla_y_lo_salto_sin_romper_el_proceso",
-                        userId(user), ex.getReasonCode(), safeLog(ex.getReason()), safeLog(ex.getDetails()));
+                log.info("event=futures.capital_maintenance.skipped userId={} detailUserId={} capitalAsset={} decision=SKIP reasonCode={} reason=\"{}\" details=\"{}\" friendlyStep=este_usuario_no_cumple_una_regla_y_lo_salto_sin_romper_el_proceso",
+                        userId(user), detailId(user), capitalAsset(user), ex.getReasonCode(), safeLog(ex.getReason()), safeLog(ex.getDetails()));
             } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException | ArithmeticException ex) {
                 failed++;
-                log.warn("event=futures.capital_maintenance.user.fail userId={} errClass={} errMsg=\"{}\" friendlyStep=fallo_un_usuario_pero_sigo_con_los_demas",
-                        userId(user), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+                log.warn("event=futures.capital_maintenance.failed userId={} detailUserId={} capitalAsset={} decision=FAIL reasonCode=CAPITAL_REFRESH_FAILED errClass={} errMsg=\"{}\" friendlyStep=fallo_un_usuario_pero_sigo_con_los_demas",
+                        userId(user), detailId(user), capitalAsset(user), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
             }
         }
 
@@ -94,10 +94,15 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
         String userId = userId(userDetail);
         UUID detailId = userDetail.getDetail().getId();
         FuturesCapitalAsset capitalAsset = FuturesCapitalAsset.fromNullable(userDetail.getDetail().getCapitalAsset());
+        Integer oldCapital = userDetail.getDetail().getCapital();
+
+        log.info("event=futures.capital_maintenance.user.selected userId={} detailUserId={} capitalAsset={} oldCapital={} decision=SELECTED reasonCode=ACTIVE_BINANCE_USER",
+                userId, detailId, capitalAsset, oldCapital == null ? 0 : oldCapital);
 
         FuturesAssetBalanceClientResponse baseBalance = walletService.getAssetBalance(userDetail, capitalAsset.name());
         BigDecimal available = FuturesAssetAmountParser.positiveOrZero(baseBalance.getAvailableBalance());
-        persistCapital(userDetail, detailId, capitalAsset, available, "balance_read");
+        logBalanceFetched(userDetail, capitalAsset, baseBalance);
+        persistCapital(userDetail, detailId, capitalAsset, baseBalance, available, "balance_read");
 
         FuturesBnbConversionDecision decision;
         BigDecimal bnbAmount = BigDecimal.ZERO;
@@ -169,7 +174,7 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
                     decision.bnbMinimumValue().toPlainString());
         }
 
-        persistCapital(userDetail, detailId, capitalAsset, finalAvailable, "final_state");
+        persistCapital(userDetail, detailId, capitalAsset, baseBalance, finalAvailable, "final_state");
 
         return new UserProcessResult(converted);
     }
@@ -178,13 +183,25 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
     private void persistCapital(UserDetailDto userDetail,
                                 UUID detailId,
                                 FuturesCapitalAsset capitalAsset,
+                                FuturesAssetBalanceClientResponse balance,
                                 BigDecimal availableBalance,
                                 String phase) {
+        Integer oldCapital = userDetail.getDetail().getCapital();
         int capital = toCapitalInteger(availableBalance);
         int updated = detailUserRepository.updateCapitalById(detailId, capital);
+        userDetail.getDetail().setCapital(capital);
         userDetailCachedService.updateRuntimeCapital(userDetail.getUser().getId(), capital, capitalAsset.name());
-        log.info("event=futures.capital_maintenance.capital.updated phase={} userId={} detailId={} asset={} capital={} availableBalance={} rows={} friendlyStep=guarde_el_capital_actual_para_que_copytrading_lo_use_rapido_en_memoria",
-                phase, userId(userDetail), detailId, capitalAsset, capital, availableBalance.toPlainString(), updated);
+        log.info("event=futures.capital_maintenance.capital.updated phase={} userId={} detailUserId={} capitalAsset={} oldCapital={} newCapital={} walletBalance={} availableBalance={} marginBalance={} endpoint=USD_M_FUTURES_BALANCE rows={} decision=UPDATED reasonCode=CAPITAL_AVAILABLE_BALANCE_UPDATED friendlyStep=guarde_el_capital_actual_para_que_copytrading_lo_use_rapido_en_memoria",
+                phase,
+                userId(userDetail),
+                detailId,
+                capitalAsset,
+                oldCapital == null ? 0 : oldCapital,
+                capital,
+                safeBalance(balance == null ? null : balance.getWalletBalance()),
+                availableBalance.toPlainString(),
+                safeBalance(preferredMarginBalance(balance)),
+                updated);
     }
 
     private BigDecimal refreshAvailableAfterConversion(UserDetailDto userDetail,
@@ -197,6 +214,7 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
         try {
             FuturesAssetBalanceClientResponse refreshed = walletService.getAssetBalance(userDetail, capitalAsset.name());
             BigDecimal refreshedAvailable = FuturesAssetAmountParser.positiveOrZero(refreshed.getAvailableBalance());
+            logBalanceFetched(userDetail, capitalAsset, refreshed);
             return refreshedAvailable.compareTo(BigDecimal.ZERO) >= 0 ? refreshedAvailable : fallbackAvailable;
         } catch (EngineException | IllegalStateException | IllegalArgumentException ex) {
             log.warn("event=futures.capital_maintenance.balance.refresh_after_convert.fail userId={} asset={} errClass={} errMsg=\"{}\" friendlyStep=no_pude_releer_el_saldo_y_uso_el_anterior",
@@ -218,18 +236,43 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
 
     private void validateUser(UserDetailDto userDetail) {
         if (userDetail == null || userDetail.getUser() == null || userDetail.getUser().getId() == null) {
-            throw new SkipExecutionException("user_detail_missing", "Detalle de usuario requerido", null);
+            throw new SkipExecutionException("SKIPPED_USER_DETAIL_MISSING", "Detalle de usuario requerido", null);
         }
         DetailUserEntity detail = userDetail.getDetail();
         if (detail == null || detail.getId() == null) {
-            throw new SkipExecutionException("detail_user_missing", "Detalle detail_user requerido", com.apunto.engine.shared.util.LogFmt.kv("userId", userId(userDetail)));
+            throw new SkipExecutionException("SKIPPED_DETAIL_USER_MISSING", "Detalle detail_user requerido", com.apunto.engine.shared.util.LogFmt.kv("userId", userId(userDetail)));
         }
         if (!detail.isUserActive()) {
-            throw new SkipExecutionException("user_inactive", "Usuario inactivo", com.apunto.engine.shared.util.LogFmt.kv("userId", userId(userDetail)));
+            throw new SkipExecutionException("SKIPPED_USER_INACTIVE", "Usuario inactivo", com.apunto.engine.shared.util.LogFmt.kv("userId", userId(userDetail)));
         }
         if (!detail.isApiKeyBinar()) {
-            throw new SkipExecutionException("api_key_inactive", "API key Binance inactiva", com.apunto.engine.shared.util.LogFmt.kv("userId", userId(userDetail)));
+            throw new SkipExecutionException("SKIPPED_API_KEY_INACTIVE", "API key Binance inactiva", com.apunto.engine.shared.util.LogFmt.kv("userId", userId(userDetail)));
         }
+    }
+
+    private void logBalanceFetched(UserDetailDto userDetail,
+                                   FuturesCapitalAsset capitalAsset,
+                                   FuturesAssetBalanceClientResponse balance) {
+        log.info("event=futures.capital_maintenance.binance.balance.fetched userId={} detailUserId={} capitalAsset={} walletBalance={} availableBalance={} marginBalance={} endpoint=USD_M_FUTURES_BALANCE decision=ALLOW reasonCode=BALANCE_FETCHED",
+                userId(userDetail),
+                detailId(userDetail),
+                capitalAsset,
+                safeBalance(balance == null ? null : balance.getWalletBalance()),
+                safeBalance(balance == null ? null : balance.getAvailableBalance()),
+                safeBalance(preferredMarginBalance(balance)));
+    }
+
+    private String preferredMarginBalance(FuturesAssetBalanceClientResponse balance) {
+        if (balance == null) {
+            return null;
+        }
+        if (balance.getMarginBalance() != null && !balance.getMarginBalance().isBlank()) {
+            return balance.getMarginBalance();
+        }
+        if (balance.getCrossWalletBalance() != null && !balance.getCrossWalletBalance().isBlank()) {
+            return balance.getCrossWalletBalance();
+        }
+        return balance.getWalletBalance();
     }
 
     private BigDecimal positiveConfig(BigDecimal value) {
@@ -254,6 +297,25 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
         return userDetail.getUser().getId().toString();
     }
 
+    private String detailId(UserDetailDto userDetail) {
+        if (userDetail == null || userDetail.getDetail() == null || userDetail.getDetail().getId() == null) {
+            return "";
+        }
+        return userDetail.getDetail().getId().toString();
+    }
+
+    private String capitalAsset(UserDetailDto userDetail) {
+        if (userDetail == null || userDetail.getDetail() == null) {
+            return "";
+        }
+        String raw = userDetail.getDetail().getCapitalAsset();
+        try {
+            return FuturesCapitalAsset.fromNullable(raw).name();
+        } catch (SkipExecutionException ex) {
+            return raw == null ? "" : safeLog(raw);
+        }
+    }
+
     private long elapsedMs(long startedNs) {
         return Duration.ofNanos(System.nanoTime() - startedNs).toMillis();
     }
@@ -264,6 +326,10 @@ public class FuturesCapitalMaintenanceServiceImpl implements FuturesCapitalMaint
         }
         String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
         return clean.length() > 1000 ? clean.substring(0, 1000) : clean;
+    }
+
+    private String safeBalance(String value) {
+        return value == null ? "" : safeLog(value);
     }
 
     private record UserProcessResult(boolean converted) {

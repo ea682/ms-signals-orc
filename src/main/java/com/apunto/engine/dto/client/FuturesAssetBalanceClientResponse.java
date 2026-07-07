@@ -14,6 +14,8 @@ public class FuturesAssetBalanceClientResponse {
     private String asset;
     private String walletBalance;
     private String availableBalance;
+    private String marginBalance;
+    private String totalWalletBalance;
     private String crossWalletBalance;
     private String crossUnPnl;
     private String maxWithdrawAmount;
