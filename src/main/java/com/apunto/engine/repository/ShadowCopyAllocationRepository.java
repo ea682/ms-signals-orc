@@ -23,10 +23,7 @@ public interface ShadowCopyAllocationRepository extends JpaRepository<ShadowCopy
                     s.status in (
                         'SHADOW_ACTIVE',
                         'SHADOW_WARNING',
-                        'SHADOW_VALIDATED',
-                        'SHADOW_READY_FOR_MICRO_LIVE',
-                        'VALIDATED',
-                        'LIVE_ELIGIBLE'
+                        'SHADOW_VALIDATED'
                     )
                     or (
                         s.status = 'SHADOW_ONLY'
@@ -54,16 +51,12 @@ public interface ShadowCopyAllocationRepository extends JpaRepository<ShadowCopy
               and s.active = true
               and s.endsAt is null
               and s.status in (
-                    'SHADOW_TESTING',
                     'SHADOW_ACTIVE',
                     'SHADOW_WARNING',
                     'SHADOW_VALIDATED',
                     'SHADOW_ONLY',
                     'SHADOW_PAUSED',
-                    'VALIDATED',
-                    'LIVE_ELIGIBLE',
-                    'PROMOTED_TO_LIVE',
-                    'LIVE_ACTIVE'
+                    'PROMOTED_TO_LIVE'
               )
             """)
     List<ShadowCopyAllocationEntity> findRuntimeActiveByWallet(@Param("walletId") String walletId);
@@ -85,16 +78,12 @@ public interface ShadowCopyAllocationRepository extends JpaRepository<ShadowCopy
                   and s.is_active = true
                   and s.ends_at is null
                   and s.status in (
-                        'SHADOW_TESTING',
                         'SHADOW_ACTIVE',
                         'SHADOW_WARNING',
                         'SHADOW_VALIDATED',
                         'SHADOW_ONLY',
                         'SHADOW_PAUSED',
-                        'VALIDATED',
-                        'LIVE_ELIGIBLE',
-                        'PROMOTED_TO_LIVE',
-                        'LIVE_ACTIVE'
+                        'PROMOTED_TO_LIVE'
                   )
             )
             select s.*

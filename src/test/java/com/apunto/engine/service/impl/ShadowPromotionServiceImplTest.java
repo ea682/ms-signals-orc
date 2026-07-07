@@ -56,6 +56,16 @@ class ShadowPromotionServiceImplTest {
             "copy_only_flip_events"
     );
 
+    private static final Set<String> DB_ALLOWED_SHADOW_STATUSES = Set.of(
+            "SHADOW_ACTIVE",
+            "SHADOW_WARNING",
+            "SHADOW_VALIDATED",
+            "SHADOW_REJECTED",
+            "SHADOW_ONLY",
+            "PROMOTED_TO_LIVE",
+            "SHADOW_PAUSED"
+    );
+
     @Test
     void approvedShadowCreatesPlanMicroLiveAllocationAndAudit() {
         UUID userId = UUID.randomUUID();
@@ -100,7 +110,10 @@ class ShadowPromotionServiceImplTest {
         assertEquals(userId, savedPlan.get().getIdUser());
         assertEquals("0xabc", savedPlan.get().getWalletLc());
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_CREATED".equals(a.getDecision())));
-        assertEquals("PROMOTED_TO_MICRO_LIVE", shadow.getStatus());
+        assertEquals("SHADOW_VALIDATED", shadow.getStatus());
+        assertTrue(DB_ALLOWED_SHADOW_STATUSES.contains(shadow.getStatus()));
+        assertEquals("PROMOTED_TO_MICRO_LIVE_RECORDED_AS_REASON", shadow.getLastValidationReason());
+        assertTrue(audits.stream().anyMatch(a -> "PROMOTED_TO_MICRO_LIVE_RECORDED_AS_REASON".equals(a.getReasonDetails().get("shadowPromotionReasonCode"))));
     }
 
     @Test
@@ -445,9 +458,13 @@ class ShadowPromotionServiceImplTest {
         assertNotNull(savedPlan.get());
         assertNotNull(savedAllocation.get());
         assertEquals("MICRO_LIVE", savedAllocation.get().getExecutionMode());
-        assertEquals("PROMOTED_TO_MICRO_LIVE", shadow.getStatus());
-        assertEquals("SHADOW_VALIDATED_READY_FOR_MICRO", shadow.getLastValidationReason());
+        assertEquals(UserCopyAllocationEntity.Status.ACTIVE, savedAllocation.get().getStatus());
+        assertTrue(savedAllocation.get().isActive());
+        assertEquals("SHADOW_VALIDATED", shadow.getStatus());
+        assertTrue(DB_ALLOWED_SHADOW_STATUSES.contains(shadow.getStatus()));
+        assertEquals("PROMOTED_TO_MICRO_LIVE_RECORDED_AS_REASON", shadow.getLastValidationReason());
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_CREATED".equals(a.getDecision())));
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_STATUS_CONSTRAINT_SAFE".equals(a.getReasonDetails().get("shadowStatusConstraintReasonCode"))));
     }
 
     @Test
@@ -896,7 +913,8 @@ class ShadowPromotionServiceImplTest {
         assertEquals(0, result.created());
         assertEquals(1, result.skipped());
         assertEquals(0, result.rejected());
-        assertEquals("PROMOTED_TO_MICRO_LIVE", shadow.getStatus());
+        assertEquals("SHADOW_VALIDATED", shadow.getStatus());
+        assertTrue(DB_ALLOWED_SHADOW_STATUSES.contains(shadow.getStatus()));
         assertEquals(778L, shadow.getLinkedLiveAllocationId());
         assertTrue(audits.stream().noneMatch(a -> "NO_CAPITAL_CONFIG".equals(a.getReasonCode())));
         assertTrue(audits.stream().anyMatch(a -> "SHADOW_PROMOTION_NOOP".equals(a.getDecision())
@@ -953,7 +971,8 @@ class ShadowPromotionServiceImplTest {
 
         assertEquals(0, result.created());
         assertEquals(1, result.skipped());
-        assertEquals("PROMOTED_TO_MICRO_LIVE", shadow.getStatus());
+        assertEquals("SHADOW_VALIDATED", shadow.getStatus());
+        assertTrue(DB_ALLOWED_SHADOW_STATUSES.contains(shadow.getStatus()));
         assertEquals(777L, shadow.getLinkedLiveAllocationId());
         assertTrue(audits.stream().anyMatch(a -> "SHADOW_PROMOTION_NOOP".equals(a.getDecision())
                 && "ALREADY_PROMOTED".equals(a.getReasonCode())));
