@@ -40,14 +40,19 @@ MICRO_LIVE ejecuta ordenes reales con capital acotado. Es la etapa de validacion
 La asignacion creada desde SHADOW debe:
 
 - Usar `execution_mode=MICRO_LIVE`.
+- Quedar ejecutable con `status=ACTIVE`, `is_active=true` y `ends_at=null`.
 - Usar un `copy_mode` permitido por `chk_user_copy_allocation_copy_mode`.
 - Resolver `copy_mode` desde `copy_strategy_code` y solo usar `sourceCopyMode` como compatibilidad controlada. Nunca debe persistir `SKIP`, `copy_movement_all_events`, `copy_short_events`, `copy_long_events` ni otro valor que no pertenezca al set permitido por DB.
 - Usar capital inicial limitado por `COPY_MICRO_LIVE_INITIAL_CAPITAL_USD` y `COPY_MICRO_LIVE_MAX_CAPITAL_USD`.
 - Mantener `linked_shadow_allocation_id`.
 - Mantener `source_symbol`, `target_symbol`, `capital_asset` y estado de resolucion de simbolo.
 - Marcar el SHADOW como enlazado con `linked_live_allocation_id`.
+- No escribir `PROMOTED_TO_MICRO_LIVE` en `shadow_copy_allocation.status`, porque produccion no lo permite en `chk_shadow_copy_allocation_status`.
+- Registrar la promocion SHADOW -> MICRO_LIVE en `last_validation_reason`, `copy_promotion_audit` y logs estructurados. El `status` de SHADOW debe quedar en un valor permitido por DB, por ejemplo `SHADOW_VALIDATED`.
 - Crear o actualizar `user_wallet_copy_plan` para la wallet del usuario usando la configuracion activa de `detail_user`.
 - Escribir auditoria `MICRO_LIVE_CREATED` para la promocion efectiva SHADOW -> MICRO_LIVE.
+
+`SHADOW_ONLY` / `SUMMARY_NOT_FINAL_LIVE_BLOCKED` bloquea LIVE directo, pero no debe pausar una allocation `MICRO_LIVE` ya creada desde una promocion SHADOW validada para MICRO_LIVE. Si el sync de `/joyas` ve `shadow_live_validation_failed action=SHADOW_ONLY status=SHADOW_ONLY`, debe mantener o reactivar la allocation `MICRO_LIVE` enlazada al SHADOW, con reason `MICRO_LIVE_NOT_PAUSED_BY_SHADOW_ONLY`. Riesgos reales como `DATA_RISK`, `PAUSE_OPEN`, usuario/API/capital invalido o hard blockers siguen pudiendo pausar o bloquear segun corresponda.
 
 La promocion es idempotente. Si una carrera de concurrencia crea primero la asignacion, el segundo intento no rompe el job: re-lee la asignacion existente, enlaza el SHADOW si hace falta y audita `SHADOW_PROMOTION_NOOP` con reason `ALREADY_PROMOTED`.
 
@@ -130,6 +135,17 @@ Si se requiere en el futuro cerrar la fila MICRO_LIVE y crear una fila LIVE nuev
 - `LIVE_ALLOCATION_CREATED`
 - `LIVE_ALLOCATION_ALREADY_EXISTS`
 - `MICRO_TO_LIVE_COPY_MODE_RESOLVED`
+- `MICRO_LIVE_VALIDATION_PASSED`
+- `MICRO_LIVE_CREATED`
+- `MICRO_LIVE_ALREADY_EXISTS`
+- `MICRO_LIVE_ACTIVATED`
+- `MICRO_LIVE_NOT_PAUSED_BY_SHADOW_ONLY`
+- `SHADOW_PROMOTION_STATUS_RECORDED`
+- `SHADOW_PROMOTION_STATUS_SKIPPED_INVALID_DB_STATUS`
+- `PROMOTED_TO_MICRO_LIVE_RECORDED_AS_REASON`
+- `SHADOW_STATUS_CONSTRAINT_SAFE`
+- `MICRO_LIVE_SHADOW_VALIDATION_FAILED`
+- `MICRO_LIVE_PAUSED_BY_REAL_RISK`
 - `MICRO_LIVE_ALLOCATION_CREATED`
 - `MICRO_LIVE_ALLOCATION_ALREADY_EXISTS`
 - `NO_CAPITAL_CONFIG`
@@ -155,6 +171,11 @@ Eventos de promocion:
 - `event=copy.promotion.micro_to_live.rejected`
 - `event=copy.promotion.shadow_to_micro.created`
 - `event=copy.promotion.shadow_to_micro.noop`
+- `event=copy.promotion.shadow_post_promote.status_safe`
+- `event=copy.promotion.micro_live.validation.passed`
+- `event=copy.promotion.micro_live.not_paused_by_shadow_only`
+- `event=user_copy_allocation.micro_live.activated`
+- `event=user_copy_allocation.micro_live.paused`
 - `event=copy.promotion.shadow_to_micro.candidate_failed`
 - `event=copy.promotion.shadow_to_micro.finished`
 - `event=copy.promotion.micro_to_live.created`

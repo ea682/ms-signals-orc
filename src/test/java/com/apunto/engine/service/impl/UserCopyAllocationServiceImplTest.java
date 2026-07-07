@@ -21,6 +21,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -252,6 +253,70 @@ class UserCopyAllocationServiceImplTest {
     }
 
     @Test
+    void syncDistributionReactivatesPromotedMicroLivePausedByShadowOnlySummaryBlocker() throws Exception {
+        UUID userId = UUID.randomUUID();
+        MetricaWalletDto shadowOnlyCandidate = metric("0xabc", "MOVEMENT_ALL", "copy_movement_all_events").toBuilder()
+                .decisionFinal(false)
+                .realJewel(MetricaWalletDto.RealJewelDto.builder()
+                        .strategyCode("MOVEMENT_ALL")
+                        .scopeType("strategy")
+                        .scopeValue("MOVEMENT_ALL")
+                        .recommendedExecutionMode("LIVE")
+                        .riskClass("B")
+                        .evidenceScore(70.0)
+                        .canMicroLive(false)
+                        .canLive(false)
+                        .hardBlockers(List.of())
+                        .softWarnings(List.of("SUMMARY_NOT_FINAL_LIVE_BLOCKED"))
+                        .copyGuard(MetricaWalletDto.CopyGuardDto.builder()
+                                .action("SHADOW_ONLY")
+                                .status("SHADOW_ONLY")
+                                .allowNewEntries(false)
+                                .allowReductions(true)
+                                .allowCloses(true)
+                                .build())
+                        .build())
+                .build();
+        UserCopyAllocationEntity existingMicroLive = UserCopyAllocationEntity.builder()
+                .id(505L)
+                .idUser(userId)
+                .walletId("0xabc")
+                .copyStrategyCode("MOVEMENT_ALL")
+                .copyMode("copy_all_metric_movements")
+                .scopeType("strategy")
+                .scopeValue("MOVEMENT_ALL")
+                .allocationPct(new java.math.BigDecimal("1.000000"))
+                .status(UserCopyAllocationEntity.Status.PAUSED_BY_RISK)
+                .statusReason("shadow_live_validation_failed action=SHADOW_ONLY status=SHADOW_ONLY")
+                .isActive(true)
+                .executionMode("MICRO_LIVE")
+                .linkedShadowAllocationId(18L)
+                .promotedFromShadowAt(OffsetDateTime.now().minusMinutes(5))
+                .updatedAt(OffsetDateTime.now().minusMinutes(5))
+                .build();
+        AtomicReference<List<UserCopyAllocationEntity>> saved = new AtomicReference<>(List.of());
+
+        UserCopyAllocationServiceImpl service = new UserCopyAllocationServiceImpl(
+                repository(saved, List.of(existingMicroLive)),
+                () -> List.of(activeUser(userId, 1)),
+                new CopyStrategyRuntimeRouter(),
+                shadowService(new AtomicInteger(), new AtomicReference<>(), false, false, new AtomicReference<>()),
+                defaultSymbolResolver()
+        );
+        setField(service, "entityManager", entityManager());
+
+        service.syncDistribution(List.of(shadowOnlyCandidate), List.of(shadowOnlyCandidate));
+
+        assertEquals(1, saved.get().size());
+        UserCopyAllocationEntity savedMicroLive = saved.get().get(0);
+        assertEquals("MICRO_LIVE", savedMicroLive.getExecutionMode());
+        assertEquals(UserCopyAllocationEntity.Status.ACTIVE, savedMicroLive.getStatus());
+        assertTrue(savedMicroLive.isActive());
+        assertEquals("MICRO_LIVE_NOT_PAUSED_BY_SHADOW_ONLY", savedMicroLive.getStatusReason());
+        assertEquals(18L, savedMicroLive.getLinkedShadowAllocationId());
+    }
+
+    @Test
     void syncDistributionAllowsDirectLiveOnlyWithExplicitPolicy() throws Exception {
         UUID userId = UUID.randomUUID();
         MetricaWalletDto liveCandidate = liveReadyMetric("0xabc", "MOVEMENT_ALL");
@@ -423,12 +488,29 @@ class UserCopyAllocationServiceImplTest {
     }
 
     private static UserCopyAllocationRepository repository(AtomicReference<List<UserCopyAllocationEntity>> saved) {
+        return repository(saved, List.of());
+    }
+
+    private static UserCopyAllocationRepository repository(
+            AtomicReference<List<UserCopyAllocationEntity>> saved,
+            List<UserCopyAllocationEntity> existingActive
+    ) {
         return proxy(UserCopyAllocationRepository.class, (method, args) -> {
             if ("findAllByIdUserAndEndsAtIsNull".equals(method.getName())) {
-                return List.of();
+                return existingActive;
             }
             if ("findAllByIdUserAndWalletIdIn".equals(method.getName())) {
-                return List.of();
+                if (existingActive == null || existingActive.isEmpty()) {
+                    return List.of();
+                }
+                return existingActive.stream()
+                        .filter(Objects::nonNull)
+                        .filter(e -> {
+                            @SuppressWarnings("unchecked")
+                            List<String> walletIds = (List<String>) args[1];
+                            return walletIds.contains(e.getWalletId());
+                        })
+                        .toList();
             }
             if ("saveAll".equals(method.getName()) || "saveAllAndFlush".equals(method.getName())) {
                 saved.set(copyEntities(args[0]));
