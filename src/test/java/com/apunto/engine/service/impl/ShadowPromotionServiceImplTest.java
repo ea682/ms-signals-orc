@@ -92,6 +92,39 @@ class ShadowPromotionServiceImplTest {
     }
 
     @Test
+    void emptyCopyPlanAndZeroShadowAllocationPctUsesUserDetailCapitalForFirstMicroLivePromotion() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        shadow.setAllocationPct(BigDecimal.ZERO);
+        shadow.setTargetLiveAllocationPct(null);
+        AtomicReference<UserWalletCopyPlanEntity> savedPlan = new AtomicReference<>();
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                savedPlan,
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertNotNull(savedPlan.get());
+        assertNotNull(savedAllocation.get());
+        assertEquals("MICRO_LIVE", savedAllocation.get().getExecutionMode());
+        assertEquals(new BigDecimal("0.000001"), savedAllocation.get().getAllocationPct());
+        assertEquals(new BigDecimal("100.00000000"), savedPlan.get().getAllocatedCapitalUsd());
+        assertTrue(audits.stream().anyMatch(a -> "CAPITAL_CONFIG_FOUND_FROM_USER_DETAIL".equals(a.getReasonDetails().get("capitalConfigReasonCode"))));
+        assertTrue(audits.stream().anyMatch(a -> "COPY_PLAN_CREATED".equals(a.getReasonDetails().get("copyPlanReasonCode"))));
+    }
+
+    @Test
     void insufficientShadowEvidenceDoesNotCreateAllocationAndAuditsReason() {
         UUID userId = UUID.randomUUID();
         ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
@@ -305,6 +338,80 @@ class ShadowPromotionServiceImplTest {
     }
 
     @Test
+    void doesNotPromoteWhenUserDetailCapitalIsNull() {
+        UUID userId = UUID.randomUUID();
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(readyShadow(userId, "MOVEMENT_ALL", "ALL")),
+                validation(5, 12, "4"),
+                activeUser(userId, true, null, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        service.promoteShadowToMicroLive();
+
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "NO_CAPITAL_CONFIG".equals(a.getReasonCode())
+                && "CAPITAL_CONFIG_MISSING_FROM_USER_DETAIL".equals(a.getReasonDetails().get("capitalConfigReasonCode"))));
+    }
+
+    @Test
+    void doesNotPromoteWhenCapitalAssetIsMissingOrInvalid() {
+        for (String capitalAsset : new String[]{null, "", "BTC"}) {
+            UUID userId = UUID.randomUUID();
+            AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+            List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+            ShadowPromotionServiceImpl service = service(
+                    List.of(readyShadow(userId, "MOVEMENT_ALL", "ALL")),
+                    validation(5, 12, "4"),
+                    activeUser(userId, true, 192, 5, capitalAsset),
+                    apiKey(userId, true),
+                    new AtomicReference<>(),
+                    savedAllocation,
+                    audits,
+                    (sourceSymbol, resolvedCapitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, resolvedCapitalAsset, resolvedCapitalAsset, false)
+            );
+
+            service.promoteShadowToMicroLive();
+
+            assertNull(savedAllocation.get());
+            assertTrue(audits.stream().anyMatch(a -> "NO_CAPITAL_CONFIG".equals(a.getReasonCode())
+                    && "CAPITAL_CONFIG_MISSING_FROM_USER_DETAIL".equals(a.getReasonDetails().get("capitalConfigReasonCode"))));
+        }
+    }
+
+    @Test
+    void doesNotPromoteWhenMaxWalletIsMissing() {
+        UUID userId = UUID.randomUUID();
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(readyShadow(userId, "MOVEMENT_ALL", "ALL")),
+                validation(5, 12, "4"),
+                activeUser(userId, true, 192, null, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        service.promoteShadowToMicroLive();
+
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "NO_CAPITAL_CONFIG".equals(a.getReasonCode())
+                && "CAPITAL_CONFIG_MISSING_FROM_USER_DETAIL".equals(a.getReasonDetails().get("capitalConfigReasonCode"))));
+    }
+
+    @Test
     void doesNotPromoteWhenMaxWalletReached() {
         UUID userId = UUID.randomUUID();
         AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
@@ -326,6 +433,94 @@ class ShadowPromotionServiceImplTest {
 
         assertNull(savedAllocation.get());
         assertTrue(audits.stream().anyMatch(a -> "MAX_WALLET_REACHED".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void existingCopyPlanIsReusedWithoutChangingIdentity() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        UserWalletCopyPlanEntity existingPlan = UserWalletCopyPlanEntity.builder()
+                .id(123L)
+                .idUser(userId)
+                .walletLc("0xabc")
+                .allocationPct(new BigDecimal("0.250000"))
+                .status("ACTIVE")
+                .active(true)
+                .createdAt(OffsetDateTime.now().minusDays(1))
+                .updatedAt(OffsetDateTime.now().minusDays(1))
+                .build();
+        AtomicReference<UserWalletCopyPlanEntity> savedPlan = new AtomicReference<>(existingPlan);
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "4"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                savedPlan,
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertEquals(123L, savedPlan.get().getId());
+        assertNotNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "COPY_PLAN_ALREADY_EXISTS".equals(a.getReasonDetails().get("copyPlanReasonCode"))));
+    }
+
+    @Test
+    void duplicateConstraintWhenCreatingCopyPlanIsRetriedAsPlanReuse() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        UserWalletCopyPlanEntity existingPlan = UserWalletCopyPlanEntity.builder()
+                .id(123L)
+                .idUser(userId)
+                .walletLc("0xabc")
+                .allocationPct(new BigDecimal("0.250000"))
+                .status("ACTIVE")
+                .active(true)
+                .createdAt(OffsetDateTime.now().minusDays(1))
+                .updatedAt(OffsetDateTime.now().minusDays(1))
+                .build();
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        AtomicBoolean firstFind = new AtomicBoolean(true);
+
+        ShadowPromotionServiceImpl service = new ShadowPromotionServiceImpl(
+                shadowRepository(List.of(shadow)),
+                validationRepository(validation(5, 12, "4")),
+                eventRepository(),
+                positionRepository(),
+                userRepository(activeUser(userId, true, 192, 5, "USDC").user()),
+                detailRepository(activeUser(userId, true, 192, 5, "USDC").detail()),
+                apiKeyRepository(apiKey(userId, true)),
+                proxy(UserWalletCopyPlanRepository.class, (method, args) -> {
+                    if ("findByIdUserAndWalletLc".equals(method.getName())) {
+                        return firstFind.getAndSet(false) ? Optional.empty() : Optional.of(existingPlan);
+                    }
+                    if ("saveAndFlush".equals(method.getName()) || "save".equals(method.getName())) {
+                        if (firstFind.get()) {
+                            throw new AssertionError("plan should be looked up before save");
+                        }
+                        throw new DataIntegrityViolationException("duplicate plan");
+                    }
+                    return unexpected(method);
+                }),
+                allocationRepository(savedAllocation, 0L),
+                auditRepository(audits),
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                promotionProperties()
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertNotNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "COPY_PLAN_ALREADY_EXISTS".equals(a.getReasonDetails().get("copyPlanReasonCode"))));
     }
 
     @Test
@@ -420,6 +615,77 @@ class ShadowPromotionServiceImplTest {
         assertEquals(12L, savedAllocation.get().getLinkedShadowAllocationId());
         assertTrue(audits.stream().anyMatch(a -> "SYMBOL_TARGET_NOT_AVAILABLE".equals(a.getReasonCode())));
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_CREATED".equals(a.getDecision())));
+    }
+
+    @Test
+    void dataRiskCopyGuardStatusBlocksEvenWithCapitalAndShadowEvidence() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        shadow.setCopyGuardStatus("DATA_RISK");
+        shadow.setLastValidationReason("DATA_RISK");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "4"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_NOT_READY_COPY_GUARD".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void existingMicroLiveAllocationIsNoopBeforeCapitalValidation() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        UserCopyAllocationEntity existing = UserCopyAllocationEntity.builder()
+                .id(778L)
+                .idUser(userId)
+                .walletId("0xabc")
+                .copyStrategyCode("MOVEMENT_ALL")
+                .scopeType("all")
+                .scopeValue("ALL")
+                .allocationPct(new BigDecimal("0.500000"))
+                .status(UserCopyAllocationEntity.Status.ACTIVE)
+                .isActive(true)
+                .executionMode("MICRO_LIVE")
+                .linkedShadowAllocationId(shadow.getId())
+                .promotedFromShadowAt(OffsetDateTime.now())
+                .build();
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>(existing);
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "4"),
+                activeUser(userId, true, null, null, null),
+                apiKey(userId, false),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(0, result.created());
+        assertEquals(1, result.skipped());
+        assertEquals(0, result.rejected());
+        assertEquals("PROMOTED_TO_MICRO_LIVE", shadow.getStatus());
+        assertEquals(778L, shadow.getLinkedLiveAllocationId());
+        assertTrue(audits.stream().noneMatch(a -> "NO_CAPITAL_CONFIG".equals(a.getReasonCode())));
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_PROMOTION_NOOP".equals(a.getDecision())
+                && "ALREADY_PROMOTED".equals(a.getReasonCode())));
     }
 
     @Test
@@ -581,7 +847,7 @@ class ShadowPromotionServiceImplTest {
         return validation;
     }
 
-    private static UserBundle activeUser(UUID userId, boolean binanceKeyActive, int capital, int maxWallet, String capitalAsset) {
+    private static UserBundle activeUser(UUID userId, boolean binanceKeyActive, Integer capital, Integer maxWallet, String capitalAsset) {
         UserEntity user = new UserEntity();
         user.setId(userId);
         user.setActivo(true);
@@ -659,10 +925,12 @@ class ShadowPromotionServiceImplTest {
 
     private static UserWalletCopyPlanRepository planRepository(AtomicReference<UserWalletCopyPlanEntity> savedPlan) {
         return proxy(UserWalletCopyPlanRepository.class, (method, args) -> {
-            if ("findByIdUserAndWalletLc".equals(method.getName())) return Optional.empty();
+            if ("findByIdUserAndWalletLc".equals(method.getName())) return Optional.ofNullable(savedPlan.get());
             if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
                 UserWalletCopyPlanEntity entity = (UserWalletCopyPlanEntity) args[0];
-                entity.setId(300L);
+                if (entity.getId() == null) {
+                    entity.setId(300L);
+                }
                 savedPlan.set(entity);
                 return entity;
             }
