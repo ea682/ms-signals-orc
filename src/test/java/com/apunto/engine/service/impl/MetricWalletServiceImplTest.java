@@ -45,6 +45,16 @@ class MetricWalletServiceImplTest {
     }
 
     @Test
+    void joyasDiscoveryCacheForcesSummaryEvenIfFullWasConfigured() throws Exception {
+        CapturingMetricClient client = new CapturingMetricClient(List.of(metricForHistory("0xabc")));
+        MetricWalletServiceImpl service = service(client, 30, 45, "full");
+
+        loadSnapshot(service, 300, 30);
+
+        assertEquals("summary", client.lastSimulation);
+    }
+
+    @Test
     void emptyJoyasResponseReturnsEmptySnapshotWithoutCallingLegacyEndpoint() throws Exception {
         CapturingMetricClient client = new CapturingMetricClient(List.of());
         MetricWalletServiceImpl service = service(client, 30, 45, "summary");
@@ -219,6 +229,7 @@ class MetricWalletServiceImplTest {
                 client,
                 new FakeAllocationService(),
                 new CopyStrategyRuntimeRouter(),
+                Optional.empty(),
                 300,
                 30,
                 1,

@@ -53,7 +53,7 @@ public class BinanceTargetSymbolResolver implements CopySymbolResolver {
         final Optional<BinanceFuturesSymbolCatalog.SymbolResolution> resolved = symbolCatalog.resolve(targetSymbol);
         if (resolved.isEmpty()) {
             log.warn(
-                    "copy.symbol_resolver.skipped sourceSymbol={} targetSymbol={} baseAsset={} capitalAsset={} reason=SYMBOL_TARGET_NOT_AVAILABLE",
+                    "event=copy.symbol_resolver.unavailable sourceSymbol={} targetSymbol={} baseAsset={} capitalAsset={} reasonCode=SYMBOL_TARGET_NOT_AVAILABLE",
                     safeLog(normalizedSource),
                     safeLog(targetSymbol),
                     safeLog(baseAsset),
@@ -77,7 +77,7 @@ public class BinanceTargetSymbolResolver implements CopySymbolResolver {
 
         if (!capital.equals(quoteAsset) || !capital.equals(marginAsset)) {
             log.warn(
-                    "copy.symbol_resolver.skipped sourceSymbol={} targetSymbol={} canonicalSymbol={} capitalAsset={} quoteAsset={} marginAsset={} reason=SYMBOL_TARGET_QUOTE_ASSET_MISMATCH",
+                    "event=copy.symbol_resolver.unavailable sourceSymbol={} targetSymbol={} canonicalSymbol={} capitalAsset={} quoteAsset={} marginAsset={} reasonCode=SYMBOL_TARGET_QUOTE_ASSET_MISMATCH",
                     safeLog(normalizedSource),
                     safeLog(targetSymbol),
                     safeLog(canonical),
@@ -97,7 +97,7 @@ public class BinanceTargetSymbolResolver implements CopySymbolResolver {
 
         final String finalTarget = canonical == null ? targetSymbol : canonical;
         log.info(
-                "copy.symbol_resolver.resolved sourceSymbol={} targetSymbol={} baseAsset={} capitalAsset={} quoteAsset={} cacheStale={}",
+                "event=copy.symbol_resolver.resolved sourceSymbol={} targetSymbol={} baseAsset={} capitalAsset={} quoteAsset={} cacheStale={}",
                 safeLog(normalizedSource),
                 safeLog(finalTarget),
                 safeLog(baseAsset),

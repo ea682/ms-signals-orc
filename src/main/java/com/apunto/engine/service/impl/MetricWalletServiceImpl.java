@@ -1,8 +1,10 @@
 package com.apunto.engine.service.impl;
 
 import com.apunto.engine.client.MetricWalletsInfoClient;
+import com.apunto.engine.dto.CopyExecutionAccountsDiagnostics;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
+import com.apunto.engine.service.CopyExecutionAccountsDiagnosticsService;
 import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
@@ -69,6 +71,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private final MetricWalletsInfoClient metricWalletsInfoClient;
     private final UserCopyAllocationService userCopyAllocationService;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
+    private final Optional<CopyExecutionAccountsDiagnosticsService> executionAccountsDiagnosticsService;
 
     private final AtomicReference<HistorySnapshot> lastKnownGoodHistory = new AtomicReference<>(HistorySnapshot.empty());
     private final AtomicLong lastKnownGoodWarnAtMs = new AtomicLong(0L);
@@ -79,6 +82,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             MetricWalletsInfoClient metricWalletsInfoClient,
             UserCopyAllocationService userCopyAllocationService,
             CopyStrategyRuntimeRouter copyStrategyRuntimeRouter,
+            Optional<CopyExecutionAccountsDiagnosticsService> executionAccountsDiagnosticsService,
             @Value("${metric-wallet.history.limit:300}") int historyLimit,
             @Value("${metric-wallet.history.dayz:20}") int dayzLimit,
             @Value("${metric-wallet.history.cache.max-size:1}") int cacheMaxSize,
@@ -107,6 +111,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         this.metricWalletsInfoClient = Objects.requireNonNull(metricWalletsInfoClient, "metricWalletsInfoClient");
         this.userCopyAllocationService = Objects.requireNonNull(userCopyAllocationService, "userCopyAllocationService");
         this.copyStrategyRuntimeRouter = Objects.requireNonNull(copyStrategyRuntimeRouter, "copyStrategyRuntimeRouter");
+        this.executionAccountsDiagnosticsService = executionAccountsDiagnosticsService == null
+                ? Optional.empty()
+                : executionAccountsDiagnosticsService;
         this.dayzLimit = dayzLimit;
 
         if (historyLimit <= 0) throw new IllegalArgumentException("metric-wallet.history.limit must be > 0");
@@ -125,7 +132,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         this.historySource = historySource == null || historySource.isBlank() ? "joyas" : historySource.trim().toLowerCase();
         this.joyasLimit = Math.max(1, joyasLimit);
         this.joyasDayz = Math.max(0, joyasDayz);
-        this.joyasSimulation = joyasSimulation == null || joyasSimulation.isBlank() ? "summary" : joyasSimulation.trim();
+        this.joyasSimulation = normalizeJoyasDiscoverySimulation(joyasSimulation);
         this.minHistoryDays = Math.max(0.0, minHistoryDays);
         this.copyGuardEnabled = copyGuardEnabled;
         this.copyGuardFailOpenOnMissingMetric = copyGuardFailOpenOnMissingMetric;
@@ -142,6 +149,18 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 "event=metric_wallets.config historyLimit={} historySource={} joyasLimit={} joyasDayz={} joyasSimulation={} minHistoryDays={} copyGuardEnabled={} copyGuardWindows={} copyGuardMinWindowPnlUsdt={} copyGuardMinTotalPnlUsdt={} copyGuardPauseWindowPnlUsdt={} copyGuardPauseTotalPnlUsdt={} copyGuardRequireWindowData={} copyGuardFailOpenOnMissingMetric={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={} syncDistributionEnabled={}",
                 this.historyLimit, this.historySource, this.joyasLimit, this.joyasDayz, this.joyasSimulation, this.minHistoryDays, this.copyGuardEnabled, this.copyGuardWindows, this.copyGuardMinWindowPnlUsdt, this.copyGuardMinTotalPnlUsdt, this.copyGuardPauseWindowPnlUsdt, this.copyGuardPauseTotalPnlUsdt, this.copyGuardRequireWindowData, this.copyGuardFailOpenOnMissingMetric, this.cacheMaxSize, this.cacheRefreshAfter, this.cacheExpireAfter, this.slowThreshold, this.syncDistributionEnabled
         );
+    }
+
+    private String normalizeJoyasDiscoverySimulation(String raw) {
+        String value = raw == null || raw.isBlank() ? "summary" : raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!"summary".equals(value)) {
+            log.warn(
+                    "event=metric_wallets.discovery_simulation_forced_summary requestedSimulation={} reason=FULL_JOYAS_NOT_ALLOWED_FOR_DISCOVERY_CACHE",
+                    value
+            );
+            return "summary";
+        }
+        return "summary";
     }
 
     @Override
@@ -463,6 +482,7 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         List<MetricaWalletDto> resp;
         try {
             if ("joyas".equals(historySource)) {
+                logExecutionAccountsDiagnosticsForJoyas();
                 log.info(
                         "event=metric_wallets.fetch_joyas_request path={} limit={} dayz={} simulation={}",
                         JOYAS_ENDPOINT,
@@ -564,6 +584,30 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         log.debug("event=metric_wallets.history_loaded source={} limit={} size={} durationMs={}", historySource, limit, size, durationMs);
         return HistorySnapshot.empty();
+    }
+
+    private void logExecutionAccountsDiagnosticsForJoyas() {
+        executionAccountsDiagnosticsService.ifPresent(service -> {
+            try {
+                CopyExecutionAccountsDiagnostics diagnostics = service.snapshot();
+                if (!diagnostics.hasExecutableAccounts()) {
+                    log.info(
+                            "event=metric_wallets.actionable_skipped reason=NO_EXECUTABLE_COPY_ACCOUNTS eligibleExecutionUsers={} activeExecutableAllocations={} reasonsIfZero={} discoverySimulation={} copyImpact=full_joyas_not_requested",
+                            diagnostics.eligibleExecutionUsers(),
+                            diagnostics.activeExecutableAllocations(),
+                            diagnostics.reasonsIfZero(),
+                            joyasSimulation
+                    );
+                }
+            } catch (RuntimeException ex) {
+                log.warn(
+                        "event=metric_wallets.actionable_diagnostics_failed reason=DIAGNOSTICS_UNAVAILABLE errClass={} errMsg=\"{}\" discoverySimulation={} copyImpact=summary_discovery_continues",
+                        ex.getClass().getSimpleName(),
+                        safeErr(ex),
+                        joyasSimulation
+                );
+            }
+        });
     }
 
     private HistoryResult getHistory(int limit) {

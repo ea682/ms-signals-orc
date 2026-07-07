@@ -13,6 +13,31 @@ import java.util.UUID;
 @Repository
 public interface ShadowCopyAllocationRepository extends JpaRepository<ShadowCopyAllocationEntity, Long> {
 
+    @Query(value = """
+            select s.*
+            from futuros_operaciones.shadow_copy_allocation s
+            where s.is_active = true
+              and s.ends_at is null
+              and s.linked_live_allocation_id is null
+              and (
+                    s.status in (
+                        'SHADOW_ACTIVE',
+                        'SHADOW_WARNING',
+                        'SHADOW_VALIDATED',
+                        'SHADOW_READY_FOR_MICRO_LIVE',
+                        'VALIDATED',
+                        'LIVE_ELIGIBLE'
+                    )
+                    or (
+                        s.status = 'SHADOW_ONLY'
+                        and s.last_validation_reason = 'SUMMARY_NOT_FINAL_LIVE_BLOCKED'
+                    )
+              )
+            order by s.strategy_score desc nulls last, s.decision_score desc nulls last, s.updated_at desc nulls last
+            limit :limit
+            """, nativeQuery = true)
+    List<ShadowCopyAllocationEntity> findPromotionCandidates(@Param("limit") int limit);
+
     @Query("""
             select s
             from ShadowCopyAllocationEntity s

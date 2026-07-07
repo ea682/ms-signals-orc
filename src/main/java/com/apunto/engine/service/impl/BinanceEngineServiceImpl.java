@@ -100,7 +100,7 @@ import static java.math.BigDecimal.ONE;
 public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCopyExecutionService {
 
     private static final double DEFAULT_BASE_CAPITAL = 1_000.0;
-    private static final int MICRO_LIVE_MAX_CAPITAL_USDT = 100;
+    private static final int DEFAULT_MICRO_LIVE_MAX_CAPITAL_USDT = 100;
     private static final BigDecimal MIN_NOTIONAL_FALLBACK = new BigDecimal("5");
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal REBALANCE_TOLERANCE_PCT = new BigDecimal("0.02");
@@ -127,6 +127,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_CLOSE_SCHEDULED = "event=operation.close.scheduled originId={} users={} scheduled={} delayBetweenMs={}";
 
     private static final String LOG_OPEN_SKIP_BUDGET = "event=operation.open.skip_budget originId={} userId={} wallet={} symbol={} marginRequired={} marginBudget={} usedMargin={}";
+
+    @Value("${copy.micro-live.max-capital-usd:${copy.micro-live.max-capital-amount:100}}")
+    private int microLiveMaxCapitalUsd = DEFAULT_MICRO_LIVE_MAX_CAPITAL_USDT;
 
 
     private static final String LOG_PREP_INVALID_METRIC = "event=operation.open.invalid_metric originId={} userId={} wallet={} reason=invalid_capitalShare";
@@ -1706,7 +1709,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 resolveCopyCapital(userDetail, allocation),
                 share,
                 executionModeOf(allocation),
-                resolveCapitalAsset(userDetail).name()
+                resolveCapitalAsset(userDetail).name(),
+                microLiveMaxCapitalUsd
         ).amount();
     }
 
@@ -1715,12 +1719,23 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     static StrategyMarginBudget resolveStrategyMarginBudget(int copyCapital, double capitalShare, String executionMode, String capitalCurrency) {
+        return resolveStrategyMarginBudget(copyCapital, capitalShare, executionMode, capitalCurrency, DEFAULT_MICRO_LIVE_MAX_CAPITAL_USDT);
+    }
+
+    static StrategyMarginBudget resolveStrategyMarginBudget(
+            int copyCapital,
+            double capitalShare,
+            String executionMode,
+            String capitalCurrency,
+            int microLiveMaxCapitalUsd
+    ) {
         final int safeCopyCapital = Math.max(0, copyCapital);
+        final int safeMicroLiveMax = Math.max(0, microLiveMaxCapitalUsd);
         final String mode = UserCopyAllocationEntity.normalizeExecutionMode(executionMode);
         final String safeCurrency = FuturesCapitalAsset.fromNullable(capitalCurrency).name();
         final BigDecimal amount;
         if ("MICRO_LIVE".equals(mode)) {
-            amount = BigDecimal.valueOf(Math.min(safeCopyCapital, MICRO_LIVE_MAX_CAPITAL_USDT))
+            amount = BigDecimal.valueOf(Math.min(safeCopyCapital, safeMicroLiveMax))
                     .setScale(12, RoundingMode.HALF_UP);
         } else {
             final double safeShare = Double.isFinite(capitalShare)
@@ -1752,7 +1767,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
         int resolved = capital == null ? 0 : Math.max(0, capital);
         if (isMicroLiveMode(allocation)) {
-            return Math.min(resolved, MICRO_LIVE_MAX_CAPITAL_USDT);
+            return Math.min(resolved, Math.max(0, microLiveMaxCapitalUsd));
         }
         return resolved;
     }
@@ -3428,6 +3443,42 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 slippage == null ? "NA" : plain(slippage.adverseSlippageUsd()),
                 slippage == null || slippage.status() == null ? "NA" : slippage.status().name(),
                 leverage.logFields());
+        log.info("event=copy.latency.measured service=ms-signals-orc source=HYPERLIQUID target=BINANCE traceId={} walletId={} userCopyAllocationId={} strategy={} sourceSymbol={} targetSymbol={} executionMode={} result={} reasonCode={} totalCopyLatencyMs={} decisionLatencyMs={} submitLatencyMs={} exchangeAckLatencyMs={} binanceResponseToPersistMs={} dbPersistMs={} measuredFrom=EVENT_RECEIVED_NS",
+                safeLog(traceId),
+                safeLog(walletId),
+                allocation == null ? "NA" : allocation.getId(),
+                allocation == null ? "NA" : safeLog(allocation.getCopyStrategyCode()),
+                safeLog(symbol),
+                order == null ? "NA" : safeLog(order.getSymbol()),
+                allocation == null ? "NA" : safeLog(allocation.getExecutionMode()),
+                safeLog(result),
+                safeLog(reasonCode),
+                timing.totalMs(),
+                timing.stageMs(CopyFlowTiming.Stage.CLASSIFICATION)
+                        + timing.stageMs(CopyFlowTiming.Stage.PRICE_RESOLUTION)
+                        + timing.stageMs(CopyFlowTiming.Stage.COPY_GUARD),
+                timing.stageMs(CopyFlowTiming.Stage.PRE_BINANCE),
+                timing.stageMs(CopyFlowTiming.Stage.BINANCE_HTTP),
+                timing.stageMs(CopyFlowTiming.Stage.BINANCE_RESPONSE_TO_PERSIST),
+                timing.stageMs(CopyFlowTiming.Stage.DB_PERSIST));
+        if (slippage != null) {
+            log.info("event=copy.slippage.measured service=ms-signals-orc source=HYPERLIQUID target=BINANCE traceId={} walletId={} userCopyAllocationId={} strategy={} sourceSymbol={} targetSymbol={} side={} executionMode={} sourcePrice={} targetFillPrice={} rawSlippageBps={} adverseSlippageBps={} rawSlippageUsd={} adverseSlippageUsd={} slippageStatus={}",
+                    safeLog(traceId),
+                    safeLog(walletId),
+                    allocation == null ? "NA" : allocation.getId(),
+                    allocation == null ? "NA" : safeLog(allocation.getCopyStrategyCode()),
+                    safeLog(symbol),
+                    order == null ? "NA" : safeLog(order.getSymbol()),
+                    side == null ? "NA" : side.name(),
+                    allocation == null ? "NA" : safeLog(allocation.getExecutionMode()),
+                    plain(slippage.expectedPrice()),
+                    plain(slippage.executedPrice()),
+                    plain(slippage.rawSlippageBps()),
+                    plain(slippage.adverseSlippageBps()),
+                    plain(slippage.rawSlippageUsd()),
+                    plain(slippage.adverseSlippageUsd()),
+                    slippage.status() == null ? "NA" : slippage.status().name());
+        }
     }
 
     private BigDecimal executionPrice(BinanceFuturesOrderClientResponse order) {
@@ -3814,7 +3865,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 copyCapital,
                 capitalShare,
                 executionModeOf(allocation),
-                capitalAsset.name()
+                capitalAsset.name(),
+                microLiveMaxCapitalUsd
         );
         final BigDecimal walletMarginBudget = strategyBudget.amount();
         if (walletMarginBudget.compareTo(ZERO) <= 0) {
@@ -5299,7 +5351,49 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 return buildShadowOrderResponse(dto, priceRef);
             }
             try {
-                return procesBinanceService.operationPosition(dto);
+                long submittedNs = System.nanoTime();
+                log.info("event=copy.execution.order_submitted exchange=BINANCE traceId={} userId={} walletId={} userCopyAllocationId={} strategy={} symbol={} side={} positionSide={} executionMode={} reduceOnly={}",
+                        traceId,
+                        dto == null ? null : dto.getUserId(),
+                        dto == null ? null : dto.getWalletId(),
+                        allocation == null ? null : allocation.getId(),
+                        allocation == null ? null : allocation.getCopyStrategyCode(),
+                        dto == null ? null : dto.getSymbol(),
+                        dto == null ? null : dto.getSide(),
+                        dto == null ? null : dto.getPositionSide(),
+                        executionModeOf(allocation),
+                        dto != null && dto.isReduceOnly());
+                BinanceFuturesOrderClientResponse response = procesBinanceService.operationPosition(dto);
+                long ackLatencyMs = Duration.ofNanos(Math.max(0L, System.nanoTime() - submittedNs)).toMillis();
+                log.info("event=copy.execution.order_ack exchange=BINANCE traceId={} userId={} walletId={} userCopyAllocationId={} strategy={} symbol={} orderId={} clientOrderId={} status={} executionMode={} ackLatencyMs={}",
+                        traceId,
+                        dto == null ? null : dto.getUserId(),
+                        dto == null ? null : dto.getWalletId(),
+                        allocation == null ? null : allocation.getId(),
+                        allocation == null ? null : allocation.getCopyStrategyCode(),
+                        dto == null ? null : dto.getSymbol(),
+                        response == null ? null : response.getOrderId(),
+                        response == null ? null : response.getClientOrderId(),
+                        response == null ? null : response.getStatus(),
+                        executionModeOf(allocation),
+                        ackLatencyMs);
+                if (response != null && positive(copyTradingMapper.resolveFilledQty(response))) {
+                    log.info("event=copy.execution.order_filled exchange=BINANCE traceId={} userId={} walletId={} userCopyAllocationId={} strategy={} symbol={} orderId={} clientOrderId={} status={} executionMode={} fillLatencyMs={} fillPrice={} executedQty={}",
+                            traceId,
+                            dto == null ? null : dto.getUserId(),
+                            dto == null ? null : dto.getWalletId(),
+                            allocation == null ? null : allocation.getId(),
+                            allocation == null ? null : allocation.getCopyStrategyCode(),
+                            dto == null ? null : dto.getSymbol(),
+                            response.getOrderId(),
+                            response.getClientOrderId(),
+                            response.getStatus(),
+                            executionModeOf(allocation),
+                            ackLatencyMs,
+                            executionPrice(response),
+                            copyTradingMapper.resolveFilledQty(response));
+                }
+                return response;
             } catch (BinanceApiReadinessException ex) {
                 blockLiveAllocationForApiReadiness(dto, allocation, traceId, ex);
                 if (timing != null) {
