@@ -142,6 +142,41 @@ copy:
   micro-live:
     enabled: ${COPY_MICRO_LIVE_ENABLED:true}
     max-capital-amount: ${COPY_MICRO_LIVE_MAX_CAPITAL_AMOUNT:100}
+    initial-capital-usd: ${COPY_MICRO_LIVE_INITIAL_CAPITAL_USD:100}
+    max-capital-usd: ${COPY_MICRO_LIVE_MAX_CAPITAL_USD:100}
+  promotion:
+    enabled: ${COPY_PROMOTION_ENABLED:true}
+    from-shadow-enabled: ${COPY_PROMOTION_FROM_SHADOW_ENABLED:true}
+    candidate-limit: ${COPY_PROMOTION_CANDIDATE_LIMIT:100}
+    min-shadow-days: ${COPY_PROMOTION_MIN_SHADOW_DAYS:3}
+    min-shadow-events: ${COPY_PROMOTION_MIN_SHADOW_EVENTS:10}
+    min-shadow-closed-positions: ${COPY_PROMOTION_MIN_SHADOW_CLOSED_POSITIONS:3}
+    min-shadow-coverage-pct: ${COPY_PROMOTION_MIN_SHADOW_COVERAGE_PCT:95}
+    require-active-wallet: ${COPY_PROMOTION_REQUIRE_ACTIVE_WALLET:true}
+    max-inactive-days: ${COPY_PROMOTION_MAX_INACTIVE_DAYS:3}
+    require-positive-shadow-pnl: ${COPY_PROMOTION_REQUIRE_POSITIVE_SHADOW_PNL:false}
+    min-shadow-net-pnl-usd: ${COPY_PROMOTION_MIN_SHADOW_NET_PNL_USD:0}
+    max-shadow-drawdown-pct: ${COPY_PROMOTION_MAX_SHADOW_DRAWDOWN_PCT:20}
+    require-copy-guard-open: ${COPY_PROMOTION_REQUIRE_COPY_GUARD_OPEN:true}
+    allow-shadow-only-summary: ${COPY_PROMOTION_ALLOW_SHADOW_ONLY_SUMMARY:false}
+    micro-live-initial-capital-usd: ${COPY_MICRO_LIVE_INITIAL_CAPITAL_USD:100}
+    micro-live-max-capital-usd: ${COPY_MICRO_LIVE_MAX_CAPITAL_USD:100}
+    job:
+      enabled: ${COPY_PROMOTION_JOB_ENABLED:true}
+      initial-delay-ms: ${COPY_PROMOTION_JOB_INITIAL_DELAY_MS:30000}
+      fixed-delay-ms: ${COPY_PROMOTION_JOB_FIXED_DELAY_MS:120000}
+  live-promotion:
+    enabled: ${COPY_LIVE_PROMOTION_ENABLED:true}
+    candidate-limit: ${COPY_LIVE_PROMOTION_CANDIDATE_LIMIT:100}
+    min-micro-days: ${COPY_LIVE_PROMOTION_MIN_MICRO_DAYS:7}
+    min-micro-orders: ${COPY_LIVE_PROMOTION_MIN_MICRO_ORDERS:10}
+    max-error-rate-pct: ${COPY_LIVE_PROMOTION_MAX_ERROR_RATE_PCT:5}
+    require-positive-net-pnl: ${COPY_LIVE_PROMOTION_REQUIRE_POSITIVE_NET_PNL:false}
+    min-net-pnl-usd: ${COPY_LIVE_PROMOTION_MIN_NET_PNL_USD:0}
+    job:
+      enabled: ${COPY_LIVE_PROMOTION_JOB_ENABLED:true}
+      initial-delay-ms: ${COPY_LIVE_PROMOTION_JOB_INITIAL_DELAY_MS:45000}
+      fixed-delay-ms: ${COPY_LIVE_PROMOTION_JOB_FIXED_DELAY_MS:300000}
   capital-allocator:
     enabled: ${COPY_CAPITAL_ALLOCATOR_ENABLED:true}
     scale-enabled: ${COPY_CAPITAL_ALLOCATOR_SCALE_ENABLED:false}
