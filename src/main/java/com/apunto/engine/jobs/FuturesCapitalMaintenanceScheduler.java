@@ -21,7 +21,7 @@ public class FuturesCapitalMaintenanceScheduler {
 
     @Scheduled(
             initialDelayString = "${futures.capital-maintenance.initial-delay-ms:30000}",
-            fixedDelayString = "${futures.capital-maintenance.fixed-delay-ms:600000}"
+            fixedDelayString = "${futures.capital-maintenance.fixed-delay-ms:6000}"
     )
     public void run() {
         if (!enabled) {

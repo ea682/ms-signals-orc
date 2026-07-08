@@ -13,6 +13,7 @@ import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
+import com.apunto.engine.service.copy.CopyRuntimeGuardPolicy;
 import com.apunto.engine.shared.util.CopyLogAdvice;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -37,9 +38,10 @@ public class HyperliquidCopyCandidateResolver {
     private final ActiveCopyOperationCache activeCopyOperationCache;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     private final MetricWalletService metricWalletService;
+    private final CopyRuntimeGuardPolicy copyRuntimeGuardPolicy;
 
     @Value("${operation.job.ingest.filter-by-wallet-allocation:${copy.job.ingest.filter-by-wallet-allocation:true}}")
-    private boolean filterByWalletAllocation;
+    private boolean filterByWalletAllocation = true;
 
     @Value("${operation.job.ingest.fallback-all-users-on-empty-allocation:${copy.job.ingest.fallback-all-users-on-empty-allocation:false}}")
     private boolean fallbackAllUsersOnEmptyAllocation;
@@ -52,13 +54,15 @@ public class HyperliquidCopyCandidateResolver {
             UserCopyAllocationService userCopyAllocationService,
             ActiveCopyOperationCache activeCopyOperationCache,
             CopyStrategyRuntimeRouter copyStrategyRuntimeRouter,
-            MetricWalletService metricWalletService
+            MetricWalletService metricWalletService,
+            CopyRuntimeGuardPolicy copyRuntimeGuardPolicy
     ) {
         this.userDetailCachedService = userDetailCachedService;
         this.userCopyAllocationService = userCopyAllocationService;
         this.activeCopyOperationCache = activeCopyOperationCache;
         this.copyStrategyRuntimeRouter = copyStrategyRuntimeRouter;
         this.metricWalletService = metricWalletService;
+        this.copyRuntimeGuardPolicy = copyRuntimeGuardPolicy;
     }
 
     public CandidateUsers resolve(HyperliquidMappedDelta mappedDelta, CopyJobAction action) {
@@ -153,7 +157,12 @@ public class HyperliquidCopyCandidateResolver {
     }
 
     private CandidateUsers allocationUsers(OperacionDto operation, List<UserDetailDto> usersCached, CopyJobAction action, HyperliquidDeltaType deltaType) {
+        long startedNs = System.nanoTime();
         String walletId = operation.getIdCuenta();
+        String side = operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
+        String symbol = operation.getParSymbol();
+        log.info("event=copy.candidate.resolve.started wallet={} symbol={} side={} eventType={} deltaType={}",
+                safeLog(walletId), safeLog(symbol), safeLog(side), action, deltaType);
         if (!filterByWalletAllocation) {
             return new CandidateUsers(usersCached, usersCached, "all_users_config");
         }
@@ -165,19 +174,42 @@ public class HyperliquidCopyCandidateResolver {
         }
 
         List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWallet(walletId);
-        String side = operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
         Map<String, CopyStrategyGuardDecision> guardByProfile = new HashMap<>();
-        Set<UUID> activeUserIds = activeAllocations.stream()
-                .filter(Objects::nonNull)
-                .filter(a -> copyStrategyRuntimeRouter.allocationAppliesToEvent(a, action, deltaType, side, operation.getParSymbol()))
-                .filter(a -> guardAllowsNewEntry(a, guardByProfile))
-                .map(UserCopyAllocationEntity::getIdUser)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toUnmodifiableSet());
+        Set<UUID> activeUserIds = new java.util.LinkedHashSet<>();
+        for (UserCopyAllocationEntity allocation : activeAllocations) {
+            if (allocation == null) {
+                continue;
+            }
+            log.info("event=copy.candidate.resolve.allocation_seen userCopyAllocationId={} executionMode={} status={} isActive={} endsAt={} strategyCode={}",
+                    allocation.getId(),
+                    safeLog(allocation.getExecutionMode()),
+                    allocation.getStatus(),
+                    allocation.isActive(),
+                    allocation.getEndsAt(),
+                    safeLog(allocation.getCopyStrategyCode()));
+            if (!copyStrategyRuntimeRouter.allocationAppliesToEvent(allocation, action, deltaType, side, symbol)) {
+                log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode=STRATEGY_SCOPE_NOT_MATCHED",
+                        allocation.getId(), safeLog(allocation.getExecutionMode()));
+                continue;
+            }
+            CopyRuntimeGuardPolicy.Decision guardDecision = guardAllowsNewEntry(allocation, guardByProfile);
+            if (!guardDecision.allowed()) {
+                log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode={}",
+                        allocation.getId(), safeLog(allocation.getExecutionMode()), safeLog(guardDecision.reasonCode()));
+                continue;
+            }
+            if (allocation.getIdUser() != null) {
+                activeUserIds.add(allocation.getIdUser());
+            }
+            log.info("event=copy.candidate.resolve.allocation_matched userCopyAllocationId={} executionMode={} reasonCode={}",
+                    allocation.getId(), safeLog(allocation.getExecutionMode()), safeLog(guardDecision.reasonCode()));
+        }
         if (activeUserIds.isEmpty()) {
             log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} side={} deltaType={} action={} activeAllocations={} matchingAllocationUsers=0 usersCached={} eligibleUsers=0 fallbackAllUsers={} reasonCode=ALLOCATION_EMPTY {}",
                     safeLog(walletId), safeLog(side), deltaType, action, activeAllocations.size(), usersCached.size(), fallbackAllUsersOnEmptyAllocation,
                     CopyLogAdvice.fields("ALLOCATION_EMPTY", CopyLogAdvice.context(activeAllocations.size(), 0, 0, 0, null, null, 0, "allocation")));
+            log.info("event=copy.candidate.resolve.finished usersCached={} activeAllocations={} eligibleUsers=0 eligibleUserIds= elapsedMs={}",
+                    usersCached.size(), activeAllocations.size(), elapsedMs(startedNs));
             List<UserDetailDto> eligible = fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
             return new CandidateUsers(usersCached, eligible, "allocation_empty", "ALLOCATION_EMPTY");
         }
@@ -190,12 +222,15 @@ public class HyperliquidCopyCandidateResolver {
 
         log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} side={} deltaType={} action={} activeAllocations={} matchingHealthyAllocationUsers={} usersCached={} eligibleUsers={} eligibleUserIds={}",
                 safeLog(walletId), safeLog(side), deltaType, action, activeAllocations.size(), activeUserIds.size(), usersCached.size(), eligible.size(), userIdsCsv(eligible));
+        log.info("event=copy.candidate.resolve.finished usersCached={} activeAllocations={} eligibleUsers={} eligibleUserIds={} elapsedMs={}",
+                usersCached.size(), activeAllocations.size(), eligible.size(), userIdsCsv(eligible), elapsedMs(startedNs));
         return new CandidateUsers(usersCached, eligible, "allocation");
     }
 
-    private boolean guardAllowsNewEntry(UserCopyAllocationEntity allocation, Map<String, CopyStrategyGuardDecision> guardByProfile) {
+    private CopyRuntimeGuardPolicy.Decision guardAllowsNewEntry(UserCopyAllocationEntity allocation, Map<String, CopyStrategyGuardDecision> guardByProfile) {
+        long startedNs = System.nanoTime();
         if (allocation == null) {
-            return false;
+            return new CopyRuntimeGuardPolicy.Decision(false, "ALLOCATION_MISSING", "runtime_allocation");
         }
         String profileKey = copyStrategyRuntimeRouter.allocationKey(allocation);
         if (profileKey == null) {
@@ -207,25 +242,21 @@ public class HyperliquidCopyCandidateResolver {
                         allocation.getCopyStrategyCode()
                 )
         );
-        if (decision.allowed()) {
-            return true;
+        CopyRuntimeGuardPolicy.Decision runtimeDecision = copyRuntimeGuardPolicy.decide(allocation, decision);
+        log.info("event=copy.guard.decision userCopyAllocationId={} executionMode={} decision={} reasonCode={} guardSource={} elapsedMs={}",
+                allocation.getId(),
+                safeLog(allocation.getExecutionMode()),
+                runtimeDecision.allowed() ? "ALLOW" : "BLOCK",
+                safeLog(runtimeDecision.reasonCode()),
+                safeLog(runtimeDecision.guardSource()),
+                elapsedMs(startedNs));
+        if (!runtimeDecision.allowed()) {
+            log.warn("event=hyperliquid.direct_copy.guard_block allocationId={} userId={} wallet={} strategy={} status={} reason={} detail={} decision=BLOCK reasonCode={} mutation=none hotPathDbWrite=false",
+                    allocation.getId(), allocation.getIdUser(), safeLog(allocation.getWalletId()),
+                    safeLog(allocation.getCopyStrategyCode()), safeLog(decision.statusWhenBlocked()),
+                    safeLog(decision.reason()), safeLog(decision.detail()), safeLog(runtimeDecision.reasonCode()));
         }
-        OffsetDateTime cooldownUntil = copyGuardCooldownHours <= 0
-                ? null
-                : OffsetDateTime.now().plusHours(copyGuardCooldownHours);
-        userCopyAllocationService.markGuardBlocked(
-                allocation.getIdUser(),
-                allocation.getWalletId(),
-                allocation.getCopyStrategyCode(),
-                decision.statusWhenBlocked(),
-                decision.reason() + ": " + decision.detail(),
-                cooldownUntil
-        );
-        log.warn("event=hyperliquid.direct_copy.guard_block allocationId={} userId={} wallet={} strategy={} status={} reason={} detail={} cooldownUntil={}",
-                allocation.getId(), allocation.getIdUser(), safeLog(allocation.getWalletId()),
-                safeLog(allocation.getCopyStrategyCode()), safeLog(decision.statusWhenBlocked()),
-                safeLog(decision.reason()), safeLog(decision.detail()), cooldownUntil);
-        return false;
+        return runtimeDecision;
     }
 
     private List<UserDetailDto> filterUsersById(List<UserDetailDto> usersCached, Set<String> userIds) {
@@ -262,6 +293,10 @@ public class HyperliquidCopyCandidateResolver {
         }
         String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
         return clean.length() > 1000 ? clean.substring(0, 1000) : clean;
+    }
+
+    private long elapsedMs(long startedNs) {
+        return (System.nanoTime() - startedNs) / 1_000_000L;
     }
 
     public record CandidateUsers(
