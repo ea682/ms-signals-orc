@@ -120,6 +120,20 @@ public class ActiveCopyOperationCacheImpl implements ActiveCopyOperationCache {
     }
 
     @Override
+    public List<CopyOperationDto> activeOperationsByUser(String userId) {
+        String normalizedUser = normalize(userId);
+        if (normalizedUser == null) {
+            return List.of();
+        }
+        return byRuntimeKey.values().stream()
+                .filter(ref -> ref.status() == RuntimeCopyStatus.ACTIVE)
+                .filter(ref -> normalizedUser.equals(normalize(ref.userId())))
+                .map(RuntimeCopyRef::operation)
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    @Override
     public Set<String> activeUserIds(String originId) {
         String normalizedOrigin = normalize(originId);
         if (normalizedOrigin == null) {

@@ -23,6 +23,8 @@ public interface ActiveCopyOperationCache {
 
     List<CopyOperationDto> activeOperationsByUserAndWallet(String userId, String walletId);
 
+    List<CopyOperationDto> activeOperationsByUser(String userId);
+
     Set<String> activeUserIds(String originId);
 
     Set<String> activeUserIdsByWallet(String walletId);
