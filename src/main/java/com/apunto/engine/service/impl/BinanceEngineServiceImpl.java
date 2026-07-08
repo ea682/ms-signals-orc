@@ -131,8 +131,26 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private static final String LOG_OPEN_SKIP_BUDGET = "event=operation.open.skip_budget originId={} userId={} wallet={} symbol={} marginRequired={} marginBudget={} usedMargin={}";
 
-    @Value("${copy.micro-live.max-capital-usd:${copy.micro-live.max-capital-amount:100}}")
+    @Value("${copy.micro-live.total-capital-usd:${copy.micro-live.max-capital-usd:${copy.micro-live.max-capital-amount:100}}}")
     private int microLiveMaxCapitalUsd = DEFAULT_MICRO_LIVE_MAX_CAPITAL_USDT;
+
+    @Value("${copy.micro-live.max-margin-per-operation-usd:20}")
+    private BigDecimal microLiveMaxMarginPerOperationUsd;
+
+    @Value("${copy.micro-live.max-concurrent-positions:5}")
+    private int microLiveMaxConcurrentPositions;
+
+    @Value("${copy.micro-live.margin-buffer-pct:0.03}")
+    private BigDecimal microLiveMarginBufferPct;
+
+    @Value("${copy.live.require-source-exposure:true}")
+    private boolean liveRequireSourceExposure;
+
+    @Value("${copy.live.max-source-exposure-pct:0.25}")
+    private BigDecimal liveMaxSourceExposurePct;
+
+    @Value("${copy.runtime.forbid-db-in-live-hot-path:true}")
+    private boolean forbidDbInLiveHotPath;
 
 
     private static final String LOG_PREP_INVALID_METRIC = "event=operation.open.invalid_metric originId={} userId={} wallet={} reason=invalid_capitalShare";
@@ -460,9 +478,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             reconcileWalletBasketForUser(event, userDetail);
         } else if (reconcileOnOpen) {
             final long existingNs = System.nanoTime();
-            final List<CopyOperationDto> existingCopies = copyOperationService.findActiveOperationsForUserOrigin(originId, userId.toString());
-            log.info("event=copy.job.phase action=OPEN phase=load_existing_copy originId={} userId={} elapsedMs={}",
-                    originId, userId, elapsedMsSince(existingNs));
+            final List<CopyOperationDto> existingCopies = loadExistingCopiesForHotPath(originId, userId.toString(), originOperation.getIdCuenta(), originOperation.getParSymbol(), "open_precheck");
+            log.info("event=copy.job.phase action=OPEN phase=load_existing_copy originId={} userId={} source={} elapsedMs={}",
+                    originId, userId, forbidDbInLiveHotPath ? "runtime_cache" : "db_fallback_allowed", elapsedMsSince(existingNs));
             if (!existingCopies.isEmpty()) {
                 log.info("event=copy.open.trigger_scoped action=reconcile_existing_copy originId={} userId={} symbol={} copies={}",
                         originId, userId, originOperation.getParSymbol(), existingCopies.size());
@@ -813,13 +831,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 continue;
             }
 
-            CopyOperationDto existingCopy = copyOperationService.findOperationForAllocation(
-                    originId,
-                    userId,
-                    allocationId,
-                    strategyCode,
-                    typeOperation
-            );
+            CopyOperationDto existingCopy = activeCopyOperationCache.activeOperation(originId, userId, allocationId, strategyCode, originOperation.getParSymbol(), typeOperation);
+            if (existingCopy == null && !forbidDbInLiveHotPath) {
+                existingCopy = copyOperationService.findOperationForAllocation(
+                        originId,
+                        userId,
+                        allocationId,
+                        strategyCode,
+                        typeOperation
+                );
+            }
             if (existingCopy != null) {
                 if (existingCopy.isActive()) {
                     activeCopyOperationCache.markOpen(existingCopy);
@@ -880,6 +901,15 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 log.info("event=copy.open.order.send traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} qty={} positionSide={} reduceOnly={} clientOrderId={}",
                         allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol,
                         prepared.dto.getQuantity(), prepared.dto.getPositionSide(), prepared.dto.isReduceOnly(), prepared.dto.getClientOrderId());
+                log.info("event=copy.dispatch.order_intent userCopyAllocationId={} executionMode={} sourceSymbol={} targetSymbol={} side={} copyMarginUsd={} copyNotionalUsd={} qty={}",
+                        allocationId,
+                        executionModeOf(allocation),
+                        safeLog(originOperation.getParSymbol()),
+                        safeLog(prepared.symbol),
+                        prepared.dto.getPositionSide(),
+                        prepared.notional.divide(BigDecimal.valueOf(prepared.leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP).toPlainString(),
+                        prepared.notional.toPlainString(),
+                        prepared.dto.getQuantity());
 
                 order = executeOrShadow(prepared.dto, prepared.entryPrice, allocation, allocationTraceId);
                 if (!isValidOrderResponse(order)) {
@@ -891,6 +921,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
                 log.info("event=copy.open.order.ok traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} orderId={} elapsedMs={}",
                         allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol, order.getOrderId(), elapsedMsSince(sendNs));
+                log.info("event=copy.dispatch.order_submitted userCopyAllocationId={} executionMode={} clientOrderId={} elapsedMs={}",
+                        allocationId, executionModeOf(allocation), prepared.dto.getClientOrderId(), elapsedMsSince(sendNs));
                 final CopyLeverageSnapshot leverageSnapshot = buildDirectOpenLeverageSnapshot(originOperation, prepared, order, allocation);
                 recordCopyOperationEvent(
                         "OPEN",
@@ -924,6 +956,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             } catch (SkipExecutionException skip) {
                 skipped++;
                 activeCopyOperationCache.forgetPending(originId, userId, allocationTraceId, skip.getReasonCode());
+                recordRejectedCopyOperationEvent(event, allocation, userId, walletId, originOperation.getParSymbol(), typeOperation, skip.getReasonCode(), allocationTraceId, "direct_open_rejected");
+                log.info("event=copy.dispatch.order_rejected userCopyAllocationId={} executionMode={} reasonCode={} elapsedMs=0",
+                        allocationId, executionModeOf(allocation), safeLog(skip.getReasonCode()));
                 log.info("event=copy_open_skipped reasonCode={} traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} reason=\"{}\" details=\"{}\"",
                         safeLog(skip.getReasonCode()), allocationTraceId, originId, userId, allocationId, strategyCode, walletId, symbol,
                         safeLog(skip.getReason()), safeLog(skip.getDetails()));
@@ -961,6 +996,24 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return allocationScopedRuntime;
     }
 
+    private List<CopyOperationDto> loadExistingCopiesForHotPath(String originId,
+                                                                String userId,
+                                                                String walletId,
+                                                                String symbol,
+                                                                String phase) {
+        List<CopyOperationDto> runtimeCopies = activeCopyOperationCache.activeOperations(originId, userId);
+        if (!runtimeCopies.isEmpty() || forbidDbInLiveHotPath) {
+            log.info("event=copy_runtime_state.hot_path_loaded category=runtime_state phase={} source=runtime_cache originId={} userId={} wallet={} symbol={} copies={} forbidDbInLiveHotPath={}",
+                    safeLog(phase), originId, userId, safeLog(walletId), safeLog(symbol), runtimeCopies.size(), forbidDbInLiveHotPath);
+            return runtimeCopies;
+        }
+        List<CopyOperationDto> dbCopies = copyOperationService.findActiveOperationsForUserOrigin(originId, userId);
+        dbCopies.forEach(activeCopyOperationCache::markOpen);
+        log.info("event=copy_runtime_state.hot_path_loaded category=runtime_state phase={} source=db_fallback originId={} userId={} wallet={} symbol={} copies={} forbidDbInLiveHotPath={}",
+                safeLog(phase), originId, userId, safeLog(walletId), safeLog(symbol), dbCopies.size(), forbidDbInLiveHotPath);
+        return dbCopies;
+    }
+
     private void executeDirectCloseForUser(OperacionEvent event, UserDetailDto userDetail, long startedNs) {
         final OperacionDto originOperation = requireOperacion(event);
         final String originId = originOperation.getIdOperacion().toString();
@@ -979,13 +1032,13 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         distributedLockService.withLock(distLockKey(userId, walletId, originOperation.getParSymbol()), Duration.ofSeconds(120), () -> {
             final long loadCopyNs = System.nanoTime();
             List<CopyOperationDto> copies = new ArrayList<>(activeCopyOperationCache.activeOperations(originId, userId));
-            if (copies.isEmpty()) {
+            if (copies.isEmpty() && !forbidDbInLiveHotPath) {
                 copies = new ArrayList<>(copyOperationService.findActiveOperationsForUserOrigin(originId, userId));
                 copies.forEach(activeCopyOperationCache::markOpen);
             }
             final String symbol = safeLog(originOperation.getParSymbol());
-            log.info("event=copy.job.phase action=CLOSE phase=load_copies traceId={} originId={} userId={} wallet={} symbol={} copies={} elapsedMs={}",
-                    traceId, originId, userId, walletId, symbol, copies.size(), elapsedMsSince(loadCopyNs));
+            log.info("event=copy.job.phase action=CLOSE phase=load_copies traceId={} originId={} userId={} wallet={} symbol={} copies={} source={} elapsedMs={}",
+                    traceId, originId, userId, walletId, symbol, copies.size(), forbidDbInLiveHotPath ? "runtime_cache" : "db_fallback_allowed", elapsedMsSince(loadCopyNs));
             if (copies.isEmpty()) {
                 log.info("event=copy_close_skipped reasonCode=close_without_open_copy_for_allocation reason=copy_missing traceId={} originId={} userId={} wallet={} symbol={}",
                         traceId,
@@ -3001,6 +3054,52 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return qty == null || qty.compareTo(ZERO) <= 0 ? ZERO : qty;
     }
 
+    private void recordRejectedCopyOperationEvent(OperacionEvent event,
+                                                  UserCopyAllocationEntity allocation,
+                                                  String userId,
+                                                  String walletId,
+                                                  String symbol,
+                                                  String typeOperation,
+                                                  String reasonCode,
+                                                  String traceId,
+                                                  String source) {
+        if (event == null || event.getOperacion() == null || allocation == null) {
+            return;
+        }
+        OperacionDto origin = event.getOperacion();
+        String originId = origin.getIdOperacion() == null ? null : origin.getIdOperacion().toString();
+        if (originId == null || userId == null || walletId == null || symbol == null || typeOperation == null) {
+            return;
+        }
+        OffsetDateTime eventTime = origin.getFechaCreacion() == null
+                ? OffsetDateTime.now(ZoneOffset.UTC)
+                : OffsetDateTime.ofInstant(origin.getFechaCreacion(), ZoneOffset.UTC);
+        copyOperationEventService.record(CopyOperationEventRecordCommand.builder()
+                .userCopyAllocationId(allocation.getId())
+                .copyStrategyCode(allocation.getCopyStrategyCode())
+                .executionMode(executionModeOf(allocation))
+                .shadow(isShadowMode(allocation))
+                .decision("REJECT")
+                .decisionReason(reasonCode)
+                .sourceMovementKey(originId)
+                .idOrderOrigin(originId)
+                .idUser(userId)
+                .idWalletOrigin(walletId)
+                .parsymbol(symbol)
+                .typeOperation(typeOperation)
+                .eventType("OPEN")
+                .copyIntent("OPEN")
+                .positionSide(typeOperation)
+                .qtyRequested(ZERO)
+                .qtyExecuted(ZERO)
+                .notionalUsd(ZERO)
+                .traceId(traceId)
+                .source(source)
+                .reasonCode(reasonCode)
+                .eventTime(eventTime)
+                .build());
+    }
+
     private void recordCopyOperationEvent(String eventType,
                                           String copyIntent,
                                           String originId,
@@ -3260,6 +3359,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
         }
         return null;
+    }
+
+    private BigDecimal nonNullOrDefault(BigDecimal value, BigDecimal fallback) {
+        return value == null ? fallback : value;
     }
 
     private CopyAccountingResult applyLiveAccounting(String eventType,
@@ -3848,8 +3951,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
 
         final int copyCapital = resolveCopyCapital(userDetail, allocation);
-        final CopyBudgetDecision budgetDecision = resolveCopyBudget(userDetail, walletMetric, allocation, capitalShare, executionMode);
-        final BigDecimal walletMarginBudget = budgetDecision.budgetUsd();
+        final boolean microLiveExecution = "MICRO_LIVE".equals(executionMode);
+        final boolean liveExecution = "LIVE".equals(executionMode);
+        CopyBudgetDecision budgetDecision = resolveCopyBudget(userDetail, walletMetric, allocation, capitalShare, executionMode);
+        BigDecimal walletMarginBudget = budgetDecision.budgetUsd();
         final FuturesCapitalAsset capitalAsset = resolveCapitalAsset(userDetail);
         if (walletMarginBudget.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_BUDGET, originId, userId, walletId);
@@ -3866,11 +3971,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final BigDecimal capitalReference = resolveCapitalReference(walletMetric);
+        final SourceExposureSnapshot sourceExposure = resolveSourceExposureSnapshot(originOperation, walletMetric, executionMode);
+        final BigDecimal capitalReference = sourceExposure.sourceAccountEquityUsd();
         if (capitalReference.compareTo(ZERO) <= 0) {
             log.warn(LOG_PREP_INVALID_CAPITAL_REFERENCE, originId, userId, walletId, capitalReference.toPlainString());
             throw new SkipExecutionException(
-                    "capital_reference_invalid",
+                    liveExecution ? CopyBudgetResolver.SOURCE_EXPOSURE_DATA_MISSING : "capital_reference_invalid",
                     "Capital de referencia inválido para sizing",
                     LogFmt.kv(
                             "wallet", walletId,
@@ -3879,11 +3985,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final BigDecimal sourceMargin = resolveSourceMarginForSizing(originOperation, walletMetric);
-        if (sourceMargin.compareTo(ZERO) <= 0) {
+        final BigDecimal sourceMargin = sourceExposure.sourcePositionMarginUsd();
+        if (sourceMargin.compareTo(ZERO) <= 0 && liveExecution) {
             log.warn(LOG_PREP_INVALID_SOURCE_MARGIN, originId, userId, walletId, sourceMargin.toPlainString());
             throw new SkipExecutionException(
-                    "source_margin_invalid",
+                    CopyBudgetResolver.SOURCE_EXPOSURE_DATA_MISSING,
                     "Operación inválida: no se pudo resolver margen fuente > 0",
                     LogFmt.kv(
                             "wallet", walletId,
@@ -3896,15 +4002,22 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        BigDecimal fractionOfBaseUsed = copySizingCalculator.computeFraction(
+        if (sourceMargin.compareTo(ZERO) <= 0 && microLiveExecution) {
+            log.info("event=copy.micro_live.source_exposure_missing originId={} userId={} wallet={} symbol={} reasonCode=MICRO_LIVE_FIXED_PER_OPERATION_USD fallback=fixed_per_operation",
+                    originId, userId, walletId, safeLog(originOperation.getParSymbol()));
+        }
+
+        BigDecimal fractionOfBaseUsed = sourceMargin.compareTo(ZERO) <= 0
+                ? ZERO
+                : copySizingCalculator.computeFraction(
                 sourceMargin,
                 capitalReference,
-                maxFractionPerTrade
+                liveExecution ? safePct(liveMaxSourceExposurePct, ONE) : maxFractionPerTrade
         );
-        if (fractionOfBaseUsed.compareTo(ZERO) <= 0) {
+        if (fractionOfBaseUsed.compareTo(ZERO) <= 0 && liveExecution) {
             log.warn(LOG_PREP_INVALID_FRACTION, originId, userId, walletId, fractionOfBaseUsed.toPlainString());
             throw new SkipExecutionException(
-                    "fraction_invalid",
+                    CopyBudgetResolver.SOURCE_EXPOSURE_DATA_MISSING,
                     "Sizing inválido: fracción calculada <= 0",
                     LogFmt.kv(
                             "wallet", walletId,
@@ -3965,9 +4078,40 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final int leverage = resolveUserLeverage(userDetail, allocation);
 
         final BigDecimal safety = safePct(marginSafetyBufferPct, MAX_MARGIN_SAFETY_PCT);
-        final BigDecimal usedMargin = copyOperationService.sumBufferedMarginActive(userId, walletId, safety);
-        final BigDecimal reserve = walletMarginBudget.multiply(safePct(walletReservePct, ONE));
-        final BigDecimal hardCap = walletMarginBudget.multiply(ONE.add(safePct(walletHardcapOverPct, ONE)));
+        final BigDecimal usedMargin = sumOpenMarginActiveForHotPath(userId, walletId, allocation, safety, executionMode);
+        final int openPositionsCount = countOpenPositionsForHotPath(userId, walletId, allocation, executionMode);
+        budgetDecision = resolveCopyBudget(
+                userDetail,
+                walletMetric,
+                allocation,
+                capitalShare,
+                executionMode,
+                sourceExposure.sourceAccountEquityUsd(),
+                sourceExposure.sourcePositionMarginUsd(),
+                fractionOfBaseUsed,
+                usedMargin,
+                openPositionsCount,
+                leverage
+        );
+        if (!budgetDecision.allowed()) {
+            throw new SkipExecutionException(
+                    budgetDecision.reasonCode(),
+                    "Presupuesto/capacidad runtime no permite abrir nueva exposicion",
+                    LogFmt.kv(
+                            "wallet", walletId,
+                            "executionMode", executionMode,
+                            "allocationId", allocation == null ? null : allocation.getId(),
+                            "sourceExposurePct", fractionOfBaseUsed,
+                            "openMarginUsedUsd", usedMargin,
+                            "openPositionsCount", openPositionsCount,
+                            "copyMarginUsd", budgetDecision.copyMarginUsd(),
+                            "remainingMarginUsd", budgetDecision.remainingMarginUsd()
+                    )
+            );
+        }
+        walletMarginBudget = budgetDecision.budgetUsd();
+        final BigDecimal reserve = microLiveExecution ? ZERO : walletMarginBudget.multiply(safePct(walletReservePct, ONE));
+        final BigDecimal hardCap = microLiveExecution ? budgetDecision.totalCapitalUsd() : walletMarginBudget.multiply(ONE.add(safePct(walletHardcapOverPct, ONE)));
         final BigDecimal availableBufferedMargin = hardCap.subtract(reserve).subtract(usedMargin).max(ZERO);
 
         if (availableBufferedMargin.compareTo(ZERO) <= 0) {
@@ -3994,7 +4138,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final BigDecimal requestedMarginThisTrade = walletMarginBudget.multiply(fractionOfBaseUsed);
+        final BigDecimal requestedMarginThisTrade = budgetDecision.copyMarginUsd();
         BigDecimal allowedMarginThisTrade = availableBufferedMargin
                 .divide(ONE.add(safety), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
                 .max(ZERO);
@@ -4340,7 +4484,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
 
-        final BigDecimal globalUsedMargin = copyOperationService.sumBufferedMarginActiveForUser(userId, safety);
+        final BigDecimal globalUsedMargin = sumOpenMarginActiveForUserHotPath(userId, safety, executionMode);
         final CopyGlobalCapitalAllocation globalCapital = CopyGlobalCapitalAllocator.evaluate(
                 BigDecimal.valueOf(resolveRuntimeCapital(userDetail)),
                 globalUsedMargin,
@@ -5213,6 +5357,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                                  UserCopyAllocationEntity allocation,
                                                  double allocationPct,
                                                  String executionMode) {
+        return resolveCopyBudget(userDetail, walletMetric, allocation, allocationPct, executionMode,
+                null, null, null, null, null, null);
+    }
+
+    private CopyBudgetDecision resolveCopyBudget(UserDetailDto userDetail,
+                                                 MetricaWalletDto walletMetric,
+                                                 UserCopyAllocationEntity allocation,
+                                                 double allocationPct,
+                                                 String executionMode,
+                                                 BigDecimal sourceAccountEquityUsd,
+                                                 BigDecimal sourcePositionMarginUsd,
+                                                 BigDecimal sourceExposurePct,
+                                                 BigDecimal openMarginUsedUsd,
+                                                 Integer openPositionsCount,
+                                                 Integer leverage) {
         final String walletId = walletMetric != null && walletMetric.getWallet() != null
                 ? walletMetric.getWallet().getIdWallet()
                 : null;
@@ -5232,6 +5391,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .accountCapitalUsd(BigDecimal.valueOf(resolveCopyCapital(userDetail, allocation)))
                 .allocationPct(allocationPctDecimal(allocationPct))
                 .microLiveFixedBudgetUsd(BigDecimal.valueOf(Math.max(0, microLiveMaxCapitalUsd)))
+                .maxMarginPerOperationUsd(nonNullOrDefault(microLiveMaxMarginPerOperationUsd, new BigDecimal("20")))
+                .openMarginUsedUsd(openMarginUsedUsd)
+                .maxConcurrentPositions(microLiveMaxConcurrentPositions)
+                .openPositionsCount(openPositionsCount)
+                .leverage(leverage == null ? null : BigDecimal.valueOf(Math.max(1, leverage)))
+                .sourceAccountEquityUsd(sourceAccountEquityUsd)
+                .sourcePositionMarginUsd(sourcePositionMarginUsd)
+                .sourceExposurePct(sourceExposurePct)
+                .requireSourceExposure("LIVE".equals(executionMode) && liveRequireSourceExposure)
+                .maxSourceExposurePct(liveMaxSourceExposurePct)
                 .capitalAsset(resolveCapitalAsset(userDetail).name())
                 .build());
     }
@@ -5668,6 +5837,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                          UserCopyAllocationEntity allocation) {
     }
 
+    private record SourceExposureSnapshot(BigDecimal sourceAccountEquityUsd,
+                                          BigDecimal sourcePositionMarginUsd,
+                                          BigDecimal sourceExposurePct) {
+    }
+
     private record SymbolContractResolution(String rawSymbol,
                                             String canonicalSymbol,
                                             String rawBase,
@@ -5848,6 +6022,149 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         addUsdToPreferredQuoteCandidates(candidates, strippedVersion, preferredQuote);
 
         return new ArrayList<>(candidates);
+    }
+
+    private SourceExposureSnapshot resolveSourceExposureSnapshot(OperacionDto originOperation,
+                                                                 MetricaWalletDto walletMetric,
+                                                                 String executionMode) {
+        boolean liveExecution = "LIVE".equals(executionMode);
+        BigDecimal equity = liveExecution ? resolveCapitalReferenceStrict(walletMetric) : resolveCapitalReference(walletMetric);
+        BigDecimal sourceMargin = liveExecution
+                ? resolveSourceMarginForLiveStrict(originOperation)
+                : resolveSourceMarginForSizing(originOperation, walletMetric);
+        BigDecimal exposurePct = ZERO;
+        if (equity.compareTo(ZERO) > 0 && sourceMargin.compareTo(ZERO) > 0) {
+            exposurePct = sourceMargin.divide(equity, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP)
+                    .min(ONE)
+                    .setScale(DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+        return new SourceExposureSnapshot(equity, sourceMargin, exposurePct);
+    }
+
+    private BigDecimal resolveCapitalReferenceStrict(MetricaWalletDto walletMetric) {
+        if (walletMetric == null) {
+            return ZERO;
+        }
+        if (walletMetric.getCapitalModel() != null) {
+            final BigDecimal sourceTotalCapital = safeMetricDecimal(walletMetric.getCapitalModel().getSourceTotalCapitalUSDT());
+            if (sourceTotalCapital.compareTo(ZERO) > 0) {
+                return sourceTotalCapital;
+            }
+
+            final BigDecimal capitalReference = safeMetricDecimal(walletMetric.getCapitalModel().getCapitalReferenceUSDT());
+            if (capitalReference.compareTo(ZERO) > 0) {
+                return capitalReference;
+            }
+
+            final BigDecimal capitalReferenceBuffered = safeMetricDecimal(walletMetric.getCapitalModel().getCapitalReferenceBufferedUSDT());
+            if (capitalReferenceBuffered.compareTo(ZERO) > 0) {
+                return capitalReferenceBuffered;
+            }
+        }
+        if (walletMetric.getExposureAndCapacity() != null) {
+            final BigDecimal capitalRequired = safeMetricDecimal(walletMetric.getExposureAndCapacity().getCapitalRequired());
+            if (capitalRequired.compareTo(ZERO) > 0) {
+                return capitalRequired;
+            }
+        }
+        return ZERO;
+    }
+
+    private BigDecimal resolveSourceMarginForLiveStrict(OperacionDto originOperation) {
+        if (originOperation == null) {
+            return ZERO;
+        }
+        BigDecimal margin = abs(originOperation.getMarginUsedUsd());
+        if (margin.compareTo(ZERO) > 0) {
+            return margin;
+        }
+
+        final BigDecimal leverageRef = originOperation.getLeverage();
+        if (leverageRef == null || leverageRef.compareTo(ZERO) <= 0) {
+            return ZERO;
+        }
+
+        BigDecimal notional = abs(originOperation.getNotionalUsd());
+        if (notional.compareTo(ZERO) > 0) {
+            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+
+        final BigDecimal priceRef = resolvePriceRef(originOperation.getPrecioMercado(), originOperation.getPrecioEntrada());
+        notional = safeQty(originOperation.getSizeQty()).multiply(priceRef);
+        if (notional.compareTo(ZERO) > 0) {
+            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+
+        return ZERO;
+    }
+
+    private BigDecimal sumOpenMarginActiveForHotPath(String userId,
+                                                     String walletId,
+                                                     UserCopyAllocationEntity allocation,
+                                                     BigDecimal safety,
+                                                     String executionMode) {
+        if (forbidDbInLiveHotPath && ("LIVE".equals(executionMode) || "MICRO_LIVE".equals(executionMode))) {
+            return activeCopyOperationCache.activeOperationsByUserAndWallet(userId, walletId)
+                    .stream()
+                    .filter(op -> allocationMatches(op, allocation))
+                    .map(this::copyMargin)
+                    .reduce(ZERO, BigDecimal::add)
+                    .multiply(ONE.add(safePct(safety, MAX_MARGIN_SAFETY_PCT)))
+                    .setScale(DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+        return copyOperationService.sumBufferedMarginActive(userId, walletId, safety);
+    }
+
+    private BigDecimal sumOpenMarginActiveForUserHotPath(String userId,
+                                                         BigDecimal safety,
+                                                         String executionMode) {
+        if (forbidDbInLiveHotPath && ("LIVE".equals(executionMode) || "MICRO_LIVE".equals(executionMode))) {
+            return activeCopyOperationCache.activeOperationsByUser(userId)
+                    .stream()
+                    .map(this::copyMargin)
+                    .reduce(ZERO, BigDecimal::add)
+                    .multiply(ONE.add(safePct(safety, MAX_MARGIN_SAFETY_PCT)))
+                    .setScale(DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
+        }
+        return copyOperationService.sumBufferedMarginActiveForUser(userId, safety);
+    }
+
+    private int countOpenPositionsForHotPath(String userId,
+                                             String walletId,
+                                             UserCopyAllocationEntity allocation,
+                                             String executionMode) {
+        if (!("LIVE".equals(executionMode) || "MICRO_LIVE".equals(executionMode))) {
+            return 0;
+        }
+        return (int) activeCopyOperationCache.activeOperationsByUserAndWallet(userId, walletId)
+                .stream()
+                .filter(op -> allocationMatches(op, allocation))
+                .count();
+    }
+
+    private boolean allocationMatches(CopyOperationDto op, UserCopyAllocationEntity allocation) {
+        if (op == null || !op.isActive()) {
+            return false;
+        }
+        if (allocation == null || allocation.getId() == null) {
+            return true;
+        }
+        if (op.getUserCopyAllocationId() != null) {
+            return Objects.equals(op.getUserCopyAllocationId(), allocation.getId());
+        }
+        return Objects.equals(normalizeStrategyCode(op.getCopyStrategyCode()), normalizeStrategyCode(allocation.getCopyStrategyCode()));
+    }
+
+    private BigDecimal copyMargin(CopyOperationDto op) {
+        if (op == null) {
+            return ZERO;
+        }
+        BigDecimal usd = safeUsd(op.getSiseUsd(), safeQty(op.getSizePar()), op.getPriceEntry());
+        BigDecimal leverage = op.getLeverage() == null || op.getLeverage().compareTo(ZERO) <= 0 ? ONE : op.getLeverage();
+        if (usd.compareTo(ZERO) <= 0) {
+            return ZERO;
+        }
+        return usd.divide(leverage, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
     }
 
     private void addUsdToPreferredQuoteCandidates(Set<String> candidates, String symbol, String preferredQuote) {

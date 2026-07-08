@@ -604,7 +604,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         if (idUser == null || normalizedWallet == null || normalizedStrategy == null) {
             return Optional.empty();
         }
-        return repository.findOpenAllocationForUserWalletStrategy(idUser, normalizedWallet, normalizedStrategy);
+        return getActiveAllocationsForUserWallet(idUser, normalizedWallet).stream()
+                .filter(e -> Objects.equals(normalizeStrategy(e.getCopyStrategyCode()), normalizedStrategy))
+                .findFirst();
     }
 
     @Override
@@ -617,13 +619,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         if (idUser == null || normalizedWallet == null || normalizedStrategy == null) {
             return Optional.empty();
         }
-        return repository.findOpenAllocationForUserWalletStrategyScope(
-                idUser,
-                normalizedWallet,
-                normalizedStrategy,
-                normalizedScopeType,
-                normalizedScopeValue
-        );
+        return getActiveAllocationsForUserWallet(idUser, normalizedWallet).stream()
+                .filter(e -> Objects.equals(normalizeStrategy(e.getCopyStrategyCode()), normalizedStrategy))
+                .filter(e -> Objects.equals(normalizeScopeType(e.getScopeType()), normalizedScopeType))
+                .filter(e -> Objects.equals(normalizeScopeValue(e.getScopeValue(), normalizedStrategy), normalizedScopeValue))
+                .findFirst();
     }
 
     @Override
@@ -658,6 +658,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     }
 
     private List<UserCopyAllocationEntity> loadActiveByUser(UUID idUser) {
+        long startedNs = System.nanoTime();
         if (idUser == null) {
             return List.of();
         }
@@ -667,10 +668,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 .filter(UserCopyAllocationEntity::isActive)
                 .filter(e -> e.getStatus() == UserCopyAllocationEntity.Status.ACTIVE)
                 .toList();
+        log.info("event=user_copy_allocation.runtime_cache.refreshed scope=user idUser={} activeMicroLive={} activeLive={} elapsedMs={}",
+                idUser, countMode(loaded, "MICRO_LIVE"), countMode(loaded, "LIVE"), elapsedMs(startedNs));
         return List.copyOf(loaded);
     }
 
     private List<UserCopyAllocationEntity> loadActiveByWallet(String walletId) {
+        long startedNs = System.nanoTime();
         String normalizedWallet = normalize(walletId);
         if (normalizedWallet == null) {
             return List.of();
@@ -679,6 +683,8 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 .stream()
                 .filter(Objects::nonNull)
                 .toList();
+        log.info("event=user_copy_allocation.runtime_cache.refreshed scope=wallet walletId={} activeMicroLive={} activeLive={} elapsedMs={}",
+                normalizedWallet, countMode(loaded, "MICRO_LIVE"), countMode(loaded, "LIVE"), elapsedMs(startedNs));
         return List.copyOf(loaded);
     }
 
@@ -717,7 +723,21 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         if (userCache != null) {
             userCache.invalidateAll();
         }
-        log.debug("event=user_copy_allocation.runtime_cache.invalidate reasonCode={}", reason);
+        log.info("event=user_copy_allocation.runtime_cache.invalidated reason={}", reason);
+    }
+
+    private long countMode(List<UserCopyAllocationEntity> allocations, String executionMode) {
+        if (allocations == null || allocations.isEmpty()) {
+            return 0L;
+        }
+        return allocations.stream()
+                .filter(Objects::nonNull)
+                .filter(a -> executionMode.equals(normalizeExecutionModeTarget(a.getExecutionMode())))
+                .count();
+    }
+
+    private long elapsedMs(long startedNs) {
+        return (System.nanoTime() - startedNs) / 1_000_000L;
     }
 
     private UserCopyAllocationEntity.Status parseStatus(String raw) {

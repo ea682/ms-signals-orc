@@ -12,7 +12,7 @@ rest-client:
   metric-wallet:
     info-base: ${URL_METRIC:http://ms-metrica-cuenta:4102/}
   binance-service:
-    info-base: ${URL_BINANCE:http://ms-binance-engine:4106}
+    info-base: ${URL_BINANCE:http://192.168.1.123:4106}
     connect-ms: ${BINANCE_ORDER_CONNECT_TIMEOUT_MS:1000}
     read-ms: ${BINANCE_ORDER_READ_TIMEOUT_MS:8000}
     close-connect-ms: ${BINANCE_CLOSE_CONNECT_TIMEOUT_MS:1000}
@@ -133,6 +133,10 @@ copy:
     dry-run: ${COPY_LIVE_DRY_RUN:true}
     max-capital-amount: ${COPY_LIVE_MAX_CAPITAL_AMOUNT:100}
     scale-enabled: ${COPY_LIVE_SCALE_ENABLED:false}
+    sizing-mode: ${COPY_LIVE_SIZING_MODE:SOURCE_EXPOSURE_PERCENT}
+    require-source-exposure: ${COPY_LIVE_REQUIRE_SOURCE_EXPOSURE:true}
+    max-source-exposure-pct: ${COPY_LIVE_MAX_SOURCE_EXPOSURE_PCT:0.25}
+    margin-buffer-pct: ${COPY_LIVE_MARGIN_BUFFER_PCT:0.03}
     whitelist:
       user-ids: ${COPY_LIVE_WHITELIST_USER_IDS:}
       wallet-ids: ${COPY_LIVE_WHITELIST_WALLET_IDS:}
@@ -144,6 +148,12 @@ copy:
     max-capital-amount: ${COPY_MICRO_LIVE_MAX_CAPITAL_AMOUNT:100}
     initial-capital-usd: ${COPY_MICRO_LIVE_INITIAL_CAPITAL_USD:100}
     max-capital-usd: ${COPY_MICRO_LIVE_MAX_CAPITAL_USD:100}
+    total-capital-usd: ${COPY_MICRO_LIVE_TOTAL_CAPITAL_USD:100}
+    max-margin-per-operation-usd: ${COPY_MICRO_LIVE_MAX_MARGIN_PER_OPERATION_USD:20}
+    max-concurrent-positions: ${COPY_MICRO_LIVE_MAX_CONCURRENT_POSITIONS:5}
+    margin-buffer-pct: ${COPY_MICRO_LIVE_MARGIN_BUFFER_PCT:0.03}
+  runtime:
+    forbid-db-in-live-hot-path: ${COPY_RUNTIME_FORBID_DB_IN_LIVE_HOT_PATH:true}
   promotion:
     enabled: ${COPY_PROMOTION_ENABLED:true}
     from-shadow-enabled: ${COPY_PROMOTION_FROM_SHADOW_ENABLED:true}
@@ -352,7 +362,7 @@ futures:
   capital-maintenance:
     enabled: ${FUTURES_CAPITAL_MAINTENANCE_ENABLED:true}
     initial-delay-ms: ${FUTURES_CAPITAL_MAINTENANCE_INITIAL_DELAY_MS:30000}
-    fixed-delay-ms: ${FUTURES_CAPITAL_MAINTENANCE_FIXED_DELAY_MS:600000}
+    fixed-delay-ms: ${FUTURES_CAPITAL_MAINTENANCE_FIXED_DELAY_MS:6000}
     min-available: ${FUTURES_CAPITAL_MAINTENANCE_MIN_AVAILABLE:50}
     bnb-min-ratio: ${FUTURES_CAPITAL_MAINTENANCE_BNB_MIN_RATIO:0.03}
     conversion-ratio: ${FUTURES_CAPITAL_MAINTENANCE_CONVERSION_RATIO:0.10}
