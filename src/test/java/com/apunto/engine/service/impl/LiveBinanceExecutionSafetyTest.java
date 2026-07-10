@@ -5,6 +5,9 @@ import org.springframework.beans.factory.config.YamlPropertiesFactoryBean;
 import org.springframework.core.io.ClassPathResource;
 
 import java.util.Properties;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.io.IOException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -23,6 +26,8 @@ class LiveBinanceExecutionSafetyTest {
         assertEquals("${COPY_LIVE_ENABLED:false}", properties.getProperty("copy.live.enabled"));
         assertEquals("${COPY_LIVE_CANARY_ENABLED:false}", properties.getProperty("copy.live.canary-enabled"));
         assertEquals("${COPY_LIVE_DRY_RUN:true}", properties.getProperty("copy.live.dry-run"));
+        assertEquals("${COPY_NEW_DISPATCH_ENABLED:false}", properties.getProperty("copy.new-dispatch.enabled"));
+        assertEquals("${COPY_MICRO_LIVE_ENABLED:false}", properties.getProperty("copy.micro-live.enabled"));
         assertEquals("${COPY_LIVE_WHITELIST_USER_IDS:}", properties.getProperty("copy.live.whitelist.user-ids"));
         assertEquals("${COPY_LIVE_WHITELIST_WALLET_IDS:}", properties.getProperty("copy.live.whitelist.wallet-ids"));
         assertEquals("${COPY_LIVE_WHITELIST_SYMBOLS:}", properties.getProperty("copy.live.whitelist.symbols"));
@@ -31,6 +36,19 @@ class LiveBinanceExecutionSafetyTest {
         assertEquals("${BINANCE_ORDER_READ_TIMEOUT_MS:8000}", properties.getProperty("rest-client.binance-service.read-ms"));
         assertEquals("${BINANCE_CLOSE_READ_TIMEOUT_MS:8000}", properties.getProperty("rest-client.binance-service.close-read-ms"));
         assertEquals("${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:SHADOW}", properties.getProperty("metric-wallet.allocation.default-execution-mode"));
+    }
+
+    @Test
+    void blockedRealGateNeverFabricatesShadowFill() throws IOException {
+        String source = Files.readString(Path.of(
+                "src/main/java/com/apunto/engine/service/impl/BinanceEngineServiceImpl.java"));
+        String gate = Files.readString(Path.of(
+                "src/main/java/com/apunto/engine/service/copy/dispatch/CopyRealExecutionGate.java"));
+
+        assertTrue(source.contains("copyRealExecutionGate.evaluate"));
+        assertTrue(gate.contains("COPY_NEW_DISPATCH_DISABLED"));
+        assertTrue(source.contains("throw new SkipExecutionException"));
+        assertTrue(!source.contains("copyImpact=mock_fill_no_real_binance"));
     }
 
     @Test

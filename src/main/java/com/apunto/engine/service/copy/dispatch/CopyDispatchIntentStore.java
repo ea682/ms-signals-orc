@@ -16,6 +16,9 @@ public interface CopyDispatchIntentStore {
 
     void markRejected(UUID intentId, String reasonCode, String detail);
 
+    default void linkRequiredEvent(UUID intentId, UUID copyOperationEventId) {
+    }
+
     void markPersistencePending(String clientOrderId, String reasonCode, String detail);
 
     default void markPersistencePending(UUID intentId, String clientOrderId, String reasonCode, String detail) {

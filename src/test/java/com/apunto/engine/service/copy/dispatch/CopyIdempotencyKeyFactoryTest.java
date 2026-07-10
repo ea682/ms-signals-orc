@@ -52,6 +52,19 @@ class CopyIdempotencyKeyFactoryTest {
         assertNotEquals(factory.create(micro), factory.create(live));
     }
 
+    @Test
+    void sameKeyAlwaysProducesStableBinanceClientOrderId() {
+        CopyDispatchIdentity identity = new CopyDispatchIdentity(
+                "user-1", 505L, "MICRO_LIVE", "MOVEMENT_ALL", "ALL", "ALL", "evt-1", "OPEN");
+        String key = factory.create(identity);
+
+        String first = factory.clientOrderId(key);
+        String afterRestart = new CopyIdempotencyKeyFactory().clientOrderId(key);
+
+        assertEquals(first, afterRestart);
+        assertTrue(first.matches("[A-Za-z0-9._-]{1,36}"));
+    }
+
     private CopyDispatchIdentity identity(Long allocationId, String strategy, String sourceEvent, String intent) {
         return new CopyDispatchIdentity(
                 "user-1",

@@ -85,6 +85,18 @@ class BinanceOrderExecutionNormalizerTest {
     }
 
     @Test
+    void rejectedStatusWithExecutedQuantityPreservesEconomicFill() {
+        BinanceFuturesOrderClientResponse response = order(78L, "REJECTED", "0.25", null, null);
+
+        NormalizedBinanceExecution normalized = normalizer.normalize(response);
+
+        assertTrue(normalized.accepted());
+        assertEquals(CopyExecutionState.FILLED, normalized.executionState());
+        assertEquals(new BigDecimal("0.25"), normalized.executedQty());
+        assertFalse(normalized.safeToRetrySend());
+    }
+
+    @Test
     void canceledWithoutOrderIdRemainsAmbiguous() {
         NormalizedBinanceExecution result = normalizer.normalize(order(null, "CANCELED", null, null, null));
 

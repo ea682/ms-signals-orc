@@ -27,6 +27,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -351,6 +352,80 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         );
 
         return result;
+    }
+
+    @Override
+    public List<MetricaWalletDto> getCandidatesForUserWalletCachedOnly(UUID idUser, String walletId) {
+        final String walletKey = normalizeWalletId(walletId);
+        if (idUser == null || walletKey == null) {
+            return List.of();
+        }
+
+        final List<UserCopyAllocationEntity> allocations =
+                userCopyAllocationService.getActiveAllocationsForUserWalletCachedOnly(idUser, walletKey);
+        if (allocations.isEmpty()) {
+            log.warn("event=metric_wallets.runtime_candidates.unavailable reasonCode=ALLOCATION_SNAPSHOT_MISS decision=FAIL_CLOSED hotPathRemoteCall=false");
+            return List.of();
+        }
+
+        HistorySnapshot history = allPositionHistoryCache.getIfPresent(historyLimit);
+        String source = "cache_if_present";
+        if (history == null || history.isEmpty()) {
+            history = lastKnownGoodHistory.get();
+            source = "last_known_good";
+        }
+        if (history == null || history.isEmpty() || history.isStale(cacheExpireAfter, Instant.now())) {
+            log.warn("event=metric_wallets.runtime_candidates.unavailable reasonCode=METRIC_SNAPSHOT_MISSING_OR_STALE decision=FAIL_CLOSED cacheSource={} hotPathRemoteCall=false",
+                    source);
+            return List.of();
+        }
+
+        final HistoryIndex historyIndex = history.index();
+        final List<MetricaWalletDto> result = allocations.stream()
+                .filter(Objects::nonNull)
+                .map(allocation -> runtimeCandidateFromSnapshot(allocation, historyIndex))
+                .filter(Objects::nonNull)
+                .toList();
+        log.debug("event=metric_wallets.runtime_candidates.loaded cacheSource={} allocations={} candidates={} hotPathRemoteCall=false",
+                source, allocations.size(), result.size());
+        return result;
+    }
+
+    private MetricaWalletDto runtimeCandidateFromSnapshot(UserCopyAllocationEntity allocation,
+                                                          HistoryIndex historyIndex) {
+        final String walletId = normalizeWalletId(allocation.getWalletId());
+        final String allocationKey = copyStrategyRuntimeRouter.allocationKey(allocation);
+        if (walletId == null) {
+            return null;
+        }
+        final MetricaWalletDto cached = allocationKey == null
+                ? historyIndex.findByWallet(walletId)
+                : historyIndex.findByAllocationKey(allocationKey);
+        if (cached == null) {
+            log.warn("event=metric_wallets.runtime_candidates.skip reasonCode=METRIC_NOT_IN_SNAPSHOT strategy={} decision=FAIL_CLOSED",
+                    copyStrategyRuntimeRouter.strategyCodeOf(allocation));
+            return null;
+        }
+
+        final CopyStrategyGuardDecision guardDecision = evaluateCopyGuard(cached);
+        if (!guardDecision.allowed()) {
+            log.warn("event=metric_wallets.runtime_candidates.skip reasonCode={} action={} strategy={} decision=FAIL_CLOSED",
+                    guardDecision.reason(), guardDecision.action(), copyStrategyRuntimeRouter.strategyCodeOf(allocation));
+            return null;
+        }
+
+        final double allocationPct = Optional.ofNullable(allocation.getAllocationPct())
+                .map(java.math.BigDecimal::doubleValue)
+                .orElse(0.0);
+        final double effectiveAllocationPct = clamp01(allocationPct * guardDecision.capitalMultiplier());
+        if (effectiveAllocationPct <= 0.0) {
+            return null;
+        }
+
+        MetricaWalletDto out = new MetricaWalletDto();
+        BeanUtils.copyProperties(cached, out);
+        out.setCapitalShare(effectiveAllocationPct);
+        return out;
     }
 
 
@@ -1571,14 +1646,16 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
     }
 
     private static final class HistorySnapshot {
-        private static final HistorySnapshot EMPTY = new HistorySnapshot(List.of(), HistoryIndex.empty());
+        private static final HistorySnapshot EMPTY = new HistorySnapshot(List.of(), HistoryIndex.empty(), null);
 
         private final List<MetricaWalletDto> values;
         private final HistoryIndex index;
+        private final Instant loadedAt;
 
-        private HistorySnapshot(List<MetricaWalletDto> values, HistoryIndex index) {
+        private HistorySnapshot(List<MetricaWalletDto> values, HistoryIndex index, Instant loadedAt) {
             this.values = values == null ? List.of() : values;
             this.index = index == null ? HistoryIndex.empty() : index;
+            this.loadedAt = loadedAt;
         }
 
         static HistorySnapshot empty() {
@@ -1589,7 +1666,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             List<MetricaWalletDto> snapshot = values == null ? List.of() : List.copyOf(values);
             return snapshot.isEmpty()
                     ? empty()
-                    : new HistorySnapshot(snapshot, HistoryIndex.from(snapshot, router));
+                    : new HistorySnapshot(snapshot, HistoryIndex.from(snapshot, router), Instant.now());
         }
 
         List<MetricaWalletDto> values() {
@@ -1606,6 +1683,16 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
 
         boolean isEmpty() {
             return values.isEmpty();
+        }
+
+        boolean isStale(Duration maxAge, Instant now) {
+            if (loadedAt == null || now == null) {
+                return true;
+            }
+            Duration allowedAge = maxAge == null || maxAge.isNegative() || maxAge.isZero()
+                    ? Duration.ofMinutes(10)
+                    : maxAge;
+            return loadedAt.plus(allowedAge).isBefore(now);
         }
     }
 

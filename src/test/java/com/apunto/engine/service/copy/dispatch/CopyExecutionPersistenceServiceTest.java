@@ -220,16 +220,25 @@ class CopyExecutionPersistenceServiceTest {
     private static final class FakeEvents implements CopyOperationEventService {
         private final java.util.Set<String> uniqueClientOrderIds = new java.util.HashSet<>();
         @Override public void record(CopyOperationEventRecordCommand command) { uniqueClientOrderIds.add(command.getClientOrderId()); }
-        @Override public void recordRequired(CopyOperationEventRecordCommand command) { uniqueClientOrderIds.add(command.getClientOrderId()); }
+        @Override public UUID recordRequired(CopyOperationEventRecordCommand command) {
+            uniqueClientOrderIds.add(command.getClientOrderId());
+            return UUID.nameUUIDFromBytes((command.getDispatchIntentId() + "|" + command.getEventType()
+                    + "|" + command.getQtyExecuted()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
     }
 
     private static final class FakeStore implements CopyDispatchIntentStore {
         private int persisted;
+        private UUID requiredEventId;
         @Override public CopyDispatchPermit acquire(CopyDispatchRequest request) { throw new UnsupportedOperationException(); }
         @Override public void acknowledge(UUID id, NormalizedBinanceExecution execution, BinanceFuturesOrderClientResponse response) { }
         @Override public void markAmbiguous(UUID id, String code, String detail) { }
         @Override public void markRejected(UUID id, String code, String detail) { }
+        @Override public void linkRequiredEvent(UUID intentId, UUID copyOperationEventId) { requiredEventId = copyOperationEventId; }
         @Override public void markPersistencePending(String clientOrderId, String code, String detail) { }
-        @Override public void markPersisted(String clientOrderId, UUID operationId) { persisted++; }
+        @Override public void markPersisted(String clientOrderId, UUID operationId) {
+            assertNotNull(requiredEventId);
+            persisted++;
+        }
     }
 }

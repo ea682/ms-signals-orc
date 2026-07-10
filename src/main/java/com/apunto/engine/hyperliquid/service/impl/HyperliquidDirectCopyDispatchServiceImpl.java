@@ -96,7 +96,11 @@ public class HyperliquidDirectCopyDispatchServiceImpl implements HyperliquidDire
         String actionLabel = displayAction(action, deltaType);
 
 
+        long candidateStartedNs = System.nanoTime();
         HyperliquidCopyCandidateResolver.CandidateUsers candidates = candidateResolver.resolve(mappedDelta, action);
+        tradingMetrics.candidateResolution(copyIntent(action, deltaType),
+                candidates.eligibleUsers().isEmpty() ? "empty" : "resolved",
+                System.nanoTime() - candidateStartedNs);
         List<UserDetailDto> eligibleUsers = candidates.eligibleUsers();
         AtomicBoolean fallbackSubmitted = new AtomicBoolean(false);
         AtomicInteger submitted = new AtomicInteger(0);

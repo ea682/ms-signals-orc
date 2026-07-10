@@ -22,12 +22,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -76,6 +78,10 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     private volatile Cache<String, List<UserCopyAllocationEntity>> activeByWalletCache;
     private volatile Cache<UUID, List<UserCopyAllocationEntity>> activeByUserCache;
+    private volatile RuntimeAllocationSnapshot runtimeAllocationSnapshot = RuntimeAllocationSnapshot.empty();
+
+    @Value("${copy.runtime.allocation-snapshot.max-stale:PT30S}")
+    private Duration runtimeAllocationMaxStale;
 
     @PostConstruct
     void initRuntimeCaches() {
@@ -541,6 +547,45 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     }
 
     @Override
+    public List<UserCopyAllocationEntity> getActiveAllocationsByWalletCachedOnly(String walletId) {
+        String normalizedWallet = normalize(walletId);
+        RuntimeAllocationSnapshot current = runtimeAllocationSnapshot;
+        if (normalizedWallet == null || current.isStale(runtimeAllocationMaxStale, Instant.now())) {
+            log.warn("event=user_copy_allocation.runtime_snapshot.unavailable reasonCode=ALLOCATION_SNAPSHOT_MISSING_OR_STALE walletId={} decision=FAIL_CLOSED",
+                    normalizedWallet);
+            return List.of();
+        }
+        return current.byWallet().getOrDefault(normalizedWallet, List.of());
+    }
+
+    @Scheduled(initialDelayString = "${copy.runtime.allocation-snapshot.initial-delay-ms:0}",
+            fixedDelayString = "${copy.runtime.allocation-snapshot.refresh-ms:5000}")
+    @Transactional(readOnly = true)
+    public void refreshRuntimeAllocationSnapshot() {
+        long startedNs = System.nanoTime();
+        try {
+            List<UserCopyAllocationEntity> loaded = repository.findAllActiveRuntimeAllocations().stream()
+                    .filter(Objects::nonNull)
+                    .filter(UserCopyAllocationEntity::isActive)
+                    .filter(entity -> entity.getStatus() == UserCopyAllocationEntity.Status.ACTIVE)
+                    .toList();
+            Map<String, List<UserCopyAllocationEntity>> grouped = loaded.stream()
+                    .filter(entity -> normalize(entity.getWalletId()) != null)
+                    .collect(java.util.stream.Collectors.groupingBy(
+                            entity -> normalize(entity.getWalletId()),
+                            LinkedHashMap::new,
+                            java.util.stream.Collectors.collectingAndThen(
+                                    java.util.stream.Collectors.toList(), List::copyOf)));
+            runtimeAllocationSnapshot = new RuntimeAllocationSnapshot(Map.copyOf(grouped), Instant.now());
+            log.info("event=user_copy_allocation.runtime_snapshot.refreshed wallets={} allocations={} elapsedMs={} source=scheduled_out_of_band",
+                    grouped.size(), loaded.size(), elapsedMs(startedNs));
+        } catch (RuntimeException ex) {
+            log.error("event=user_copy_allocation.runtime_snapshot.refresh_failed reasonCode=ALLOCATION_SNAPSHOT_REFRESH_FAILED decision=KEEP_LAST_KNOWN_GOOD errClass={} errMsg=\"{}\"",
+                    ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+        }
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public List<UserCopyAllocationEntity> getActiveAllocationsForUserWallet(UUID idUser, String walletId) {
         final String normalizedWallet = normalize(walletId);
@@ -551,6 +596,17 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 .stream()
                 .filter(Objects::nonNull)
                 .filter(e -> Objects.equals(e.getIdUser(), idUser))
+                .toList();
+    }
+
+    @Override
+    public List<UserCopyAllocationEntity> getActiveAllocationsForUserWalletCachedOnly(UUID idUser, String walletId) {
+        if (idUser == null) {
+            return List.of();
+        }
+        return getActiveAllocationsByWalletCachedOnly(walletId).stream()
+                .filter(Objects::nonNull)
+                .filter(allocation -> Objects.equals(allocation.getIdUser(), idUser))
                 .toList();
     }
 
@@ -738,6 +794,25 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     private long elapsedMs(long startedNs) {
         return (System.nanoTime() - startedNs) / 1_000_000L;
+    }
+
+    private String safeLog(String value) {
+        if (value == null) return "";
+        String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
+        return clean.length() > 500 ? clean.substring(0, 500) : clean;
+    }
+
+    private record RuntimeAllocationSnapshot(Map<String, List<UserCopyAllocationEntity>> byWallet,
+                                             Instant updatedAt) {
+        private static RuntimeAllocationSnapshot empty() {
+            return new RuntimeAllocationSnapshot(Map.of(), null);
+        }
+
+        private boolean isStale(Duration configuredMaxStale, Instant now) {
+            Duration maxStale = configuredMaxStale == null || configuredMaxStale.isNegative()
+                    || configuredMaxStale.isZero() ? Duration.ofSeconds(30) : configuredMaxStale;
+            return updatedAt == null || Duration.between(updatedAt, now).compareTo(maxStale) > 0;
+        }
     }
 
     private UserCopyAllocationEntity.Status parseStatus(String raw) {

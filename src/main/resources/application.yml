@@ -127,6 +127,8 @@ binance:
     require-trading-status: ${BINANCE_SYMBOLS_REQUIRE_TRADING_STATUS:true}
 
 copy:
+  new-dispatch:
+    enabled: ${COPY_NEW_DISPATCH_ENABLED:false}
   live:
     enabled: ${COPY_LIVE_ENABLED:false}
     canary-enabled: ${COPY_LIVE_CANARY_ENABLED:false}
@@ -144,7 +146,7 @@ copy:
       allocation-ids: ${COPY_LIVE_WHITELIST_ALLOCATION_IDS:}
       strategy-codes: ${COPY_LIVE_WHITELIST_STRATEGY_CODES:}
   micro-live:
-    enabled: ${COPY_MICRO_LIVE_ENABLED:true}
+    enabled: ${COPY_MICRO_LIVE_ENABLED:false}
     max-capital-amount: ${COPY_MICRO_LIVE_MAX_CAPITAL_AMOUNT:100}
     initial-capital-usd: ${COPY_MICRO_LIVE_INITIAL_CAPITAL_USD:100}
     max-capital-usd: ${COPY_MICRO_LIVE_MAX_CAPITAL_USD:100}
@@ -154,6 +156,14 @@ copy:
     margin-buffer-pct: ${COPY_MICRO_LIVE_MARGIN_BUFFER_PCT:0.03}
   runtime:
     forbid-db-in-live-hot-path: ${COPY_RUNTIME_FORBID_DB_IN_LIVE_HOT_PATH:true}
+    user-snapshot:
+      initial-delay-ms: ${COPY_RUNTIME_USER_SNAPSHOT_INITIAL_DELAY_MS:0}
+      refresh-ms: ${COPY_RUNTIME_USER_SNAPSHOT_REFRESH_MS:60000}
+      max-stale: ${COPY_RUNTIME_USER_SNAPSHOT_MAX_STALE:PT10M}
+    allocation-snapshot:
+      initial-delay-ms: ${COPY_RUNTIME_ALLOCATION_SNAPSHOT_INITIAL_DELAY_MS:0}
+      refresh-ms: ${COPY_RUNTIME_ALLOCATION_SNAPSHOT_REFRESH_MS:5000}
+      max-stale: ${COPY_RUNTIME_ALLOCATION_SNAPSHOT_MAX_STALE:PT30S}
   promotion:
     enabled: ${COPY_PROMOTION_ENABLED:true}
     from-shadow-enabled: ${COPY_PROMOTION_FROM_SHADOW_ENABLED:true}
@@ -268,6 +278,11 @@ copy:
     batch-size: ${COPY_RECONCILIATION_BATCH_SIZE:50}
     max-attempts: ${COPY_RECONCILIATION_MAX_ATTEMPTS:20}
     dispatch-stale-after: ${COPY_RECONCILIATION_DISPATCH_STALE_AFTER:PT30S}
+  observability:
+    dispatch-gauges:
+      enabled: ${COPY_DISPATCH_GAUGES_ENABLED:true}
+      initial-delay-ms: ${COPY_DISPATCH_GAUGES_INITIAL_DELAY_MS:15000}
+      refresh-ms: ${COPY_DISPATCH_GAUGES_REFRESH_MS:15000}
 
 operation:
   movement-ledger:

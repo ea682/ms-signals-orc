@@ -12,17 +12,65 @@ import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.service.annotation.GetExchange;
 
 import java.lang.reflect.Method;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class MetricWalletServiceImplTest {
+
+    @Test
+    void cachedCandidatesNeverTriggerMetricHttpOrAllocationDatabaseLoad() throws Exception {
+        UUID userId = UUID.randomUUID();
+        CapturingMetricClient client = new CapturingMetricClient(List.of(metricForHistory("0xabc")));
+        CacheOnlyAllocationService allocations = new CacheOnlyAllocationService(UserCopyAllocationEntity.builder()
+                .id(7L)
+                .idUser(userId)
+                .walletId("0xabc")
+                .copyStrategyCode("MOVEMENT_ALL")
+                .scopeType("strategy")
+                .scopeValue("MOVEMENT_ALL")
+                .allocationPct(new BigDecimal("0.25"))
+                .status(UserCopyAllocationEntity.Status.ACTIVE)
+                .isActive(true)
+                .build());
+        MetricWalletServiceImpl service = service(client, allocations, 30, 45, "summary", false);
+        loadSnapshot(service, 300, 30);
+
+        List<MetricaWalletDto> result = service.getCandidatesForUserWalletCachedOnly(userId, "0xabc");
+
+        assertEquals(1, result.size());
+        assertEquals(1, client.joyasCalls, "the hot path must not perform another HTTP request");
+        assertEquals(0, allocations.databaseLoads);
+        assertEquals(1, allocations.cacheOnlyLoads);
+    }
+
+    @Test
+    void cachedCandidatesFailClosedWithoutPrimedHistory() {
+        UUID userId = UUID.randomUUID();
+        CapturingMetricClient client = new CapturingMetricClient(List.of(metricForHistory("0xabc")));
+        CacheOnlyAllocationService allocations = new CacheOnlyAllocationService(UserCopyAllocationEntity.builder()
+                .id(8L)
+                .idUser(userId)
+                .walletId("0xabc")
+                .copyStrategyCode("MOVEMENT_ALL")
+                .allocationPct(new BigDecimal("0.25"))
+                .status(UserCopyAllocationEntity.Status.ACTIVE)
+                .isActive(true)
+                .build());
+        MetricWalletServiceImpl service = service(client, allocations, 30, 45, "summary", false);
+
+        assertTrue(service.getCandidatesForUserWalletCachedOnly(userId, "0xabc").isEmpty());
+        assertEquals(0, client.joyasCalls);
+        assertEquals(0, allocations.databaseLoads);
+    }
 
     @Test
     void metricWalletClientUsesCanonicalJoyasEndpointPath() throws Exception {
@@ -538,9 +586,18 @@ class MetricWalletServiceImplTest {
     }
 
     private static MetricWalletServiceImpl service(MetricWalletsInfoClient client, int joyasLimit, int joyasDayz, String joyasSimulation, boolean requireWindowData) {
+        return service(client, new FakeAllocationService(), joyasLimit, joyasDayz, joyasSimulation, requireWindowData);
+    }
+
+    private static MetricWalletServiceImpl service(MetricWalletsInfoClient client,
+                                                   UserCopyAllocationService allocationService,
+                                                   int joyasLimit,
+                                                   int joyasDayz,
+                                                   String joyasSimulation,
+                                                   boolean requireWindowData) {
         return new MetricWalletServiceImpl(
                 client,
-                new FakeAllocationService(),
+                allocationService,
                 new CopyStrategyRuntimeRouter(),
                 Optional.empty(),
                 300,
@@ -821,7 +878,7 @@ class MetricWalletServiceImplTest {
                 .build();
     }
 
-    private static final class FakeAllocationService implements UserCopyAllocationService {
+    private static class FakeAllocationService implements UserCopyAllocationService {
         @Override public void syncDistribution(List<MetricaWalletDto> candidates) {}
         @Override public List<UserCopyAllocationEntity> getWalletUserId(UUID idUser) { return List.of(); }
         @Override public Set<UUID> getActiveUserIdsByWallet(String walletId) { return Set.of(); }
@@ -831,5 +888,30 @@ class MetricWalletServiceImplTest {
         @Override public Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId, String strategyCode) { return Optional.empty(); }
         @Override public Optional<UserCopyAllocationEntity> findOpenAllocation(UUID idUser, String walletId, String strategyCode) { return Optional.empty(); }
         @Override public void markGuardBlocked(UUID idUser, String walletId, String strategyCode, String targetStatus, String reason, OffsetDateTime cooldownUntil) {}
+    }
+
+    private static final class CacheOnlyAllocationService extends FakeAllocationService {
+        private final UserCopyAllocationEntity allocation;
+        private int databaseLoads;
+        private int cacheOnlyLoads;
+
+        private CacheOnlyAllocationService(UserCopyAllocationEntity allocation) {
+            this.allocation = allocation;
+        }
+
+        @Override
+        public List<UserCopyAllocationEntity> getActiveAllocationsForUserWallet(UUID idUser, String walletId) {
+            databaseLoads++;
+            throw new AssertionError("database-backed allocation lookup reached from hot path");
+        }
+
+        @Override
+        public List<UserCopyAllocationEntity> getActiveAllocationsForUserWalletCachedOnly(UUID idUser, String walletId) {
+            cacheOnlyLoads++;
+            return Objects.equals(allocation.getIdUser(), idUser)
+                    && allocation.getWalletId().equalsIgnoreCase(walletId)
+                    ? List.of(allocation)
+                    : List.of();
+        }
     }
 }

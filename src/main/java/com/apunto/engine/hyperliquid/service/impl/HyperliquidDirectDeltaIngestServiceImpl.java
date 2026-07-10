@@ -412,6 +412,8 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             long queueDelayMs = elapsedMs(task.acceptedNs());
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
+            meterRegistry.timer("copy_event_ingest_duration", "source_platform", "hyperliquid", "result", "ok")
+                    .record(System.nanoTime() - startedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
             String copySkipReasonCode = dispatchResult.reasonCode();
             String copySkipDiagnostic = copySkipReasonCode == null ? "" : CopyLogAdvice.fields(
                     copySkipReasonCode,
@@ -430,6 +432,8 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             MDC.put("traceId", originTraceId(copyReady));
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
+            meterRegistry.timer("copy_event_ingest_duration", "source_platform", "hyperliquid", "result", "error")
+                    .record(System.nanoTime() - startedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
             log.error("event=hyperliquid.direct_ingest.failed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
                     task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
                     ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queueDepth());

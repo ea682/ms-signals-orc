@@ -140,6 +140,13 @@ public class TradingMetrics {
         }
     }
 
+    public void candidateResolution(String operationType, String result, long nanos) {
+        registry.timer("copy_candidate_resolution_duration",
+                        "operation_type", safeTag(operationType),
+                        "result", safeTag(result))
+                .record(Duration.ofNanos(Math.max(0L, nanos)));
+    }
+
     public void directCopyExecution(String intent, String result, String reasonCode, long elapsedMs) {
         registry.counter("signals.hyperliquid.direct_copy.execution.total",
                         "intent", safeTag(intent),

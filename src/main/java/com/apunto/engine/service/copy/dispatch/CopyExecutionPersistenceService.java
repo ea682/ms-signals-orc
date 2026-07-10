@@ -15,6 +15,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -90,7 +91,7 @@ public class CopyExecutionPersistenceService {
             }
         }
 
-        copyOperationEventService.recordRequired(CopyOperationEventRecordCommand.builder()
+        UUID requiredEventId = copyOperationEventService.recordRequired(CopyOperationEventRecordCommand.builder()
                 .idOperation(persisted.getIdOperation())
                 .dispatchIntentId(intent.getId())
                 .userCopyAllocationId(intent.getUserCopyAllocationId())
@@ -123,6 +124,7 @@ public class CopyExecutionPersistenceService {
                 .reasonCode("PERSISTENCE_RECOVERED")
                 .eventTime(eventTime(response))
                 .build());
+        intentStore.linkRequiredEvent(intent.getId(), requiredEventId);
         intentStore.markPersisted(intent.getId(), intent.getClientOrderId(), persisted.getIdOperation());
         intent.setPersistedExecutedQty(cumulativeExecutedQty);
         log.info("event=copy.reconciliation.found dispatchIntentId={} binanceOrderId={} status={} decision=PERSIST_NOT_RESEND copyOperationId={}",

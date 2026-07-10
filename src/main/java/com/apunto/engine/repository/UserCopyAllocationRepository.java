@@ -172,6 +172,16 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
             """, nativeQuery = true)
     List<UserCopyAllocationEntity> findActiveByWalletId(@Param("walletId") String walletId);
 
+    @Query(value = """
+            select *
+            from futuros_operaciones.user_copy_allocation uca
+            where uca.ends_at is null
+              and uca.is_active = true
+              and lower(uca.status) = 'active'
+              and coalesce(uca.execution_mode, 'LIVE') in ('LIVE', 'MICRO_LIVE')
+            """, nativeQuery = true)
+    List<UserCopyAllocationEntity> findAllActiveRuntimeAllocations();
+
     @Query("""
             select uca
             from UserCopyAllocationEntity uca

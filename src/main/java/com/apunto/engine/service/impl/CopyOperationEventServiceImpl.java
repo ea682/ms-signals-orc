@@ -18,6 +18,7 @@ import org.springframework.util.StringUtils;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Objects;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -35,12 +36,12 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
 
     @Override
     @Transactional
-    public void recordRequired(CopyOperationEventRecordCommand command) {
-        persist(command, true);
+    public UUID recordRequired(CopyOperationEventRecordCommand command) {
+        return persist(command, true);
     }
 
-    private void persist(CopyOperationEventRecordCommand command, boolean required) {
-        if (!isRecordable(command)) {
+    private UUID persist(CopyOperationEventRecordCommand command, boolean required) {
+        if (!isRecordable(command) || (required && command.getDispatchIntentId() == null)) {
             log.warn("event=copy_operation_event.skip category=audit reasonAlias=ledger_payload_incomplete friendlyReason=evento_de_historial_incompleto explanation=no_se_guardo_el_evento_porque_faltan_campos_minimos copyImpact=ledger_missing traceId={} originId={} userId={} symbol={} eventType={}",
                     safe(command == null ? null : command.getTraceId()),
                     safe(command == null ? null : command.getIdOrderOrigin()),
@@ -51,7 +52,7 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                 throw new IllegalArgumentException(
                         "Required copy_operation_event is missing minimum ledger fields");
             }
-            return;
+            return null;
         }
 
         // Durable intents may generate multiple cumulative partial-fill progress
@@ -62,18 +63,22 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                 log.info("event=copy_operation_event.idempotent category=audit reasonAlias=client_order_already_recorded friendlyReason=evento_ya_registrado explanation=el_clientOrderId_ya_existia_en_el_historial_y_no_se_duplica copyImpact=ledger_idempotent traceId={} originId={} userId={} symbol={} eventType={} clientOrderId={} existingEventId={}",
                         safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getParsymbol()),
                         safe(command.getEventType()), safe(command.getClientOrderId()), existing.get().getIdEvent());
-                return;
+                return existing.get().getIdEvent();
             }
         }
 
-        if (command.getDispatchIntentId() != null
-                && repository.existsDispatchProgress(command.getDispatchIntentId(), command.getEventType(),
-                command.getQtyExecuted(), command.getResultingQty())) {
+        if (command.getDispatchIntentId() != null) {
+            repository.lockDispatchProgress(dispatchProgressLockKey(command));
+        }
+        var existingProgress = command.getDispatchIntentId() == null ? java.util.Optional.<CopyOperationEventEntity>empty()
+                : repository.findDispatchProgress(command.getDispatchIntentId(), command.getEventType(),
+                command.getQtyExecuted(), command.getResultingQty());
+        if (existingProgress.isPresent()) {
             log.info("event=copy_operation_event.idempotent category=audit reasonAlias=dispatch_progress_already_recorded copyImpact=ledger_idempotent dispatchIntentId={} traceId={} originId={} userId={} symbol={} eventType={} qtyExecuted={} resultingQty={}",
                     command.getDispatchIntentId(), safe(command.getTraceId()), safe(command.getIdOrderOrigin()),
                     safe(command.getIdUser()), safe(command.getParsymbol()), safe(command.getEventType()),
                     command.getQtyExecuted(), command.getResultingQty());
-            return;
+            return existingProgress.get().getIdEvent();
         }
 
         CopyOperationEventEntity entity = toEntity(command);
@@ -84,22 +89,27 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                     safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getIdWalletOrigin()), safe(command.getParsymbol()),
                     safe(command.getEventType()), safe(command.getCopyIntent()), safe(command.getBinanceOrderId()), safe(command.getClientOrderId()),
                     command.getQtyExecuted(), command.getPrice(), command.getResultingQty(), command.getRealizedPnlUsd());
+            return entity.getIdEvent();
         } catch (DataIntegrityViolationException ex) {
             if (isUniqueViolation(ex) && StringUtils.hasText(command.getClientOrderId())) {
                 log.info("event=copy_operation_event.insert_duplicate category=audit reasonAlias=ledger_duplicate_ignored friendlyReason=historial_ya_tenia_el_movimiento explanation=se_ignora_duplicado_por_clientOrderId copyImpact=ledger_idempotent traceId={} originId={} userId={} symbol={} eventType={} clientOrderId={}",
                         safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getParsymbol()),
                         safe(command.getEventType()), safe(command.getClientOrderId()));
-                return;
+                return repository.findByClientOrderId(command.getClientOrderId())
+                        .map(CopyOperationEventEntity::getIdEvent)
+                        .orElse(null);
             }
             log.error("event=copy_operation_event.insert_failed category=audit reasonAlias=ledger_insert_failed friendlyReason=no_se_pudo_guardar_historial explanation=fallo_bd_al_guardar_evento_de_copy_operation copyImpact=ledger_missing traceId={} originId={} userId={} symbol={} eventType={} errClass={} errMsg=\"{}\"",
                     safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getParsymbol()),
                     safe(command.getEventType()), ex.getClass().getSimpleName(), safe(ex.getMessage()));
             if (required) throw ex;
+            return null;
         } catch (DataAccessException | IllegalStateException | IllegalArgumentException ex) {
             log.error("event=copy_operation_event.insert_failed category=audit reasonAlias=ledger_insert_failed friendlyReason=no_se_pudo_guardar_historial explanation=fallo_bd_al_guardar_evento_de_copy_operation copyImpact=ledger_missing traceId={} originId={} userId={} symbol={} eventType={} errClass={} errMsg=\"{}\"",
                     safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getParsymbol()),
                     safe(command.getEventType()), ex.getClass().getSimpleName(), safe(ex.getMessage()));
             if (required) throw ex;
+            return null;
         }
     }
 
@@ -111,6 +121,21 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                 && StringUtils.hasText(command.getParsymbol())
                 && StringUtils.hasText(command.getTypeOperation())
                 && StringUtils.hasText(command.getEventType());
+    }
+
+    private String dispatchProgressLockKey(CopyOperationEventRecordCommand command) {
+        return "copy_event_progress|" + command.getDispatchIntentId()
+                + '|' + safeKey(command.getEventType())
+                + '|' + canonical(command.getQtyExecuted())
+                + '|' + canonical(command.getResultingQty());
+    }
+
+    private String canonical(java.math.BigDecimal value) {
+        return value == null ? "0" : value.stripTrailingZeros().toPlainString();
+    }
+
+    private String safeKey(String value) {
+        return value == null ? "" : value.trim().toUpperCase(java.util.Locale.ROOT);
     }
 
     private CopyOperationEventEntity toEntity(CopyOperationEventRecordCommand command) {
