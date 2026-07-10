@@ -77,6 +77,6 @@ public final class BinanceOrderExecutionNormalizer {
     }
 
     private boolean terminalWithoutRemainingOrder(String status) {
-        return "CANCELED".equals(status) || "EXPIRED".equals(status);
+        return "CANCELED".equals(status) || "EXPIRED".equals(status) || "REJECTED".equals(status);
     }
 }

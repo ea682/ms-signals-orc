@@ -10,38 +10,45 @@ import com.apunto.engine.shared.exception.CopyOrderRejectedException;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.LogFmt;
 import lombok.extern.slf4j.Slf4j;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
 public class CopyDispatchCoordinator {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
+    private static final Pattern CLIENT_ORDER_ID = Pattern.compile("^[A-Za-z0-9._-]{1,36}$");
 
     private final CopyDispatchIntentStore intentStore;
     private final ProcesBinanceService binanceGateway;
     private final BinanceOrderExecutionNormalizer normalizer;
     private final CopyIdempotencyKeyFactory keyFactory;
+    private final MeterRegistry meterRegistry;
 
     public CopyDispatchCoordinator(CopyDispatchIntentStore intentStore,
                                    ProcesBinanceService binanceGateway,
                                    BinanceOrderExecutionNormalizer normalizer,
-                                   CopyIdempotencyKeyFactory keyFactory) {
+                                   CopyIdempotencyKeyFactory keyFactory,
+                                   MeterRegistry meterRegistry) {
         this.intentStore = intentStore;
         this.binanceGateway = binanceGateway;
         this.normalizer = normalizer;
         this.keyFactory = keyFactory;
+        this.meterRegistry = meterRegistry;
     }
 
     public BinanceFuturesOrderClientResponse dispatch(OperationDto operation,
                                                       UserCopyAllocationEntity allocation,
                                                       BigDecimal referencePrice,
                                                       String traceId) {
+        long dispatchStartedNs = System.nanoTime();
         CopyDispatchRequest request = request(operation, allocation, referencePrice, traceId);
         CopyDispatchPermit permit = intentStore.acquire(request);
 
@@ -78,7 +85,26 @@ public class CopyDispatchCoordinator {
         try {
             log.info("event=copy.dispatch.claimed dispatchIntentId={} workerId={} attempt=1 idempotencyKey={}",
                     permit.intentId(), Thread.currentThread().getName(), request.idempotencyKey());
-            BinanceFuturesOrderClientResponse response = binanceGateway.operationPosition(operation);
+            meterRegistry.timer("copy_pre_network_duration",
+                            "execution_mode", metricTag(request.identity().executionMode()),
+                            "operation_type", metricTag(request.identity().copyIntent()),
+                            "result", "authorized")
+                    .record(System.nanoTime() - dispatchStartedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+            long engineStartedNs = System.nanoTime();
+            BinanceFuturesOrderClientResponse response;
+            String engineResult = "completed";
+            try {
+                response = binanceGateway.operationPosition(operation);
+            } catch (RuntimeException ex) {
+                engineResult = "error";
+                throw ex;
+            } finally {
+                meterRegistry.timer("copy_binance_engine_duration",
+                                "execution_mode", metricTag(request.identity().executionMode()),
+                                "operation_type", metricTag(request.identity().copyIntent()),
+                                "result", engineResult)
+                        .record(System.nanoTime() - engineStartedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+            }
             NormalizedBinanceExecution execution = normalizer.normalize(response);
             log.info("event=copy.dispatch.response.normalized dispatchIntentId={} orderId={} clientOrderId={} status={} executedQty={} avgPrice={} avgPriceStatus={} accepted={} requiresReconciliation={} safeToRetrySend={}",
                     permit.intentId(), execution.orderId(), safe(execution.clientOrderId()), execution.status(),
@@ -137,6 +163,13 @@ public class CopyDispatchCoordinator {
         markPersisted(null, clientOrderId, copyOperationId);
     }
 
+    public void linkRequiredEvent(UUID intentId, UUID copyOperationEventId) {
+        if (intentId == null || copyOperationEventId == null) {
+            throw new IllegalArgumentException("dispatch intent and required ledger event are required");
+        }
+        intentStore.linkRequiredEvent(intentId, copyOperationEventId);
+    }
+
     public void markPersisted(UUID intentId, String clientOrderId, UUID copyOperationId) {
         if (intentId == null && (clientOrderId == null || clientOrderId.isBlank())) return;
         intentStore.markPersisted(intentId, clientOrderId, copyOperationId);
@@ -181,6 +214,12 @@ public class CopyDispatchCoordinator {
                     LogFmt.kv("allocationId", allocation.getId(), "executionMode", safe(rawMode)));
         }
         String copyIntent = firstNonBlank(operation.getCopyIntent(), deriveIntent(operation));
+        String symbol = firstNonBlank(operation.getSymbol());
+        if (symbol == null) {
+            throw new SkipExecutionException("COPY_SYMBOL_REQUIRED",
+                    "El simbolo real es obligatorio antes de crear el dispatch intent",
+                    LogFmt.kv("allocationId", allocation.getId(), "copyIntent", copyIntent));
+        }
         String originId = firstNonBlank(operation.getOriginId());
         String legacySourceIdentity = originId == null ? null
                 : originId + '|' + copyIntent + '|' + safe(operation.getQuantity());
@@ -209,6 +248,16 @@ public class CopyDispatchCoordinator {
                 sourceEventId,
                 copyIntent);
         String idempotencyKey = keyFactory.create(identity);
+        String clientOrderId = firstNonBlank(operation.getClientOrderId());
+        if (clientOrderId == null) {
+            clientOrderId = keyFactory.clientOrderId(idempotencyKey);
+            operation.setClientOrderId(clientOrderId);
+        }
+        if (!CLIENT_ORDER_ID.matcher(clientOrderId).matches()) {
+            throw new SkipExecutionException("COPY_CLIENT_ORDER_ID_INVALID",
+                    "clientOrderId debe cumplir el contrato Binance antes del claim durable",
+                    LogFmt.kv("allocationId", allocation.getId(), "clientOrderIdLength", clientOrderId.length()));
+        }
         BigDecimal ref = positive(operation.getReferencePrice()) ? operation.getReferencePrice() : referencePrice;
         BigDecimal notional = positive(operation.getRequestedNotionalUsd())
                 ? operation.getRequestedNotionalUsd()
@@ -222,16 +271,16 @@ public class CopyDispatchCoordinator {
         }
         boolean reservePosition = Boolean.TRUE.equals(operation.getReservePosition());
         String requestHash = keyFactory.hashPayload(String.join("|",
-                safe(operation.getSymbol()), safe(name(operation.getSide())),
+                symbol, safe(name(operation.getSide())),
                 safe(name(operation.getPositionSide())), safe(name(operation.getType())),
                 canonical(qty), canonical(requestedMargin), canonical(notional), canonical(ref),
                 operation.getLeverage() == null ? "" : Integer.toString(operation.getLeverage()),
                 Boolean.toString(operation.isReduceOnly()),
                 String.valueOf(Boolean.TRUE.equals(operation.getConfigureAccountSettings())),
-                safe(operation.getClientOrderId())));
+                clientOrderId));
 
         return new CopyDispatchRequest(idempotencyKey, identity, operation, operation.getWalletId(),
-                operation.getSymbol(), name(operation.getSide()), name(operation.getPositionSide()),
+                symbol, name(operation.getSide()), name(operation.getPositionSide()),
                 operation.isReduceOnly(), qty, requestedMargin, notional, ref,
                 operation.getLeverage(), reservePosition, operation.getSourceEventType(), requestHash, traceId);
     }
@@ -288,6 +337,12 @@ public class CopyDispatchCoordinator {
         if (value == null) return "";
         String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
         return clean.length() > 500 ? clean.substring(0, 500) : clean;
+    }
+
+    private String metricTag(String value) {
+        if (value == null || value.isBlank()) return "unknown";
+        String normalized = value.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+        return normalized.length() > 40 ? normalized.substring(0, 40) : normalized;
     }
 
     private String name(Enum<?> value) {

@@ -16,6 +16,7 @@ import com.apunto.engine.service.copy.CopyStrategyGuardRuntimeCache;
 import com.apunto.engine.service.copy.CopyRuntimeGuardPolicy;
 import com.apunto.engine.shared.util.CopyLogAdvice;
 import lombok.extern.slf4j.Slf4j;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -39,6 +40,7 @@ public class HyperliquidCopyCandidateResolver {
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     private final CopyStrategyGuardRuntimeCache copyStrategyGuardRuntimeCache;
     private final CopyRuntimeGuardPolicy copyRuntimeGuardPolicy;
+    private final MeterRegistry meterRegistry;
 
     @Value("${operation.job.ingest.filter-by-wallet-allocation:${copy.job.ingest.filter-by-wallet-allocation:true}}")
     private boolean filterByWalletAllocation = true;
@@ -55,7 +57,8 @@ public class HyperliquidCopyCandidateResolver {
             ActiveCopyOperationCache activeCopyOperationCache,
             CopyStrategyRuntimeRouter copyStrategyRuntimeRouter,
             CopyStrategyGuardRuntimeCache copyStrategyGuardRuntimeCache,
-            CopyRuntimeGuardPolicy copyRuntimeGuardPolicy
+            CopyRuntimeGuardPolicy copyRuntimeGuardPolicy,
+            MeterRegistry meterRegistry
     ) {
         this.userDetailCachedService = userDetailCachedService;
         this.userCopyAllocationService = userCopyAllocationService;
@@ -63,12 +66,13 @@ public class HyperliquidCopyCandidateResolver {
         this.copyStrategyRuntimeRouter = copyStrategyRuntimeRouter;
         this.copyStrategyGuardRuntimeCache = copyStrategyGuardRuntimeCache;
         this.copyRuntimeGuardPolicy = copyRuntimeGuardPolicy;
+        this.meterRegistry = meterRegistry;
     }
 
     public CandidateUsers resolve(HyperliquidMappedDelta mappedDelta, CopyJobAction action) {
         OperacionEvent event = mappedDelta.event();
         OperacionDto operation = event.getOperacion();
-        List<UserDetailDto> usersCached = safeUsers(userDetailCachedService.getUsers());
+        List<UserDetailDto> usersCached = safeUsers(userDetailCachedService.getUsersCachedOnly());
         HyperliquidDeltaType deltaType = HyperliquidDeltaType.from(mappedDelta.deltaType() == null ? event.getDeltaType() : mappedDelta.deltaType());
 
         if (action == CopyJobAction.CLOSE) {
@@ -173,7 +177,7 @@ public class HyperliquidCopyCandidateResolver {
             return new CandidateUsers(usersCached, eligible, "allocation_wallet_missing");
         }
 
-        List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWallet(walletId);
+        List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWalletCachedOnly(walletId);
         Map<String, CopyStrategyGuardDecision> guardByProfile = new HashMap<>();
         Set<UUID> activeUserIds = new java.util.LinkedHashSet<>();
         for (UserCopyAllocationEntity allocation : activeAllocations) {
@@ -243,6 +247,10 @@ public class HyperliquidCopyCandidateResolver {
                 )
         );
         CopyRuntimeGuardPolicy.Decision runtimeDecision = copyRuntimeGuardPolicy.decide(allocation, decision);
+        meterRegistry.timer("copy_runtime_guard_duration",
+                        "execution_mode", metricTag(allocation.getExecutionMode()),
+                        "result", runtimeDecision.allowed() ? "allowed" : "blocked")
+                .record(System.nanoTime() - startedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
         log.info("event=copy.guard.decision userCopyAllocationId={} executionMode={} decision={} reasonCode={} guardSource={} elapsedMs={}",
                 allocation.getId(),
                 safeLog(allocation.getExecutionMode()),
@@ -297,6 +305,12 @@ public class HyperliquidCopyCandidateResolver {
 
     private long elapsedMs(long startedNs) {
         return (System.nanoTime() - startedNs) / 1_000_000L;
+    }
+
+    private String metricTag(String value) {
+        if (value == null || value.isBlank()) return "unknown";
+        String normalized = value.trim().toLowerCase(java.util.Locale.ROOT).replace('-', '_').replace(' ', '_');
+        return normalized.length() > 40 ? normalized.substring(0, 40) : normalized;
     }
 
     public record CandidateUsers(

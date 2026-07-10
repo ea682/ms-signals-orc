@@ -23,7 +23,21 @@ public interface UserCopyAllocationService {
 
     List<UserCopyAllocationEntity> getActiveAllocationsByWallet(String walletId);
 
+    default List<UserCopyAllocationEntity> getActiveAllocationsByWalletCachedOnly(String walletId) {
+        return List.of();
+    }
+
     List<UserCopyAllocationEntity> getActiveAllocationsForUserWallet(UUID idUser, String walletId);
+
+    default List<UserCopyAllocationEntity> getActiveAllocationsForUserWalletCachedOnly(UUID idUser, String walletId) {
+        if (idUser == null) {
+            return List.of();
+        }
+        return getActiveAllocationsByWalletCachedOnly(walletId).stream()
+                .filter(java.util.Objects::nonNull)
+                .filter(allocation -> idUser.equals(allocation.getIdUser()))
+                .toList();
+    }
 
     Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId);
 

@@ -31,6 +31,12 @@ public final class CopyIdempotencyKeyFactory {
         return sha256(payload == null ? "" : payload);
     }
 
+    public String clientOrderId(String idempotencyKey) {
+        String key = required(idempotencyKey, "idempotencyKey");
+        if (key.length() < 32) throw new IllegalArgumentException("idempotencyKey is too short");
+        return "cpO_" + key.substring(0, 32);
+    }
+
     private String sha256(String value) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");

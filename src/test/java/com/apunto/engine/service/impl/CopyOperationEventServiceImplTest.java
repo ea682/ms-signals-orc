@@ -8,11 +8,14 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.lang.reflect.Proxy;
 import java.util.UUID;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import com.apunto.engine.entity.CopyOperationEventEntity;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class CopyOperationEventServiceImplTest {
 
@@ -50,7 +53,9 @@ class CopyOperationEventServiceImplTest {
                 CopyOperationEventRepository.class.getClassLoader(),
                 new Class<?>[]{CopyOperationEventRepository.class},
                 (proxy, method, args) -> switch (method.getName()) {
-                    case "existsDispatchProgress" -> true;
+                    case "lockDispatchProgress" -> null;
+                    case "findDispatchProgress" -> Optional.of(CopyOperationEventEntity.builder()
+                            .idEvent(UUID.randomUUID()).build());
                     case "saveAndFlush" -> {
                         inserts.incrementAndGet();
                         yield args[0];
@@ -75,7 +80,7 @@ class CopyOperationEventServiceImplTest {
                 .executionMode("MICRO_LIVE")
                 .build();
 
-        assertDoesNotThrow(() -> service.recordRequired(replay));
+        assertNotNull(service.recordRequired(replay));
 
         assertEquals(0, inserts.get());
         assertEquals(0, outboxWrites.get());

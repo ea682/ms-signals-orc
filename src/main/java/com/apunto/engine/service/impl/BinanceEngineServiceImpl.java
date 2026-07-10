@@ -40,6 +40,7 @@ import com.apunto.engine.service.copy.budget.CopyBudgetResolver.CopyBudgetReques
 import com.apunto.engine.service.copy.dispatch.BinanceOrderExecutionNormalizer;
 import com.apunto.engine.service.copy.dispatch.CopyDispatchCoordinator;
 import com.apunto.engine.service.copy.dispatch.CopyExecutionState;
+import com.apunto.engine.service.copy.dispatch.CopyRealExecutionGate;
 import com.apunto.engine.service.copy.dispatch.NormalizedBinanceExecution;
 import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocation;
 import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocator;
@@ -69,6 +70,7 @@ import com.apunto.engine.shared.util.CopyLogAdvice;
 import com.apunto.engine.shared.util.CopySymbolIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
@@ -292,32 +294,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     @Value("${binance.trading-config-preconfigure.margin-type:CROSSED}")
     private String configuredLiveMarginType;
 
-    @Value("${copy.live.enabled:false}")
-    private boolean copyLiveEnabled;
-
-    @Value("${copy.live.canary-enabled:false}")
-    private boolean copyLiveCanaryEnabled;
-
-    @Value("${copy.live.dry-run:true}")
-    private boolean copyLiveDryRun;
-
-    @Value("${copy.live.whitelist.user-ids:}")
-    private String copyLiveWhitelistUserIds;
-
-    @Value("${copy.live.whitelist.wallet-ids:}")
-    private String copyLiveWhitelistWalletIds;
-
-    @Value("${copy.live.whitelist.symbols:}")
-    private String copyLiveWhitelistSymbols;
-
-    @Value("${copy.live.whitelist.allocation-ids:}")
-    private String copyLiveWhitelistAllocationIds;
-
-    @Value("${copy.live.whitelist.strategy-codes:}")
-    private String copyLiveWhitelistStrategyCodes;
-
     private final CopyTradingMapper copyTradingMapper;
     private final FuturesPositionService futuresPositionService;
+    private final CopyRealExecutionGate copyRealExecutionGate;
+    private final MeterRegistry meterRegistry;
 
     private final ConcurrentMap<String, Long> processedOperations = new ConcurrentHashMap<>();
 
@@ -660,7 +640,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
 
             final long calcNs = System.nanoTime();
-            final PreparedOpen prepared = prepareOpenOperation(event, userDetail, walletMetric, allocation);
+            final PreparedOpen prepared = prepareOpenOperationTimed(event, userDetail, walletMetric, allocation);
             log.info("event=copy.job.phase action=OPEN phase=calculate_target originId={} userId={} wallet={} symbol={} elapsedMs={}",
                     originId, userId, walletId, prepared.symbol, elapsedMsSince(calcNs));
             BinanceFuturesOrderClientResponse order = null;
@@ -880,7 +860,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             BinanceFuturesOrderClientResponse order = null;
             try {
                 final long calcNs = System.nanoTime();
-                prepared = prepareOpenOperation(event, userDetail, walletMetric, allocation);
+                prepared = prepareOpenOperationTimed(event, userDetail, walletMetric, allocation);
                 log.info("event=copy.job.phase action=OPEN phase=calculate_target originId={} userId={} allocationId={} strategy={} wallet={} symbol={} elapsedMs={}",
                         originId, userId, allocationId, strategyCode, walletId, prepared.symbol, elapsedMsSince(calcNs));
 
@@ -1562,7 +1542,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             if (metric == null) continue;
             metricsByStrategy.putIfAbsent(copyStrategyRuntimeRouter.strategyCodeOf(metric), metric);
         }
-        final List<UserCopyAllocationEntity> allocations = userCopyAllocationService.getActiveAllocationsForUserWallet(userId, walletId);
+        final List<UserCopyAllocationEntity> allocations = userCopyAllocationService.getActiveAllocationsForUserWalletCachedOnly(userId, walletId);
         final List<AllocationCopyContext> contexts = new ArrayList<>();
 
         for (UserCopyAllocationEntity allocation : allocations) {
@@ -1589,7 +1569,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private List<MetricaWalletDto> resolveWalletMetrics(OperacionEvent event, String originId, String walletId, UserDetailDto userDetail) {
         final UUID userId = userDetail.getUser().getId();
-        final List<MetricaWalletDto> metrics = normalizeCapitalShares(metricWalletService.getCandidatesUser(userId));
+        final List<MetricaWalletDto> metrics = normalizeCapitalShares(
+                metricWalletService.getCandidatesForUserWalletCachedOnly(userId, walletId));
         final String walletKey = normalizeSymbolKey(walletId);
 
         final CopyJobAction action = event == null || event.getTipo() == null
@@ -1610,7 +1591,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private MetricaWalletDto resolveWalletMetric(OperacionEvent event, String originId, String walletId, UserDetailDto userDetail) {
         final UUID userId = userDetail.getUser().getId();
-        final List<MetricaWalletDto> metrics = normalizeCapitalShares(metricWalletService.getCandidatesUser(userId));
+        final List<MetricaWalletDto> metrics = normalizeCapitalShares(
+                metricWalletService.getCandidatesForUserWalletCachedOnly(userId, walletId));
         final String walletKey = normalizeSymbolKey(walletId);
 
         final long candidates = metrics.size();
@@ -1721,13 +1703,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (strategyCode == null || strategyCode.isBlank()) {
             return false;
         }
-        return userCopyAllocationService.findOpenAllocation(
-                userId,
-                walletId,
-                strategyCode,
-                metricScopeType(metric),
-                metricScopeValue(metric, strategyCode)
-        ).isPresent();
+        return resolveAllocationForMetric(userId, walletId, metric) != null;
     }
 
     private String sampleWalletIds(List<MetricaWalletDto> metrics, int limit) {
@@ -1832,14 +1808,25 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (userDetail == null || userDetail.getUser() == null || userDetail.getUser().getId() == null || walletId == null || metric == null) {
             return null;
         }
+        return resolveAllocationForMetric(userDetail.getUser().getId(), walletId, metric);
+    }
+
+    private UserCopyAllocationEntity resolveAllocationForMetric(UUID userId, String walletId, MetricaWalletDto metric) {
+        if (userId == null || walletId == null || metric == null) {
+            return null;
+        }
         String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(metric);
-        return userCopyAllocationService.findOpenAllocation(
-                userDetail.getUser().getId(),
-                walletId,
+        String expectedKey = copyStrategyRuntimeRouter.allocationKey(
+                normalizeSymbolKey(walletId),
                 strategyCode,
                 metricScopeType(metric),
                 metricScopeValue(metric, strategyCode)
-        ).orElse(null);
+        );
+        return userCopyAllocationService.getActiveAllocationsForUserWalletCachedOnly(userId, walletId).stream()
+                .filter(Objects::nonNull)
+                .filter(allocation -> Objects.equals(copyStrategyRuntimeRouter.allocationKey(allocation), expectedKey))
+                .findFirst()
+                .orElse(null);
     }
 
     private static String metricScopeType(MetricaWalletDto metric) {
@@ -3237,7 +3224,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (shadow) {
             copyOperationEventService.record(eventCommand);
         } else {
-            copyOperationEventService.recordRequired(eventCommand);
+            UUID requiredEventId = copyOperationEventService.recordRequired(eventCommand);
+            copyDispatchCoordinator.linkRequiredEvent(order.getDispatchIntentId(), requiredEventId);
         }
         timing.add(CopyFlowTiming.Stage.DB_PERSIST, dbNs);
         timing.add(CopyFlowTiming.Stage.BINANCE_RESPONSE_TO_PERSIST, responseToPersistNs);
@@ -3527,6 +3515,20 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (timing == null) {
             return;
         }
+        String executionModeTag = metricTag(allocation == null ? null : allocation.getExecutionMode());
+        String operationTypeTag = metricTag(originalEventType);
+        String resultTag = metricTag(result);
+        meterRegistry.timer("copy_end_to_end_duration",
+                        "execution_mode", executionModeTag,
+                        "operation_type", operationTypeTag,
+                        "result", resultTag)
+                .record(java.time.Duration.ofMillis(Math.max(0L, timing.totalMs())));
+        meterRegistry.timer("copy_post_ack_persistence_duration",
+                        "execution_mode", executionModeTag,
+                        "operation_type", operationTypeTag,
+                        "result", resultTag)
+                .record(java.time.Duration.ofMillis(Math.max(0L,
+                        timing.stageMs(CopyFlowTiming.Stage.BINANCE_RESPONSE_TO_PERSIST))));
         final CopyLeverageSnapshot leverage = leverageSnapshot == null ? CopyLeverageSnapshot.unknown() : leverageSnapshot;
         log.info("{} originalEventType={} computedDeltaType={} reasonCode={} symbol={} side={} walletId={} profileKey={} strategyCode={} originId={} binanceOrderId={} clientOrderId={} traceId={} expectedPrice={} executedAvgPrice={} priceSource={} rawSlippageBps={} adverseSlippageBps={} rawSlippageUsd={} adverseSlippageUsd={} slippageStatus={} {}",
                 timing.logfmtCore("live", result),
@@ -4495,6 +4497,26 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         );
     }
 
+    private PreparedOpen prepareOpenOperationTimed(OperacionEvent event,
+                                                    UserDetailDto userDetail,
+                                                    MetricaWalletDto walletMetric,
+                                                    UserCopyAllocationEntity allocation) {
+        long startedNs = System.nanoTime();
+        String result = "success";
+        try {
+            return prepareOpenOperation(event, userDetail, walletMetric, allocation);
+        } catch (RuntimeException ex) {
+            result = "blocked";
+            throw ex;
+        } finally {
+            meterRegistry.timer("copy_sizing_duration",
+                            "execution_mode", metricTag(executionModeOf(allocation)),
+                            "operation_type", "open",
+                            "result", result)
+                    .record(System.nanoTime() - startedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+        }
+    }
+
     private OperationDto buildBuyAndSellPosition(String symbol,
                                                  OperacionEvent event,
                                                  BigDecimal quantity,
@@ -5394,78 +5416,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
     }
 
-    private LiveExecutionGateDecision liveExecutionGate(OperationDto dto, UserCopyAllocationEntity allocation) {
-        boolean reduceOnly = dto != null && dto.isReduceOnly();
-        if (!copyLiveEnabled) {
-            return new LiveExecutionGateDecision(false, "LIVE_DISABLED", false);
-        }
-        if (copyLiveDryRun) {
-            return new LiveExecutionGateDecision(false, "LIVE_DRY_RUN", false);
-        }
-        if (reduceOnly) {
-            return new LiveExecutionGateDecision(true, "LIVE_REDUCTION_ALLOWED", true);
-        }
-        if (!copyLiveCanaryEnabled) {
-            return new LiveExecutionGateDecision(false, "LIVE_CANARY_DISABLED", false);
-        }
-        boolean whitelisted = liveWhitelisted(dto, allocation);
-        if (!whitelisted) {
-            return new LiveExecutionGateDecision(false, "LIVE_WHITELIST_BLOCKED", false);
-        }
-        return new LiveExecutionGateDecision(true, "LIVE_CANARY_WHITELIST_ALLOWED", true);
-    }
-
-    private boolean liveWhitelisted(OperationDto dto, UserCopyAllocationEntity allocation) {
-        boolean anyConfigured = false;
-        Set<String> users = parseWhitelist(copyLiveWhitelistUserIds);
-        if (!users.isEmpty()) {
-            anyConfigured = true;
-            if (!users.contains(normalizeWhitelistValue(dto == null ? null : dto.getUserId()))) return false;
-        }
-        Set<String> wallets = parseWhitelist(copyLiveWhitelistWalletIds);
-        if (!wallets.isEmpty()) {
-            anyConfigured = true;
-            if (!wallets.contains(normalizeWhitelistValue(dto == null ? null : dto.getWalletId()))) return false;
-        }
-        Set<String> symbols = parseWhitelist(copyLiveWhitelistSymbols);
-        if (!symbols.isEmpty()) {
-            anyConfigured = true;
-            if (!symbols.contains(normalizeWhitelistValue(dto == null ? null : dto.getSymbol()))) return false;
-        }
-        Set<String> allocations = parseWhitelist(copyLiveWhitelistAllocationIds);
-        if (!allocations.isEmpty()) {
-            anyConfigured = true;
-            if (!allocations.contains(normalizeWhitelistValue(allocation == null || allocation.getId() == null ? null : allocation.getId().toString()))) return false;
-        }
-        Set<String> strategies = parseWhitelist(copyLiveWhitelistStrategyCodes);
-        if (!strategies.isEmpty()) {
-            anyConfigured = true;
-            if (!strategies.contains(normalizeWhitelistValue(allocation == null ? null : allocation.getCopyStrategyCode()))) return false;
-        }
-        return anyConfigured;
-    }
-
-    private Set<String> parseWhitelist(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return Set.of();
-        }
-        return java.util.Arrays.stream(raw.split(","))
-                .map(this::normalizeWhitelistValue)
-                .filter(value -> value != null && !value.isBlank())
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-    }
-
-    private String normalizeWhitelistValue(String value) {
-        if (value == null) {
-            return null;
-        }
-        String normalized = value.trim();
-        return normalized.isBlank() ? null : normalized.toUpperCase(Locale.ROOT);
-    }
-
-    private record LiveExecutionGateDecision(boolean allowed, String reasonCode, boolean realBinanceAllowed) {
-    }
-
     private BinanceFuturesOrderClientResponse executeOrShadow(OperationDto dto, BigDecimal priceRef, UserCopyAllocationEntity allocation, String traceId) {
         if (!isShadowMode(allocation)) {
             CopyFlowTiming timing = currentLiveFlowTiming();
@@ -5477,12 +5427,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             }
             long httpNs = timing == null ? 0L : timing.mark();
             boolean httpRecorded = false;
-            LiveExecutionGateDecision liveGate = liveExecutionGate(dto, allocation);
+            CopyRealExecutionGate.Decision liveGate = copyRealExecutionGate.evaluate(dto, allocation);
             if (!liveGate.allowed()) {
                 if (timing != null) {
                     timing.add(CopyFlowTiming.Stage.BINANCE_HTTP, httpNs);
                 }
-                log.warn("event=copy.live.gate.blocked reasonCode={} traceId={} userId={} wallet={} allocationId={} strategy={} symbol={} side={} positionSide={} reduceOnly={} liveEnabled={} canaryEnabled={} dryRun={} realBinanceAllowed={} copyImpact=mock_fill_no_real_binance",
+                log.warn("event=copy.live.gate.blocked reasonCode={} traceId={} userId={} wallet={} allocationId={} strategy={} symbol={} side={} positionSide={} reduceOnly={} executionMode={} realBinanceAllowed={} copyImpact=no_order_no_local_fill",
                         liveGate.reasonCode(),
                         traceId,
                         dto == null ? null : dto.getUserId(),
@@ -5493,11 +5443,18 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         dto == null ? null : dto.getSide(),
                         dto == null ? null : dto.getPositionSide(),
                         dto != null && dto.isReduceOnly(),
-                        copyLiveEnabled,
-                        copyLiveCanaryEnabled,
-                        copyLiveDryRun,
+                        liveGate.executionMode(),
                         liveGate.realBinanceAllowed());
-                return buildShadowOrderResponse(dto, priceRef);
+                if (createdTiming) {
+                    LIVE_FLOW_TIMING.remove();
+                }
+                throw new SkipExecutionException(
+                        liveGate.reasonCode(),
+                        "El dispatch real esta bloqueado por un kill switch o gate de canary",
+                        LogFmt.kv("executionMode", liveGate.executionMode(),
+                                "allocationId", allocation == null ? null : allocation.getId(),
+                                "reduceOnly", dto != null && dto.isReduceOnly(),
+                                "realBinanceAllowed", false));
             }
             try {
                 long submittedNs = System.nanoTime();
@@ -6291,5 +6248,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private String safeLog(String s) {
         return LogFmt.sanitize(s == null ? "" : s);
+    }
+
+    private String metricTag(String value) {
+        if (value == null || value.isBlank()) return "unknown";
+        String normalized = value.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+        return normalized.length() > 40 ? normalized.substring(0, 40) : normalized;
     }
 }

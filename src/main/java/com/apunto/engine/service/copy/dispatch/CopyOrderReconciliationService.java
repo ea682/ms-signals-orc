@@ -26,6 +26,7 @@ public class CopyOrderReconciliationService {
         if (ids.isEmpty()) return List.of();
         List<CopyDispatchIntentEntity> intents = repository.findAllById(ids);
         for (CopyDispatchIntentEntity intent : intents) {
+            CopyDispatchStatePolicy.requireTransition(intent.getStatus(), "RECONCILING");
             intent.setStatus("RECONCILING");
             intent.setReconciliationAttempts(intent.getReconciliationAttempts() + 1);
             intent.setClaimedBy(workerId);
@@ -40,7 +41,9 @@ public class CopyOrderReconciliationService {
     public void markLookupNotFound(UUID intentId, int maxAttempts) {
         CopyDispatchIntentEntity intent = required(intentId);
         boolean exhausted = intent.getReconciliationAttempts() >= maxAttempts;
-        intent.setStatus(exhausted ? "FAILED_FINAL" : "RECONCILING");
+        String nextStatus = exhausted ? "MANUAL_REVIEW" : "RECONCILING";
+        CopyDispatchStatePolicy.requireTransition(intent.getStatus(), nextStatus);
+        intent.setStatus(nextStatus);
         // Fail closed: an unproven absence may still be a real Binance order.
         intent.setReservationStatus("PENDING");
         intent.setLastErrorCode(exhausted ? "ORDER_NOT_FOUND_REQUIRES_MANUAL_REVIEW" : "ORDER_NOT_FOUND_YET");
@@ -53,6 +56,7 @@ public class CopyOrderReconciliationService {
     @Transactional
     public void deferNewOrder(UUID intentId) {
         CopyDispatchIntentEntity intent = required(intentId);
+        CopyDispatchStatePolicy.requireTransition(intent.getStatus(), "NEW");
         intent.setStatus("NEW");
         intent.setReservationStatus("PENDING");
         intent.setNextReconciliationAt(OffsetDateTime.now(ZoneOffset.UTC).plusSeconds(backoffSeconds(intent.getReconciliationAttempts())));
@@ -62,7 +66,8 @@ public class CopyOrderReconciliationService {
     @Transactional
     public void markUnresolvedTerminal(UUID intentId, String reasonCode) {
         CopyDispatchIntentEntity intent = required(intentId);
-        intent.setStatus("FAILED_FINAL");
+        CopyDispatchStatePolicy.requireTransition(intent.getStatus(), "MANUAL_REVIEW");
+        intent.setStatus("MANUAL_REVIEW");
         // The exchange outcome/exposure is not fully resolved. Keep budget fail-closed.
         intent.setReservationStatus("PENDING");
         intent.setLastErrorCode(trim(reasonCode, 80));
@@ -74,7 +79,8 @@ public class CopyOrderReconciliationService {
     @Transactional
     public void markPriceResolutionExhausted(UUID intentId) {
         CopyDispatchIntentEntity intent = required(intentId);
-        intent.setStatus("PERSISTED");
+        CopyDispatchStatePolicy.requireTransition(intent.getStatus(), "MANUAL_REVIEW");
+        intent.setStatus("MANUAL_REVIEW");
         // The fill is already represented by copy_operation; only the final price
         // remains provisional, so active operation margin owns the budget now.
         intent.setReservationStatus("CONFIRMED");
@@ -88,7 +94,9 @@ public class CopyOrderReconciliationService {
     public void markFailure(UUID intentId, int maxAttempts, String code, String detail) {
         CopyDispatchIntentEntity intent = required(intentId);
         boolean exhausted = intent.getReconciliationAttempts() >= maxAttempts;
-        intent.setStatus(exhausted ? "FAILED_FINAL" : "RECONCILING");
+        String nextStatus = exhausted ? "MANUAL_REVIEW" : "RECONCILING";
+        CopyDispatchStatePolicy.requireTransition(intent.getStatus(), nextStatus);
+        intent.setStatus(nextStatus);
         intent.setReservationStatus("PENDING");
         intent.setLastErrorCode(trim(code, 80));
         intent.setLastErrorDetail(trim(detail, 1000));

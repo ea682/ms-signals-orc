@@ -125,6 +125,56 @@ class CopyDispatchCoordinatorTest {
     }
 
     @Test
+    void databaseTimeoutBeforeClaimNeverTouchesBinance() {
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = new CopyDispatchCoordinator(
+                new FailingAcquireStore(), gateway, new BinanceOrderExecutionNormalizer(),
+                new CopyIdempotencyKeyFactory(), new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+
+        assertThrows(org.springframework.dao.QueryTimeoutException.class,
+                () -> coordinator.dispatch(open("evt-db-timeout"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals(0, gateway.calls.get());
+    }
+
+    @Test
+    void httpFiveHundredAfterPossibleSendNeverRetriesBlindly() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(new CopyBinanceClientException("http 500 after request body"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-http-500"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-1"));
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-http-500"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-2"));
+
+        assertEquals(1, gateway.calls.get());
+        assertTrue(store.hasReconciling());
+    }
+
+    @Test
+    void malformedAckWithoutOrderIdNeverRetriesBlindly() {
+        FakeStore store = new FakeStore();
+        BinanceFuturesOrderClientResponse malformed = filled("100");
+        malformed.setOrderId(null);
+        FakeGateway gateway = new FakeGateway(malformed);
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-malformed"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-1"));
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-malformed"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-2"));
+
+        assertEquals(1, gateway.calls.get());
+        assertTrue(store.hasReconciling());
+    }
+
+    @Test
     void liveFilledWithNullAvgPriceMustNotRetry() {
         FakeStore store = new FakeStore();
         FakeGateway gateway = new FakeGateway(filled(null));
@@ -403,7 +453,8 @@ class CopyDispatchCoordinatorTest {
     }
 
     private CopyDispatchCoordinator coordinator(FakeStore store, FakeGateway gateway) {
-        return new CopyDispatchCoordinator(store, gateway, new BinanceOrderExecutionNormalizer(), new CopyIdempotencyKeyFactory());
+        return new CopyDispatchCoordinator(store, gateway, new BinanceOrderExecutionNormalizer(),
+                new CopyIdempotencyKeyFactory(), new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
 
     private OperationDto open(String sourceEventId) {
@@ -543,5 +594,85 @@ class CopyDispatchCoordinatorTest {
         boolean hasReconciling() { return statuses.containsValue("RECONCILING"); }
         boolean hasPersistencePending() { return statuses.containsValue("PERSISTENCE_PENDING"); }
         boolean hasRejected() { return statuses.containsValue("REJECTED"); }
+    }
+
+    @Test
+    void blankSymbolRejectsBeforeClaimAndGateway() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+        OperationDto operation = open("evt-blank-symbol");
+        operation.setSymbol("  ");
+
+        SkipExecutionException rejected = assertThrows(SkipExecutionException.class,
+                () -> coordinator.dispatch(operation,
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals("COPY_SYMBOL_REQUIRED", rejected.getReasonCode());
+        assertEquals(0, store.size());
+        assertEquals(0, gateway.calls.get());
+    }
+
+    @Test
+    void restartDerivesSameClientOrderIdFromDurableIdentity() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+        OperationDto first = open("evt-derived-client-id");
+        OperationDto replay = open("evt-derived-client-id");
+        first.setClientOrderId(null);
+        replay.setClientOrderId(null);
+
+        coordinator.dispatch(first, allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-1");
+        coordinator.dispatch(replay, allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-2");
+
+        assertEquals(first.getClientOrderId(), replay.getClientOrderId());
+        assertTrue(first.getClientOrderId().matches("[A-Za-z0-9._-]{1,36}"));
+        assertEquals(1, gateway.calls.get());
+    }
+
+    @Test
+    void binanceEngineTimerClassifiesTransportFailureAsError() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(new CopyBinanceClientException("connection reset"));
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        CopyDispatchCoordinator coordinator = new CopyDispatchCoordinator(
+                store, gateway, new BinanceOrderExecutionNormalizer(), new CopyIdempotencyKeyFactory(), registry);
+
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-error-timer"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals(1L, registry.find("copy_binance_engine_duration")
+                .tag("result", "error").timer().count());
+        assertTrue(registry.find("copy_binance_engine_duration")
+                .tag("result", "completed").timer() == null);
+    }
+
+    @Test
+    void invalidClientOrderIdRejectsBeforeClaimAndGateway() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+        OperationDto operation = open("evt-invalid-client-id");
+        operation.setClientOrderId("invalid client id with spaces");
+
+        SkipExecutionException rejected = assertThrows(SkipExecutionException.class,
+                () -> coordinator.dispatch(operation,
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals("COPY_CLIENT_ORDER_ID_INVALID", rejected.getReasonCode());
+        assertEquals(0, store.size());
+        assertEquals(0, gateway.calls.get());
+    }
+
+    private static final class FailingAcquireStore implements CopyDispatchIntentStore {
+        @Override public CopyDispatchPermit acquire(CopyDispatchRequest request) {
+            throw new org.springframework.dao.QueryTimeoutException("simulated intent insert timeout");
+        }
+        @Override public void acknowledge(UUID id, NormalizedBinanceExecution execution, BinanceFuturesOrderClientResponse response) { }
+        @Override public void markAmbiguous(UUID id, String code, String detail) { }
+        @Override public void markRejected(UUID id, String code, String detail) { }
+        @Override public void markPersistencePending(String clientOrderId, String code, String detail) { }
     }
 }
