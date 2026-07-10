@@ -8,6 +8,7 @@ import com.apunto.engine.entity.UserApiKeyEntity;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.entity.UserEntity;
 import com.apunto.engine.entity.UserWalletCopyPlanEntity;
+import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.DetailUserRepository;
 import com.apunto.engine.repository.ShadowCopyAllocationRepository;
@@ -18,6 +19,8 @@ import com.apunto.engine.repository.UserApiKeyRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.repository.UserRepository;
 import com.apunto.engine.repository.UserWalletCopyPlanRepository;
+import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
+import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
@@ -38,6 +41,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -376,6 +380,101 @@ class ShadowPromotionServiceImplTest {
         assertEquals(1, result.rejected());
         assertNull(savedAllocation.get());
         assertTrue(audits.stream().anyMatch(a -> "SHADOW_NOT_READY_MIN_EVENTS".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void readyShadowWithSummaryBlockerCallsFullDecisionAndCanPromoteToMicroLive() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        shadow.setCopyGuardStatus("SHADOW_ONLY");
+        shadow.setCopyGuardAction("SHADOW_ONLY");
+        shadow.setLastValidationReason("SUMMARY_OR_MISSING_FACT_PAYLOAD_REQUIRES_SHADOW_OR_FULL_VALIDATION");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE"));
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                gateway
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertNotNull(savedAllocation.get());
+        assertEquals(1, gateway.calls.get());
+        assertEquals("micro-live-entry", gateway.lastRequest.mode());
+        assertEquals("full", gateway.lastRequest.simulation());
+        assertEquals(30, gateway.lastRequest.minHistoryDays());
+        assertEquals(60, gateway.lastRequest.simulationLookbackDays());
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_CREATED".equals(a.getDecision())));
+    }
+
+    @Test
+    void readyShadowDoesNotPromoteWhenFullDecisionCopyGuardBlocks() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionBlocked("NEGATIVE_REQUIRED_WINDOW_2W"));
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                gateway
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertNull(savedAllocation.get());
+        assertEquals(1, gateway.calls.get());
+        assertTrue(audits.stream().anyMatch(a -> "FULL_DECISION_BLOCKED_BY_COPY_GUARD".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void incompleteShadowEvidenceDoesNotCallFullDecision() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE"));
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(0, 0, "0"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                gateway
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals(0, gateway.calls.get());
     }
 
     @Test
@@ -745,7 +844,8 @@ class ShadowPromotionServiceImplTest {
                 allocationRepository(savedAllocation, 0L),
                 auditRepository(audits),
                 (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
-                promotionProperties()
+                promotionProperties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE"))
         );
 
         ShadowPromotionResult result = service.promoteShadowToMicroLive();
@@ -964,7 +1064,8 @@ class ShadowPromotionServiceImplTest {
                 }),
                 auditRepository(audits),
                 (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, "BTCUSDC", "BTC", "USDC", capitalAsset, false),
-                promotionProperties()
+                promotionProperties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE"))
         );
 
         ShadowPromotionResult result = service.promoteShadowToMicroLive();
@@ -1017,6 +1118,22 @@ class ShadowPromotionServiceImplTest {
             long activeAllocationCount,
             ShadowPromotionProperties properties
     ) {
+        return service(shadows, validation, user, apiKey, savedPlan, savedAllocation, audits, symbolResolver, activeAllocationCount, properties, new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")));
+    }
+
+    private static ShadowPromotionServiceImpl service(
+            List<ShadowCopyAllocationEntity> shadows,
+            ShadowWalletProfileValidationEntity validation,
+            UserBundle user,
+            UserApiKeyEntity apiKey,
+            AtomicReference<UserWalletCopyPlanEntity> savedPlan,
+            AtomicReference<UserCopyAllocationEntity> savedAllocation,
+            List<CopyPromotionAuditEntity> audits,
+            CopySymbolResolver symbolResolver,
+            long activeAllocationCount,
+            ShadowPromotionProperties properties,
+            CopyDecisionGateway copyDecisionGateway
+    ) {
         return new ShadowPromotionServiceImpl(
                 shadowRepository(shadows),
                 validationRepository(validation),
@@ -1029,7 +1146,8 @@ class ShadowPromotionServiceImplTest {
                 allocationRepository(savedAllocation, activeAllocationCount),
                 auditRepository(audits),
                 symbolResolver,
-                properties
+                properties,
+                copyDecisionGateway
         );
     }
 
@@ -1046,7 +1164,59 @@ class ShadowPromotionServiceImplTest {
         properties.setRequirePositiveShadowPnl(false);
         properties.setMicroLiveInitialCapitalUsd(new BigDecimal("100"));
         properties.setMicroLiveMaxCapitalUsd(new BigDecimal("100"));
+        properties.setRequireFullDecisionForMicroLive(true);
         return properties;
+    }
+
+    private static CopyDecisionDto fullDecisionAllowed(boolean canMicroLive, boolean canLive, String reasonCode) {
+        CopyDecisionDto dto = new CopyDecisionDto();
+        dto.setWalletId("0xabc");
+        dto.setStrategyCode("MOVEMENT_ALL");
+        dto.setScopeType("ALL");
+        dto.setScopeValue("ALL");
+        dto.setMode(canLive ? "live-entry" : "micro-live-entry");
+        dto.setSimulationMode("full");
+        dto.setFullMaterialized(true);
+        dto.setFactPayloadLoaded(true);
+        dto.setDecisionFinal(true);
+        dto.setRequiresFullSimulation(false);
+        dto.setCanMicroLive(canMicroLive);
+        dto.setCanLive(canLive);
+        dto.setReasonCode(reasonCode);
+        CopyDecisionDto.CopyGuardDto guard = new CopyDecisionDto.CopyGuardDto();
+        guard.setStatus("OK");
+        guard.setAction("ALLOW");
+        guard.setAllowNewEntries(true);
+        dto.setCopyGuard(guard);
+        return dto;
+    }
+
+    private static CopyDecisionDto fullDecisionBlocked(String reason) {
+        CopyDecisionDto dto = fullDecisionAllowed(false, false, "FULL_DECISION_BLOCKED_BY_COPY_GUARD");
+        CopyDecisionDto.CopyGuardDto guard = new CopyDecisionDto.CopyGuardDto();
+        guard.setStatus("BLOCKED");
+        guard.setAction("PAUSE_OPEN");
+        guard.setAllowNewEntries(false);
+        guard.setReasons(List.of(reason));
+        dto.setCopyGuard(guard);
+        return dto;
+    }
+
+    private static final class CapturingCopyDecisionGateway implements CopyDecisionGateway {
+        private final AtomicInteger calls = new AtomicInteger();
+        private final CopyDecisionDto response;
+        private CopyDecisionRequest lastRequest;
+
+        private CapturingCopyDecisionGateway(CopyDecisionDto response) {
+            this.response = response;
+        }
+
+        @Override
+        public CopyDecisionDto getFullDecisionExact(CopyDecisionRequest request) {
+            this.lastRequest = request;
+            this.calls.incrementAndGet();
+            return response;
+        }
     }
 
     private static void assertPromotedCopyMode(String strategyCode, String sourceCopyMode, String expectedCopyMode) {

@@ -57,8 +57,7 @@ public class CopyRuntimeGuardPolicy {
         String token = normalizedTokens(guard);
         return token.contains("SHADOW_ONLY")
                 || token.contains("SUMMARY_NOT_FINAL_LIVE_BLOCKED")
-                || token.contains("METRIC_COPY_GUARD_PAUSE_OPEN")
-                || token.contains("PAUSE_OPEN");
+                || (token.contains("METRIC_COPY_GUARD_PAUSE_OPEN") && token.contains("SHADOW_ONLY"));
     }
 
     private static boolean isRealRisk(CopyStrategyGuardDecision guard, String executionMode) {
@@ -68,6 +67,8 @@ public class CopyRuntimeGuardPolicy {
                 || token.contains("USER_DISABLED")
                 || token.contains("CAPITAL_MISSING")
                 || token.contains("SYMBOL_UNAVAILABLE")
+                || token.contains("MICRO_LIVE_REQUIRED_REENTRY")
+                || token.contains("MANUAL_REVIEW")
                 || token.contains("DISABLED")
                 || token.contains("BLOCKED")) {
             return true;
