@@ -68,6 +68,10 @@ public class CopyOrderReconciliationWorker {
             } catch (RuntimeException ex) {
                 reconciliationService.markFailure(intent.getId(), maxAttempts, "RECONCILIATION_ITEM_FAILED", safe(ex.getMessage()));
                 meterRegistry.counter("signals.copy.reconciliation.total", "result", "failed").increment();
+                reconciliationFailure(intent, "item_failed");
+                if (exhausted(intent)) {
+                    manualReview(intent, "item_failed_exhausted");
+                }
                 log.error("event=copy.reconciliation.failed dispatchIntentId={} reasonCode=RECONCILIATION_ITEM_FAILED nextRetryAt=backoff errClass={} errMsg=\"{}\"",
                         intent.getId(), ex.getClass().getSimpleName(), safe(ex.getMessage()));
             }
@@ -76,6 +80,18 @@ public class CopyOrderReconciliationWorker {
     }
 
     private void reconcileOne(CopyDispatchIntentEntity intent) {
+        long startedNs = System.nanoTime();
+        try {
+            reconcileOneMeasured(intent);
+        } finally {
+            meterRegistry.timer("copy_reconciliation_duration",
+                            "execution_mode", metricTag(intent == null ? null : intent.getExecutionMode()),
+                            "result", "processed")
+                    .record(System.nanoTime() - startedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+        }
+    }
+
+    private void reconcileOneMeasured(CopyDispatchIntentEntity intent) {
         OperationDto lookup = lookupRequest(intent);
         log.info("event=copy.reconciliation.started dispatchIntentId={} clientOrderId={} orderId={} userCopyAllocationId={} executionMode={}",
                 intent.getId(), safe(intent.getClientOrderId()), intent.getBinanceOrderId(),
@@ -89,6 +105,10 @@ public class CopyOrderReconciliationWorker {
         if (found.isEmpty()) {
             reconciliationService.markLookupNotFound(intent.getId(), maxAttempts);
             meterRegistry.counter("signals.copy.reconciliation.total", "result", "not_found").increment();
+            reconciliationFailure(intent, exhausted(intent) ? "not_found_exhausted" : "not_found");
+            if (exhausted(intent)) {
+                manualReview(intent, "not_found_exhausted");
+            }
             log.warn("event=copy.reconciliation.not_found dispatchIntentId={} decision=WAIT_NO_RESEND clientOrderId={}",
                     intent.getId(), safe(intent.getClientOrderId()));
             return;
@@ -99,12 +119,17 @@ public class CopyOrderReconciliationWorker {
         if (normalized.executionState() == CopyExecutionState.REJECTED) {
             intentStore.markRejected(intent.getId(), "BINANCE_ORDER_DEFINITIVELY_NOT_ACTIVE", normalized.status());
             meterRegistry.counter("signals.copy.reconciliation.total", "result", "rejected").increment();
+            reconciliationSuccess(intent, "rejected_confirmed");
             log.info("event=copy.reconciliation.rejected dispatchIntentId={} orderId={} status={} decision=RELEASE_NO_RESEND",
                     intent.getId(), normalized.orderId(), normalized.status());
             return;
         }
         if (!normalized.accepted()) {
             reconciliationService.markFailure(intent.getId(), maxAttempts, "LOOKUP_RESPONSE_AMBIGUOUS", normalized.executionState().name());
+            reconciliationFailure(intent, "lookup_ambiguous");
+            if (exhausted(intent)) {
+                manualReview(intent, "lookup_ambiguous_exhausted");
+            }
             return;
         }
         response.setDispatchIntentId(intent.getId());
@@ -120,24 +145,48 @@ public class CopyOrderReconciliationWorker {
         if (normalized.executionState() == CopyExecutionState.NEW) {
             if (exhausted(intent)) {
                 reconciliationService.markUnresolvedTerminal(intent.getId(), "NEW_ORDER_RECONCILIATION_EXHAUSTED");
+                manualReview(intent, "new_exhausted");
                 log.error("event=copy.reconciliation.failed dispatchIntentId={} reasonCode=NEW_ORDER_RECONCILIATION_EXHAUSTED nextRetryAt=manual_review decision=NO_RESEND",
                         intent.getId());
             } else {
                 reconciliationService.deferNewOrder(intent.getId());
             }
+            reconciliationSuccess(intent, exhausted(intent) ? "new_manual_review" : "new_deferred");
             return;
         }
         persistenceService.persistRecovered(intent, response);
         if (normalized.executionState() == CopyExecutionState.PARTIALLY_FILLED && exhausted(intent)) {
             reconciliationService.markUnresolvedTerminal(intent.getId(), "PARTIAL_FILL_RECONCILIATION_EXHAUSTED");
+            manualReview(intent, "partial_exhausted");
             log.error("event=copy.reconciliation.failed dispatchIntentId={} reasonCode=PARTIAL_FILL_RECONCILIATION_EXHAUSTED nextRetryAt=manual_review decision=NO_RESEND",
                     intent.getId());
         } else if ("PENDING_RESOLUTION".equals(normalized.averagePriceStatus().name()) && exhausted(intent)) {
             reconciliationService.markPriceResolutionExhausted(intent.getId());
+            manualReview(intent, "price_exhausted");
             log.warn("event=copy.reconciliation.price_unresolved dispatchIntentId={} reasonCode=PRICE_RESOLUTION_EXHAUSTED decision=KEEP_REFERENCE_PRICE_MANUAL_REVIEW",
                     intent.getId());
         }
         meterRegistry.counter("signals.copy.reconciliation.total", "result", "persisted").increment();
+        reconciliationSuccess(intent, "persisted");
+    }
+
+    private void reconciliationSuccess(CopyDispatchIntentEntity intent, String result) {
+        meterRegistry.counter("copy_reconciliation_success",
+                "execution_mode", metricTag(intent == null ? null : intent.getExecutionMode()),
+                "result", metricTag(result)).increment();
+    }
+
+    private void reconciliationFailure(CopyDispatchIntentEntity intent, String reasonCode) {
+        meterRegistry.counter("copy_reconciliation_failure",
+                "execution_mode", metricTag(intent == null ? null : intent.getExecutionMode()),
+                "result", "failed",
+                "reason_code", metricTag(reasonCode)).increment();
+    }
+
+    private void manualReview(CopyDispatchIntentEntity intent, String result) {
+        meterRegistry.counter("copy_dispatch_manual_review",
+                "execution_mode", metricTag(intent == null ? null : intent.getExecutionMode()),
+                "result", metricTag(result)).increment();
     }
 
     private boolean exhausted(CopyDispatchIntentEntity intent) {
@@ -179,5 +228,11 @@ public class CopyOrderReconciliationWorker {
         if (value == null) return "";
         String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
         return clean.length() > 500 ? clean.substring(0, 500) : clean;
+    }
+
+    private String metricTag(String value) {
+        if (value == null || value.isBlank()) return "unknown";
+        String normalized = value.trim().toLowerCase(Locale.ROOT).replace('-', '_').replace(' ', '_');
+        return normalized.length() > 40 ? normalized.substring(0, 40) : normalized;
     }
 }

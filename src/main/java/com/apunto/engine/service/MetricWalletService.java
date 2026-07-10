@@ -11,6 +11,14 @@ public interface MetricWalletService {
     List<MetricaWalletDto> getCandidatesUser(UUID idUser);
 
     /**
+     * Runtime-only candidate lookup. Implementations must not invoke a cache
+     * loader, database query or remote service from this method.
+     */
+    default List<MetricaWalletDto> getCandidatesForUserWalletCachedOnly(UUID idUser, String walletId) {
+        return List.of();
+    }
+
+    /**
      * Runtime safety gate used by copy trading before copying a new source event.
      * It evaluates the latest metric snapshot for wallet + strategy and returns false
      * when recent simulation PnL windows are below the configured threshold.

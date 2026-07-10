@@ -127,7 +127,8 @@ class HyperliquidCopyCandidateResolverTest {
                 new FakeActiveCopyOperationCache(),
                 new CopyStrategyRuntimeRouter(),
                 new FakeGuardRuntimeCache(guardDecision),
-                new CopyRuntimeGuardPolicy()
+                new CopyRuntimeGuardPolicy(),
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry()
         );
     }
 
@@ -185,6 +186,11 @@ class HyperliquidCopyCandidateResolverTest {
         }
 
         @Override
+        public List<UserDetailDto> getUsersCachedOnly() {
+            return users;
+        }
+
+        @Override
         public Optional<UserDetailDto> getUserById(String userId) {
             return users.stream()
                     .filter(u -> u.getUser() != null && u.getUser().getId() != null)
@@ -230,6 +236,11 @@ class HyperliquidCopyCandidateResolverTest {
             return allocations.stream()
                     .filter(a -> a.getWalletId().equalsIgnoreCase(walletId))
                     .toList();
+        }
+
+        @Override
+        public List<UserCopyAllocationEntity> getActiveAllocationsByWalletCachedOnly(String walletId) {
+            return getActiveAllocationsByWallet(walletId);
         }
 
         @Override

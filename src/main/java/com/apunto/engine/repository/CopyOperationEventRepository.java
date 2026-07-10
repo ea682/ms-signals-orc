@@ -15,17 +15,20 @@ import java.util.UUID;
 public interface CopyOperationEventRepository extends JpaRepository<CopyOperationEventEntity, UUID> {
     Optional<CopyOperationEventEntity> findByClientOrderId(String clientOrderId);
 
+    @Query(value = "select pg_advisory_xact_lock(hashtextextended(cast(:lockKey as text), 0))", nativeQuery = true)
+    Object lockDispatchProgress(@Param("lockKey") String lockKey);
+
     @Query(value = """
-            select exists (
-                select 1
-                from futuros_operaciones.copy_operation_event e
-                where e.dispatch_intent_id = :dispatchIntentId
-                  and e.event_type = :eventType
-                  and coalesce(e.qty_executed, 0) = coalesce(:qtyExecuted, 0)
-                  and coalesce(e.resulting_qty, 0) = coalesce(:resultingQty, 0)
-            )
+            select *
+            from futuros_operaciones.copy_operation_event e
+            where e.dispatch_intent_id = :dispatchIntentId
+              and e.event_type = :eventType
+              and coalesce(e.qty_executed, 0) = coalesce(:qtyExecuted, 0)
+              and coalesce(e.resulting_qty, 0) = coalesce(:resultingQty, 0)
+            order by e.date_creation asc, e.id_event asc
+            limit 1
             """, nativeQuery = true)
-    boolean existsDispatchProgress(
+    Optional<CopyOperationEventEntity> findDispatchProgress(
             @Param("dispatchIntentId") UUID dispatchIntentId,
             @Param("eventType") String eventType,
             @Param("qtyExecuted") BigDecimal qtyExecuted,
