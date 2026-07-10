@@ -2,9 +2,12 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.entity.CopyPromotionAuditEntity;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
+import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.repository.CopyOperationEventRepository;
 import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
+import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
+import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
@@ -20,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -146,7 +150,8 @@ class MicroLivePromotionServiceImplTest {
                 allocationRepository(allocation, existingLive, saved, false),
                 eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
                 auditRepository(audits),
-                properties()
+                properties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"))
         );
 
         LivePromotionResult result = service.promoteMicroLiveToLive();
@@ -168,13 +173,59 @@ class MicroLivePromotionServiceImplTest {
                 allocationRepository(allocation, existingLive, saved, true),
                 eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
                 auditRepository(audits),
-                properties()
+                properties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"))
         );
 
         LivePromotionResult result = service.promoteMicroLiveToLive();
 
         assertEquals(1, result.skipped());
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_PROMOTION_NOOP".equals(a.getDecision())));
+    }
+
+    @Test
+    void runtimeEvidenceMustPassBeforeCallingFullDecision() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"));
+
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                allocationRepository(allocation, saved),
+                eventRepository(1L, 0L, new BigDecimal("1"), OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits),
+                properties(),
+                gateway
+        );
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals(0, gateway.calls.get());
+    }
+
+    @Test
+    void fullDecisionCanBlockMicroLivePromotionToLive() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionBlocked("NEGATIVE_REQUIRED_WINDOW_1MO"));
+
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                allocationRepository(allocation, saved),
+                eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits),
+                properties(),
+                gateway
+        );
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals(1, gateway.calls.get());
+        assertEquals("live-entry", gateway.lastRequest.mode());
+        assertEquals("FULL_DECISION_BLOCKED_BY_COPY_GUARD", saved.get().getStatusReason());
+        assertTrue(audits.stream().anyMatch(a -> "FULL_DECISION_BLOCKED_BY_COPY_GUARD".equals(a.getReasonCode())));
     }
 
     private static MicroLivePromotionServiceImpl service(
@@ -190,7 +241,8 @@ class MicroLivePromotionServiceImplTest {
                 allocationRepository(allocation, saved),
                 eventRepository(events, errors, new BigDecimal(pnl), OffsetDateTime.now().minusDays(days)),
                 auditRepository(audits),
-                properties()
+                properties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"))
         );
     }
 
@@ -201,7 +253,59 @@ class MicroLivePromotionServiceImplTest {
         properties.setMinMicroOrders(2);
         properties.setMaxErrorRatePct(new BigDecimal("5"));
         properties.setRequirePositiveNetPnl(false);
+        properties.setRequireFullDecisionForLive(true);
         return properties;
+    }
+
+    private static CopyDecisionDto fullDecisionAllowed(boolean canMicroLive, boolean canLive, String reasonCode) {
+        CopyDecisionDto dto = new CopyDecisionDto();
+        dto.setWalletId("0xabc");
+        dto.setStrategyCode("MOVEMENT_ALL");
+        dto.setScopeType("ALL");
+        dto.setScopeValue("ALL");
+        dto.setMode(canLive ? "live-entry" : "micro-live-entry");
+        dto.setSimulationMode("full");
+        dto.setFullMaterialized(true);
+        dto.setFactPayloadLoaded(true);
+        dto.setDecisionFinal(true);
+        dto.setRequiresFullSimulation(false);
+        dto.setCanMicroLive(canMicroLive);
+        dto.setCanLive(canLive);
+        dto.setReasonCode(reasonCode);
+        CopyDecisionDto.CopyGuardDto guard = new CopyDecisionDto.CopyGuardDto();
+        guard.setStatus("OK");
+        guard.setAction("ALLOW");
+        guard.setAllowNewEntries(true);
+        dto.setCopyGuard(guard);
+        return dto;
+    }
+
+    private static CopyDecisionDto fullDecisionBlocked(String reason) {
+        CopyDecisionDto dto = fullDecisionAllowed(false, false, "FULL_DECISION_BLOCKED_BY_COPY_GUARD");
+        CopyDecisionDto.CopyGuardDto guard = new CopyDecisionDto.CopyGuardDto();
+        guard.setStatus("BLOCKED");
+        guard.setAction("PAUSE_OPEN");
+        guard.setAllowNewEntries(false);
+        guard.setReasons(List.of(reason));
+        dto.setCopyGuard(guard);
+        return dto;
+    }
+
+    private static final class CapturingCopyDecisionGateway implements CopyDecisionGateway {
+        private final AtomicInteger calls = new AtomicInteger();
+        private final CopyDecisionDto response;
+        private CopyDecisionRequest lastRequest;
+
+        private CapturingCopyDecisionGateway(CopyDecisionDto response) {
+            this.response = response;
+        }
+
+        @Override
+        public CopyDecisionDto getFullDecisionExact(CopyDecisionRequest request) {
+            this.lastRequest = request;
+            this.calls.incrementAndGet();
+            return response;
+        }
     }
 
     private static UserCopyAllocationEntity microLiveAllocation() {

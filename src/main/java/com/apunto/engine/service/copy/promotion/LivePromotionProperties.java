@@ -14,6 +14,11 @@ public class LivePromotionProperties {
     private BigDecimal maxErrorRatePct = new BigDecimal("5");
     private boolean requirePositiveNetPnl = false;
     private BigDecimal minNetPnlUsd = BigDecimal.ZERO;
+    private boolean requireFullDecisionForLive = true;
+    private int copyDecisionMinHistoryDays = 30;
+    private int copyDecisionSimulationLookbackDays = 60;
+    private int copyDecisionMaxFactsPerUnit = 50000;
+    private int copyDecisionTimeoutMs = 55000;
 
     public boolean isEnabled() {
         return enabled;
@@ -69,5 +74,45 @@ public class LivePromotionProperties {
 
     public void setMinNetPnlUsd(BigDecimal minNetPnlUsd) {
         this.minNetPnlUsd = minNetPnlUsd;
+    }
+
+    public boolean isRequireFullDecisionForLive() {
+        return requireFullDecisionForLive;
+    }
+
+    public void setRequireFullDecisionForLive(boolean requireFullDecisionForLive) {
+        this.requireFullDecisionForLive = requireFullDecisionForLive;
+    }
+
+    public int getCopyDecisionMinHistoryDays() {
+        return copyDecisionMinHistoryDays;
+    }
+
+    public void setCopyDecisionMinHistoryDays(int copyDecisionMinHistoryDays) {
+        this.copyDecisionMinHistoryDays = copyDecisionMinHistoryDays;
+    }
+
+    public int getCopyDecisionSimulationLookbackDays() {
+        return copyDecisionSimulationLookbackDays;
+    }
+
+    public void setCopyDecisionSimulationLookbackDays(int copyDecisionSimulationLookbackDays) {
+        this.copyDecisionSimulationLookbackDays = copyDecisionSimulationLookbackDays;
+    }
+
+    public int getCopyDecisionMaxFactsPerUnit() {
+        return copyDecisionMaxFactsPerUnit;
+    }
+
+    public void setCopyDecisionMaxFactsPerUnit(int copyDecisionMaxFactsPerUnit) {
+        this.copyDecisionMaxFactsPerUnit = copyDecisionMaxFactsPerUnit;
+    }
+
+    public int getCopyDecisionTimeoutMs() {
+        return copyDecisionTimeoutMs;
+    }
+
+    public void setCopyDecisionTimeoutMs(int copyDecisionTimeoutMs) {
+        this.copyDecisionTimeoutMs = copyDecisionTimeoutMs;
     }
 }

@@ -1,5 +1,6 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.entity.CopyPromotionAuditEntity;
 import com.apunto.engine.entity.DetailUserEntity;
 import com.apunto.engine.entity.ShadowCopyAllocationEntity;
@@ -19,6 +20,8 @@ import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.repository.UserRepository;
 import com.apunto.engine.repository.UserWalletCopyPlanRepository;
 import com.apunto.engine.service.ShadowPromotionService;
+import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
+import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver.CopyModeResolution;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
@@ -65,6 +68,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     private final CopyPromotionAuditRepository auditRepository;
     private final CopySymbolResolver copySymbolResolver;
     private final ShadowPromotionProperties properties;
+    private final CopyDecisionGateway copyDecisionGateway;
 
     @Override
     public ShadowPromotionResult promoteShadowToMicroLive() {
@@ -132,6 +136,18 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                             elapsedMs(candidateNs)
                     );
                     log.info(
+                            "event=shadow.promotion.micro_live.noop_existing userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategyCode={} scopeType={} scopeValue={} reasonCode={} elapsedMs={}",
+                            shadow.getIdUser(),
+                            shadow.getWalletId(),
+                            shadow.getId(),
+                            existing.map(UserCopyAllocationEntity::getId).orElse(null),
+                            shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
+                            decision.reasonCode(),
+                            elapsedMs(candidateNs)
+                    );
+                    log.info(
                             "event=copy.promotion.shadow_to_micro.noop userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=MICRO_LIVE decision=NOOP reasonCode={} elapsedMs={}",
                             shadow.getIdUser(),
                             shadow.getWalletId(),
@@ -195,6 +211,18 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 );
                 if (!liveCreated) {
                     log.info(
+                            "event=shadow.promotion.micro_live.created userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategyCode={} scopeType={} scopeValue={} reasonCode={} elapsedMs={}",
+                            shadow.getIdUser(),
+                            shadow.getWalletId(),
+                            shadow.getId(),
+                            output.allocation().getId(),
+                            shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
+                            decision.reasonCode(),
+                            elapsedMs(candidateNs)
+                    );
+                    log.info(
                             "event=copy.promotion.shadow_to_micro.created userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} planId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} sourceSymbol={} targetSymbol={} executionMode=MICRO_LIVE decision=CREATED reasonCode={} capital={} elapsedMs={}",
                             shadow.getIdUser(),
                             shadow.getWalletId(),
@@ -234,6 +262,17 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                             shadow.getScopeValue(),
                             safe(shadow.getCopyMode()),
                             existing.get().getCopyMode(),
+                            elapsedMs(candidateNs)
+                    );
+                    log.info(
+                            "event=shadow.promotion.micro_live.noop_existing userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategyCode={} scopeType={} scopeValue={} reasonCode=ALREADY_PROMOTED elapsedMs={}",
+                            shadow.getIdUser(),
+                            shadow.getWalletId(),
+                            shadow.getId(),
+                            existing.get().getId(),
+                            shadow.getCopyStrategyCode(),
+                            shadow.getScopeType(),
+                            shadow.getScopeValue(),
                             elapsedMs(candidateNs)
                     );
                     log.info(
@@ -364,6 +403,11 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             return readiness;
         }
 
+        PromotionDecision fullDecision = evaluateFullDecisionForMicroLive(shadow, evidence);
+        if (!fullDecision.allowed()) {
+            return fullDecision;
+        }
+
         CopyModeResolution copyModeResolution = resolveUserCopyAllocationCopyMode(shadow);
         logCopyModeResolved(shadow, copyModeResolution, copyModeResolution.valid() ? "ALLOW" : "REJECT");
         if (!copyModeResolution.valid()) {
@@ -415,7 +459,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         BigDecimal targetCapital = "LIVE".equals(targetDecision.targetExecutionMode())
                 ? BigDecimal.valueOf(capitalConfig.capital()).setScale(8, RoundingMode.HALF_UP)
                 : microCapital;
-        return PromotionDecision.allowed(details(shadow, evidence, extras(
+        Map<String, Object> finalDetails = extras(
                 "capital", capitalConfig.capital(),
                 "maxWallet", capitalConfig.maxWallet(),
                 "microLiveCapital", microCapital,
@@ -431,11 +475,28 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 "copyModeConstraintReasonCode", copyModeResolution.constraintReasonCode(),
                 "sourceSymbol", symbolResolution == null ? null : symbolResolution.sourceSymbol(),
                 "targetSymbol", symbolResolution == null ? null : symbolResolution.targetSymbol()
-        )), detail, evidence, symbolResolution, microCapital, copyModeResolution.copyMode(), targetDecision.targetExecutionMode(), targetCapital);
+        );
+        finalDetails.putAll(fullDecision.details());
+        return PromotionDecision.allowed(details(shadow, evidence, finalDetails), detail, evidence, symbolResolution, microCapital, copyModeResolution.copyMode(), targetDecision.targetExecutionMode(), targetCapital);
     }
 
     private PromotionDecision evaluateEvidence(ShadowCopyAllocationEntity shadow, Evidence evidence, OffsetDateTime now) {
         boolean summaryOnlyBlockedBySummary = summaryOnlyBlockedBySummary(shadow);
+        log.info(
+                "event=shadow.promotion.evidence.checked userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} shadowDays={} events={} closedPositions={} coveragePct={} netPnlUsd={} summaryOnlyOverride={}",
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                shadow.getId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                evidence.shadowDays(),
+                evidence.events(),
+                evidence.closedPositions(),
+                evidence.coveragePct(),
+                evidence.netPnlUsd(),
+                summaryOnlyBlockedBySummary
+        );
         if (properties.isRequireCopyGuardOpen() && !copyGuardOpen(shadow) && !summaryOnlyBlockedBySummary) {
             return PromotionDecision.rejected("SHADOW_NOT_READY_COPY_GUARD", details(shadow, evidence, Map.of()));
         }
@@ -470,6 +531,90 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 "shadowEvidenceOverride", true
         )
                 : Map.of()), null, evidence, null, ZERO);
+    }
+
+    private PromotionDecision evaluateFullDecisionForMicroLive(ShadowCopyAllocationEntity shadow, Evidence evidence) {
+        if (!properties.isRequireFullDecisionForMicroLive()) {
+            return PromotionDecision.allowed(details(shadow, evidence, extras(
+                    "fullDecisionRequired", false,
+                    "fullDecisionReasonCode", "FULL_DECISION_REQUIREMENT_DISABLED"
+            )), null, evidence, null, ZERO);
+        }
+        CopyDecisionRequest request = new CopyDecisionRequest(
+                normalizeWallet(shadow.getWalletId()),
+                normalizeStrategy(shadow.getCopyStrategyCode()),
+                normalizeScopeType(shadow.getScopeType()),
+                normalizeScopeValue(shadow.getScopeValue(), shadow.getCopyStrategyCode()),
+                "micro-live-entry",
+                "full",
+                clampInt(properties.getCopyDecisionMinHistoryDays(), 1, 3650),
+                clampInt(properties.getCopyDecisionSimulationLookbackDays(), 1, 3650),
+                clampInt(properties.getCopyDecisionMaxFactsPerUnit(), 1, 50000),
+                clampInt(properties.getCopyDecisionTimeoutMs(), 1, 59000),
+                false
+        );
+        log.info(
+                "event=shadow.promotion.full_decision.required userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} mode={} minHistoryDays={} lookbackDays={} timeoutMs={}",
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                shadow.getId(),
+                request.strategyCode(),
+                request.scopeType(),
+                request.scopeValue(),
+                request.mode(),
+                request.minHistoryDays(),
+                request.simulationLookbackDays(),
+                request.timeoutMs()
+        );
+
+        CopyDecisionDto decision;
+        try {
+            decision = copyDecisionGateway.getFullDecisionExact(request);
+        } catch (RuntimeException ex) {
+            log.warn(
+                    "event=shadow.promotion.full_decision.result userId={} walletId={} shadowAllocationId={} decision=REJECT reasonCode=FULL_DECISION_FAILED errorClass={} errorMessage=\"{}\"",
+                    shadow.getIdUser(),
+                    shadow.getWalletId(),
+                    shadow.getId(),
+                    ex.getClass().getSimpleName(),
+                    safe(ex.getMessage())
+            );
+            return PromotionDecision.rejected("FULL_DECISION_FAILED", details(shadow, evidence, extras(
+                    "fullDecisionErrorClass", ex.getClass().getSimpleName(),
+                    "fullDecisionError", safe(ex.getMessage())
+            )));
+        }
+
+        FullDecisionGate gate = fullDecisionGate(decision, true);
+        log.info(
+                "event=shadow.promotion.full_decision.result userId={} walletId={} shadowAllocationId={} decision={} reasonCode={} fullMaterialized={} factPayloadLoaded={} decisionFinal={} requiresFullSimulation={} copyGuardAction={} canMicroLive={} canLive={}",
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                shadow.getId(),
+                gate.allowed() ? "ALLOW" : "REJECT",
+                gate.reasonCode(),
+                decision != null && decision.isFullMaterialized(),
+                decision != null && decision.isFactPayloadLoaded(),
+                decision != null && decision.isDecisionFinal(),
+                decision != null && decision.isRequiresFullSimulation(),
+                copyGuardAction(decision),
+                decision != null && decision.isCanMicroLive(),
+                decision != null && decision.isCanLive()
+        );
+        if (!gate.allowed()) {
+            log.info(
+                    "event=shadow.promotion.blocked userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} reasonCode={}",
+                    shadow.getIdUser(),
+                    shadow.getWalletId(),
+                    shadow.getId(),
+                    shadow.getCopyStrategyCode(),
+                    shadow.getScopeType(),
+                    shadow.getScopeValue(),
+                    gate.reasonCode()
+            );
+            return PromotionDecision.rejected(gate.reasonCode(), details(shadow, evidence, fullDecisionDetails(decision, gate)));
+        }
+        return PromotionDecision.allowed(details(shadow, evidence, fullDecisionDetails(decision, gate)), null, evidence, null, ZERO);
     }
 
     private PromotionOutput promote(ShadowCopyAllocationEntity shadow, PromotionDecision decision, OffsetDateTime now) {
@@ -880,7 +1025,9 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     }
 
     private boolean summaryOnlyBlockedBySummary(ShadowCopyAllocationEntity shadow) {
-        if (!"SUMMARY_NOT_FINAL_LIVE_BLOCKED".equals(normalizeToken(shadow == null ? null : shadow.getLastValidationReason()))) {
+        String reason = normalizeToken(shadow == null ? null : shadow.getLastValidationReason());
+        if (!"SUMMARY_NOT_FINAL_LIVE_BLOCKED".equals(reason)
+                && !"SUMMARY_OR_MISSING_FACT_PAYLOAD_REQUIRES_SHADOW_OR_FULL_VALIDATION".equals(reason)) {
             return false;
         }
         return summaryOnlyToken(normalizeToken(shadow.getCopyGuardAction()))
@@ -1058,8 +1205,84 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         return clean.length() > 300 ? clean.substring(0, 300) : clean;
     }
 
+    private static int clampInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static FullDecisionGate fullDecisionGate(CopyDecisionDto decision, boolean requireMicroLive) {
+        if (decision == null) {
+            return new FullDecisionGate(false, "FULL_DECISION_FAILED");
+        }
+        if (!decision.isDecisionFinal()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_NOT_FINAL"));
+        }
+        if (decision.isRequiresFullSimulation() || !decision.isFullMaterialized()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_NOT_MATERIALIZED"));
+        }
+        if (!decision.isFactPayloadLoaded()) {
+            return new FullDecisionGate(false, "FULL_FACT_PAYLOAD_NOT_LOADED");
+        }
+        if (!"ALLOW".equals(copyGuardAction(decision))) {
+            return new FullDecisionGate(false, "FULL_DECISION_BLOCKED_BY_COPY_GUARD");
+        }
+        if (requireMicroLive && !decision.isCanMicroLive()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_CAN_MICRO_LIVE_FALSE"));
+        }
+        if (!requireMicroLive && !decision.isCanLive()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_CAN_LIVE_FALSE"));
+        }
+        return new FullDecisionGate(true, firstNonBlank(decision.getReasonCode(), requireMicroLive ? "FULL_DECISION_OK_FOR_MICRO_LIVE" : "FULL_DECISION_OK_FOR_LIVE"));
+    }
+
+    private static Map<String, Object> fullDecisionDetails(CopyDecisionDto decision, FullDecisionGate gate) {
+        return extras(
+                "fullDecisionRequired", true,
+                "fullDecisionReasonCode", gate.reasonCode(),
+                "fullDecisionResponseReasonCode", decision == null ? null : decision.getReasonCode(),
+                "fullDecisionResponseReasonDetail", decision == null ? null : decision.getReasonDetail(),
+                "fullDecisionMode", decision == null ? null : decision.getMode(),
+                "fullDecisionSimulationMode", decision == null ? null : decision.getSimulationMode(),
+                "fullDecisionMaterialized", decision != null && decision.isFullMaterialized(),
+                "fullDecisionFactPayloadLoaded", decision != null && decision.isFactPayloadLoaded(),
+                "fullDecisionFinal", decision != null && decision.isDecisionFinal(),
+                "fullDecisionRequiresFullSimulation", decision != null && decision.isRequiresFullSimulation(),
+                "fullDecisionCanMicroLive", decision != null && decision.isCanMicroLive(),
+                "fullDecisionCanLive", decision != null && decision.isCanLive(),
+                "fullDecisionAllowNewEntries", decision != null && decision.isAllowNewEntries(),
+                "fullDecisionCopyGuardStatus", copyGuardStatus(decision),
+                "fullDecisionCopyGuardAction", copyGuardAction(decision),
+                "fullDecisionCopyGuardReasons", copyGuardReasons(decision),
+                "fullDecisionElapsedMs", decision == null ? null : decision.getElapsedMs(),
+                "fullDecisionFactsLoaded", decision == null ? null : decision.getFactsLoaded()
+        );
+    }
+
+    private static String copyGuardAction(CopyDecisionDto decision) {
+        return decision == null || decision.getCopyGuard() == null || decision.getCopyGuard().getAction() == null
+                ? ""
+                : normalizeToken(decision.getCopyGuard().getAction());
+    }
+
+    private static String copyGuardStatus(CopyDecisionDto decision) {
+        return decision == null || decision.getCopyGuard() == null || decision.getCopyGuard().getStatus() == null
+                ? ""
+                : normalizeToken(decision.getCopyGuard().getStatus());
+    }
+
+    private static List<String> copyGuardReasons(CopyDecisionDto decision) {
+        return decision == null || decision.getCopyGuard() == null || decision.getCopyGuard().getReasons() == null
+                ? List.of()
+                : decision.getCopyGuard().getReasons();
+    }
+
     private static long elapsedMs(long startedNs) {
         return Duration.ofNanos(Math.max(0L, System.nanoTime() - startedNs)).toMillis();
+    }
+
+    private record FullDecisionGate(
+            boolean allowed,
+            String reasonCode
+    ) {
     }
 
     private record PromotionOutput(

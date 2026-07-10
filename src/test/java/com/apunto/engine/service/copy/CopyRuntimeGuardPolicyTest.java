@@ -60,6 +60,56 @@ class CopyRuntimeGuardPolicyTest {
         assertEquals("USER_DISABLED", decision.reasonCode());
     }
 
+    @Test
+    void negativeRequiredWindowPauseOpenBlocksPromotedLive() {
+        CopyRuntimeGuardPolicy.Decision decision = policy.decide(
+                promoted("LIVE"),
+                CopyStrategyGuardDecision.blocked("NEGATIVE_REQUIRED_WINDOW_2W", "window=2w pnl=-10")
+        );
+
+        assertFalse(decision.allowed());
+        assertEquals("NEGATIVE_REQUIRED_WINDOW_2W", decision.reasonCode());
+    }
+
+    @Test
+    void softReentryBlocksLiveOpeningsWithoutMicroLiveTarget() {
+        CopyStrategyGuardDecision guard = CopyStrategyGuardDecision.shadowRevalidation(
+                "NEGATIVE_1MO_SHADOW_REVALIDATION",
+                "window=1mo pnl=-10"
+        );
+
+        CopyRuntimeGuardPolicy.Decision decision = policy.decide(promoted("LIVE"), guard);
+
+        assertFalse(decision.allowed());
+        assertEquals("NEGATIVE_1MO_SHADOW_REVALIDATION", decision.reasonCode());
+        assertEquals("SHADOW", guard.targetExecutionMode());
+    }
+
+    @Test
+    void hardReentryRequiresMicroLiveAgain() {
+        CopyStrategyGuardDecision guard = CopyStrategyGuardDecision.microLiveRequiredReentry(
+                "NEGATIVE_2MO_HARD_DOWNGRADE",
+                "window=2mo pnl=-20"
+        );
+
+        CopyRuntimeGuardPolicy.Decision decision = policy.decide(promoted("LIVE"), guard);
+
+        assertFalse(decision.allowed());
+        assertEquals("NEGATIVE_2MO_HARD_DOWNGRADE", decision.reasonCode());
+        assertEquals("MICRO_LIVE", guard.targetExecutionMode());
+    }
+
+    @Test
+    void manualReviewBlocksPromotedLive() {
+        CopyRuntimeGuardPolicy.Decision decision = policy.decide(
+                promoted("LIVE"),
+                CopyStrategyGuardDecision.manualReview("NEGATIVE_3MO_MANUAL_REVIEW", "window=3mo pnl=-30")
+        );
+
+        assertFalse(decision.allowed());
+        assertEquals("NEGATIVE_3MO_MANUAL_REVIEW", decision.reasonCode());
+    }
+
     private static UserCopyAllocationEntity promoted(String mode) {
         UserCopyAllocationEntity allocation = active(mode);
         allocation.setLinkedShadowAllocationId(18L);

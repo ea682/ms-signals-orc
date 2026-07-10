@@ -2,6 +2,7 @@ package com.apunto.engine.service.impl;
 
 import com.apunto.engine.client.MetricWalletsInfoClient;
 import com.apunto.engine.dto.CopyExecutionAccountsDiagnostics;
+import com.apunto.engine.dto.client.CopyGuardWindowSnapshotDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.service.CopyExecutionAccountsDiagnosticsService;
@@ -25,6 +26,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
@@ -42,6 +44,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class MetricWalletServiceImpl implements MetricWalletService {
 
     private static final String JOYAS_ENDPOINT = "/operaciones/metrica/joyas";
+    private static final String COPY_GUARD_WINDOWS_ENDPOINT = "/operaciones/metrica/copy-guard/windows";
 
     private final int historyLimit;
     private final int dayzLimit;
@@ -67,6 +70,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private final double copyGuardOneWeekCapitalMultiplier;
     private final double copyGuardOneMonthCapitalMultiplier;
     private final List<String> copyGuardWindows;
+    private final List<String> copyGuardAvailableWindows;
+    private final boolean copyGuardSnapshotEnabled;
+    private final Duration copyGuardStaleSnapshotMaxAge;
 
     private final MetricWalletsInfoClient metricWalletsInfoClient;
     private final UserCopyAllocationService userCopyAllocationService;
@@ -74,9 +80,11 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private final Optional<CopyExecutionAccountsDiagnosticsService> executionAccountsDiagnosticsService;
 
     private final AtomicReference<HistorySnapshot> lastKnownGoodHistory = new AtomicReference<>(HistorySnapshot.empty());
+    private final AtomicReference<CopyGuardWindowSnapshotIndex> lastKnownGoodCopyGuardSnapshots = new AtomicReference<>(CopyGuardWindowSnapshotIndex.empty());
     private final AtomicLong lastKnownGoodWarnAtMs = new AtomicLong(0L);
 
     private final LoadingCache<Integer, HistorySnapshot> allPositionHistoryCache;
+    private final LoadingCache<Integer, CopyGuardWindowSnapshotIndex> copyGuardWindowSnapshotCache;
 
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
@@ -99,14 +107,17 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             @Value("${metric-wallet.history.min-history-days:1}") double minHistoryDays,
             @Value("${metric-wallet.copy-guard.enabled:true}") boolean copyGuardEnabled,
             @Value("${metric-wallet.copy-guard.fail-open-on-missing-metric:false}") boolean copyGuardFailOpenOnMissingMetric,
-            @Value("${metric-wallet.copy-guard.require-window-data:true}") boolean copyGuardRequireWindowData,
+            @Value("${metric-wallet.copy-guard.require-window-data:false}") boolean copyGuardRequireWindowData,
             @Value("${metric-wallet.copy-guard.min-total-pnl-usdt:0}") double copyGuardMinTotalPnlUsdt,
             @Value("${metric-wallet.copy-guard.min-window-pnl-usdt:0}") double copyGuardMinWindowPnlUsdt,
             @Value("${metric-wallet.copy-guard.pause-total-pnl-usdt:-50}") double copyGuardPauseTotalPnlUsdt,
             @Value("${metric-wallet.copy-guard.pause-window-pnl-usdt:-25}") double copyGuardPauseWindowPnlUsdt,
-            @Value("${metric-wallet.copy-guard.one-week-capital-multiplier:0.70}") double copyGuardOneWeekCapitalMultiplier,
+            @Value("${metric-wallet.copy-guard.one-week-capital-multiplier:1.0}") double copyGuardOneWeekCapitalMultiplier,
             @Value("${metric-wallet.copy-guard.one-month-capital-multiplier:0.25}") double copyGuardOneMonthCapitalMultiplier,
-            @Value("${metric-wallet.copy-guard.windows:2w,1mo}") String copyGuardWindows
+            @Value("${metric-wallet.copy-guard.decision-windows:${metric-wallet.copy-guard.windows:1w,2w,3w,1mo,2mo,3mo}}") String copyGuardWindows,
+            @Value("${metric-wallet.copy-guard.available-windows:1d,3d,1w,2w,3w,1mo,2mo,3mo,6mo,9mo,1y,2y,all}") String copyGuardAvailableWindows,
+            @Value("${metric-wallet.copy-guard.snapshot.enabled:true}") boolean copyGuardSnapshotEnabled,
+            @Value("${metric-wallet.copy-guard.stale-snapshot-max-age:10m}") Duration copyGuardStaleSnapshotMaxAge
     ) {
         this.metricWalletsInfoClient = Objects.requireNonNull(metricWalletsInfoClient, "metricWalletsInfoClient");
         this.userCopyAllocationService = Objects.requireNonNull(userCopyAllocationService, "userCopyAllocationService");
@@ -125,7 +136,6 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         this.cacheExpireAfter = cacheExpireAfter;
         this.slowThreshold = slowThreshold;
 
-        this.allPositionHistoryCache = buildHistoryCache();
         this.maxCapitalToUse = maxCapitalToUse;
         this.maxPerWallet = maxPerWallet;
         this.syncDistributionEnabled = syncDistributionEnabled;
@@ -144,10 +154,18 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         this.copyGuardOneWeekCapitalMultiplier = copyGuardOneWeekCapitalMultiplier;
         this.copyGuardOneMonthCapitalMultiplier = copyGuardOneMonthCapitalMultiplier;
         this.copyGuardWindows = parseGuardWindows(copyGuardWindows);
+        this.copyGuardAvailableWindows = parseGuardWindows(copyGuardAvailableWindows);
+        this.copyGuardSnapshotEnabled = copyGuardSnapshotEnabled;
+        this.copyGuardStaleSnapshotMaxAge = copyGuardStaleSnapshotMaxAge == null
+                ? Duration.ofMinutes(10)
+                : copyGuardStaleSnapshotMaxAge;
+
+        this.allPositionHistoryCache = buildHistoryCache();
+        this.copyGuardWindowSnapshotCache = buildCopyGuardWindowSnapshotCache();
 
         log.info(
-                "event=metric_wallets.config historyLimit={} historySource={} joyasLimit={} joyasDayz={} joyasSimulation={} minHistoryDays={} copyGuardEnabled={} copyGuardWindows={} copyGuardMinWindowPnlUsdt={} copyGuardMinTotalPnlUsdt={} copyGuardPauseWindowPnlUsdt={} copyGuardPauseTotalPnlUsdt={} copyGuardRequireWindowData={} copyGuardFailOpenOnMissingMetric={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={} syncDistributionEnabled={}",
-                this.historyLimit, this.historySource, this.joyasLimit, this.joyasDayz, this.joyasSimulation, this.minHistoryDays, this.copyGuardEnabled, this.copyGuardWindows, this.copyGuardMinWindowPnlUsdt, this.copyGuardMinTotalPnlUsdt, this.copyGuardPauseWindowPnlUsdt, this.copyGuardPauseTotalPnlUsdt, this.copyGuardRequireWindowData, this.copyGuardFailOpenOnMissingMetric, this.cacheMaxSize, this.cacheRefreshAfter, this.cacheExpireAfter, this.slowThreshold, this.syncDistributionEnabled
+                "event=metric_wallets.config historyLimit={} historySource={} joyasLimit={} joyasDayz={} joyasSimulation={} minHistoryDays={} copyGuardEnabled={} copyGuardWindows={} copyGuardAvailableWindows={} copyGuardSnapshotEnabled={} copyGuardStaleSnapshotMaxAge={} copyGuardMinWindowPnlUsdt={} copyGuardMinTotalPnlUsdt={} copyGuardPauseWindowPnlUsdt={} copyGuardPauseTotalPnlUsdt={} copyGuardRequireWindowData={} copyGuardFailOpenOnMissingMetric={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={} syncDistributionEnabled={}",
+                this.historyLimit, this.historySource, this.joyasLimit, this.joyasDayz, this.joyasSimulation, this.minHistoryDays, this.copyGuardEnabled, this.copyGuardWindows, this.copyGuardAvailableWindows, this.copyGuardSnapshotEnabled, this.copyGuardStaleSnapshotMaxAge, this.copyGuardMinWindowPnlUsdt, this.copyGuardMinTotalPnlUsdt, this.copyGuardPauseWindowPnlUsdt, this.copyGuardPauseTotalPnlUsdt, this.copyGuardRequireWindowData, this.copyGuardFailOpenOnMissingMetric, this.cacheMaxSize, this.cacheRefreshAfter, this.cacheExpireAfter, this.slowThreshold, this.syncDistributionEnabled
         );
     }
 
@@ -355,6 +373,11 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             return CopyStrategyGuardDecision.blocked("WALLET_MISSING", "walletId is blank");
         }
 
+        CopyGuardWindowSnapshotDto guardSnapshot = findCopyGuardSnapshotFast(walletKey, strategyKey, null);
+        if (guardSnapshot != null) {
+            return evaluateCopyGuardSnapshot(guardSnapshot, walletKey, strategyKey);
+        }
+
         final HistoryResult history = getHistory(historyLimit);
         final List<MetricaWalletDto> values = history == null ? List.of() : history.values();
         final HistoryIndex index = history == null ? HistoryIndex.empty() : history.index();
@@ -441,12 +464,16 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public void primeHistoryCache() {
         try {
             HistorySnapshot snapshot = allPositionHistoryCache.get(historyLimit);
+            CopyGuardWindowSnapshotIndex guardSnapshot = copyGuardSnapshotEnabled
+                    ? copyGuardWindowSnapshotCache.get(historyLimit)
+                    : CopyGuardWindowSnapshotIndex.empty();
             log.info(
-                    "event=metric_wallets.cache_primed limit={} size={} indexedByAllocation={} indexedByWallet={}",
+                    "event=metric_wallets.cache_primed limit={} size={} indexedByAllocation={} indexedByWallet={} copyGuardSnapshots={}",
                     historyLimit,
                     snapshot.size(),
                     snapshot.index().allocationSize(),
-                    snapshot.index().walletSize()
+                    snapshot.index().walletSize(),
+                    guardSnapshot.size()
             );
         } catch (EngineException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             log.warn("event=metric_wallets.cache_prime_failed limit={} errClass={} errMsg=\"{}\"", historyLimit, ex.getClass().getSimpleName(), safeErr(ex));
@@ -457,6 +484,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     public void refreshHistoryCacheJob() {
         try {
             allPositionHistoryCache.refresh(historyLimit);
+            if (copyGuardSnapshotEnabled) {
+                copyGuardWindowSnapshotCache.refresh(historyLimit);
+            }
             log.debug("event=metric_wallets.cache_refresh_triggered limit={}", historyLimit);
         } catch (EngineException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             log.warn("event=metric_wallets.cache_refresh_failed limit={} errClass={} errMsg=\"{}\"", historyLimit, ex.getClass().getSimpleName(), safeErr(ex));
@@ -470,6 +500,65 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                 .expireAfterWrite(cacheExpireAfter)
                 .recordStats()
                 .build(this::loadAllPositionHistory);
+    }
+
+    private LoadingCache<Integer, CopyGuardWindowSnapshotIndex> buildCopyGuardWindowSnapshotCache() {
+        return Caffeine.newBuilder()
+                .maximumSize(cacheMaxSize)
+                .refreshAfterWrite(cacheRefreshAfter)
+                .expireAfterWrite(cacheExpireAfter)
+                .recordStats()
+                .build(this::loadCopyGuardWindowSnapshots);
+    }
+
+    private CopyGuardWindowSnapshotIndex loadCopyGuardWindowSnapshots(Integer limit) {
+        if (!copyGuardSnapshotEnabled) {
+            return CopyGuardWindowSnapshotIndex.empty();
+        }
+        long startNs = System.nanoTime();
+        try {
+            String windows = String.join(",", copyGuardAvailableWindows);
+            log.info(
+                    "event=copy_guard_windows.snapshot.refresh.started wallets={} strategies=metric_wallet_cache windows={} source=metric_service_endpoint",
+                    joyasLimit,
+                    windows
+            );
+            List<CopyGuardWindowSnapshotDto> resp = metricWalletsInfoClient.copyGuardWindows(
+                    joyasLimit,
+                    joyasDayz,
+                    "snapshot",
+                    windows
+            );
+            CopyGuardWindowSnapshotIndex index = CopyGuardWindowSnapshotIndex.from(resp, copyStrategyRuntimeRouter);
+            if (!index.isEmpty()) {
+                lastKnownGoodCopyGuardSnapshots.set(index);
+            }
+            log.info(
+                    "event=copy_guard_windows.snapshot.refresh.finished computed={} skipped=0 failed=0 elapsedMs={} source=metric_service_endpoint",
+                    index.size(),
+                    elapsedMs(startNs)
+            );
+            return index;
+        } catch (RestClientResponseException ex) {
+            log.warn(
+                    "event=copy_guard_windows.snapshot.refresh.failed statusCode={} endpoint={} elapsedMs={} errClass={} errMsg=\"{}\" fallback=last_known_good",
+                    ex.getStatusCode().value(),
+                    COPY_GUARD_WINDOWS_ENDPOINT,
+                    elapsedMs(startNs),
+                    ex.getClass().getSimpleName(),
+                    safeErr(ex)
+            );
+            return CopyGuardWindowSnapshotIndex.empty();
+        } catch (RestClientException | IllegalStateException | IllegalArgumentException ex) {
+            log.warn(
+                    "event=copy_guard_windows.snapshot.refresh.failed endpoint={} elapsedMs={} errClass={} errMsg=\"{}\" fallback=last_known_good",
+                    COPY_GUARD_WINDOWS_ENDPOINT,
+                    elapsedMs(startNs),
+                    ex.getClass().getSimpleName(),
+                    safeErr(ex)
+            );
+            return CopyGuardWindowSnapshotIndex.empty();
+        }
     }
 
     private HistorySnapshot loadAllPositionHistory(Integer limit) {
@@ -683,6 +772,20 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         String walletId = dto.getWallet() == null ? null : dto.getWallet().getIdWallet();
         String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(dto);
 
+        CopyGuardWindowSnapshotDto guardSnapshot = findCopyGuardSnapshotFast(
+                normalizeWalletId(walletId),
+                strategyCode,
+                copyStrategyRuntimeRouter.allocationKey(
+                        normalizeWalletId(walletId),
+                        strategyCode,
+                        scopeTypeFromMetric(dto),
+                        scopeValueFromMetric(dto, strategyCode)
+                )
+        );
+        if (guardSnapshot != null) {
+            return evaluateCopyGuardSnapshot(guardSnapshot, normalizeWalletId(walletId), strategyCode);
+        }
+
         CopyStrategyGuardDecision realJewelDecision = decisionFromMetricCopyGuard(dto);
         if (realJewelDecision != null) {
             return realJewelDecision;
@@ -709,50 +812,358 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                     : CopyStrategyGuardDecision.reduce("NEGATIVE_TOTAL_NET_PNL", detail, 0.5);
         }
 
+        CopyStrategyGuardDecision windowDecision = CopyStrategyGuardDecision.allow();
         for (String window : copyGuardWindows) {
             Boolean complete = windowComplete(simulation, window);
-            if (Boolean.FALSE.equals(complete) && copyGuardRequireWindowData) {
-                return CopyStrategyGuardDecision.blocked(
-                        "INCOMPLETE_REQUIRED_WINDOW_" + windowReasonCode(window),
-                        "window=" + window + " complete=false"
+            if (Boolean.FALSE.equals(complete)) {
+                log.info(
+                        "event=copy_guard.window.info walletId={} strategyCode={} window={} reasonCode=WINDOW_{}_NOT_MATURE_INFO source=fallback_simulation",
+                        safeLog(walletId),
+                        safeLog(strategyCode),
+                        safeLog(window),
+                        windowReasonCode(window)
                 );
+                continue;
             }
             Double pnl = windowNetPnl(simulation, window);
             if (pnl == null) {
-                if (copyGuardRequireWindowData) {
-                    return CopyStrategyGuardDecision.blocked(
-                            "SIMULATION_WINDOW_MISSING",
-                            "window=" + window
-                    );
-                }
+                log.info(
+                        "event=copy_guard.window.info walletId={} strategyCode={} window={} reasonCode=MISSING_WINDOW_{}_INFO source=fallback_simulation",
+                        safeLog(walletId),
+                        safeLog(strategyCode),
+                        safeLog(window),
+                        windowReasonCode(window)
+                );
                 continue;
             }
             if (pnl < copyGuardMinWindowPnlUsdt) {
                 String detail = "window=" + window + " pnl=" + pnl + " min=" + copyGuardMinWindowPnlUsdt + " pauseAt=" + copyGuardPauseWindowPnlUsdt;
                 String normalizedWindow = window == null ? "" : window.trim().toLowerCase(java.util.Locale.ROOT);
-                String requiredWindowReason = requiredWindowReason(window, pnl);
                 if ("1w".equals(normalizedWindow)) {
-                    log.info("event=guard_1w_warning walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_1W_NET_PNL action=REDUCE_CAPITAL copyImpact=capital_reduced",
+                    log.info("event=copy_guard.window.warning walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_1W_WARNING_ONLY action=WARNING copyImpact=observe_only",
                             walletId, strategyCode, window, pnl);
-                    return CopyStrategyGuardDecision.reduce("NEGATIVE_1W_NET_PNL", detail, copyGuardOneWeekCapitalMultiplier);
+                    windowDecision = strongerGuard(windowDecision, CopyStrategyGuardDecision.warn("NEGATIVE_1W_WARNING_ONLY", detail, 1.0));
+                    continue;
                 }
                 if ("2w".equals(normalizedWindow)) {
-                    log.warn("event=guard_2w_pause_open walletId={} strategyCode={} window={} pnl={} reasonCode={} action=PAUSE_OPEN copyImpact=no_new_live_open",
-                            walletId, strategyCode, window, pnl, requiredWindowReason);
-                    return CopyStrategyGuardDecision.blocked(requiredWindowReason, detail);
+                    log.warn("event=copy_guard.window.reduce walletId={} strategyCode={} window={} pnl={} capitalMultiplier=0.60 reasonCode=NEGATIVE_2W_REDUCE_TO_60 action=REDUCE_CAPITAL copyImpact=capital_reduced",
+                            walletId, strategyCode, window, pnl);
+                    windowDecision = strongerGuard(windowDecision, CopyStrategyGuardDecision.reduce("NEGATIVE_2W_REDUCE_TO_60", detail, 0.60));
+                    continue;
+                }
+                if ("3w".equals(normalizedWindow)) {
+                    log.warn("event=copy_guard.window.reduce walletId={} strategyCode={} window={} pnl={} capitalMultiplier=0.30 reasonCode=NEGATIVE_3W_REDUCE_TO_30 action=REDUCE_CAPITAL copyImpact=capital_reduced",
+                            walletId, strategyCode, window, pnl);
+                    windowDecision = strongerGuard(windowDecision, CopyStrategyGuardDecision.reduce("NEGATIVE_3W_REDUCE_TO_30", detail, 0.30));
+                    continue;
                 }
                 if ("1mo".equals(normalizedWindow)) {
-                    log.warn("event=guard_1mo_shadow_only walletId={} strategyCode={} window={} pnl={} reasonCode={} action=SHADOW_ONLY copyImpact=shadow_only",
-                            walletId, strategyCode, window, pnl, requiredWindowReason);
-                    return CopyStrategyGuardDecision.shadowOnly(requiredWindowReason, detail, copyGuardOneMonthCapitalMultiplier);
+                    log.warn("event=copy_guard.live.shadow_revalidation walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_1MO_SHADOW_REVALIDATION action=SHADOW_REVALIDATION copyImpact=no_new_live_open",
+                            walletId, strategyCode, window, pnl);
+                    windowDecision = strongerGuard(windowDecision, CopyStrategyGuardDecision.shadowRevalidation("NEGATIVE_1MO_SHADOW_REVALIDATION", detail));
+                    continue;
                 }
-                return pnl <= copyGuardPauseWindowPnlUsdt
-                        ? CopyStrategyGuardDecision.blocked(requiredWindowReason, detail)
-                        : CopyStrategyGuardDecision.reduce(requiredWindowReason, detail, 0.5);
+                if ("2mo".equals(normalizedWindow)) {
+                    log.warn("event=copy_guard.live.micro_live_required_reentry walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_2MO_HARD_DOWNGRADE action=MICRO_LIVE_REQUIRED_REENTRY copyImpact=no_new_live_open",
+                            walletId, strategyCode, window, pnl);
+                    windowDecision = strongerGuard(windowDecision, CopyStrategyGuardDecision.microLiveRequiredReentry("NEGATIVE_2MO_HARD_DOWNGRADE", detail));
+                    continue;
+                }
+                if ("3mo".equals(normalizedWindow)) {
+                    log.warn("event=copy_guard.live.manual_review walletId={} strategyCode={} window={} pnl={} reasonCode=NEGATIVE_3MO_MANUAL_REVIEW action=MANUAL_REVIEW copyImpact=no_new_live_open",
+                            walletId, strategyCode, window, pnl);
+                    windowDecision = strongerGuard(windowDecision, CopyStrategyGuardDecision.manualReview("NEGATIVE_3MO_MANUAL_REVIEW", detail));
+                    continue;
+                }
+                windowDecision = strongerGuard(windowDecision, pnl <= copyGuardPauseWindowPnlUsdt
+                        ? CopyStrategyGuardDecision.blocked(requiredWindowReason(window, pnl), detail)
+                        : CopyStrategyGuardDecision.reduce(requiredWindowReason(window, pnl), detail, 0.5));
             }
         }
 
+        return windowDecision;
+    }
+
+    private CopyGuardWindowSnapshotDto findCopyGuardSnapshotFast(String walletKey, String strategyCode, String allocationKey) {
+        if (!copyGuardSnapshotEnabled || walletKey == null) {
+            return null;
+        }
+        CopyGuardWindowSnapshotIndex present = copyGuardWindowSnapshotCache.getIfPresent(historyLimit);
+        CopyGuardWindowSnapshotDto snapshot = present == null ? null : present.find(walletKey, strategyCode, allocationKey);
+        if (snapshot != null) {
+            return snapshot;
+        }
+        CopyGuardWindowSnapshotIndex lkg = lastKnownGoodCopyGuardSnapshots.get();
+        return lkg == null ? null : lkg.find(walletKey, strategyCode, allocationKey);
+    }
+
+    private CopyStrategyGuardDecision evaluateCopyGuardSnapshot(CopyGuardWindowSnapshotDto snapshot, String walletId, String strategyCode) {
+        long startNs = System.nanoTime();
+        if (snapshot == null) {
+            return null;
+        }
+
+        OffsetDateTime computedAt = snapshot.getComputedAt();
+        OffsetDateTime expiresAt = snapshot.getExpiresAt();
+        OffsetDateTime now = OffsetDateTime.now();
+        long ageMs = computedAt == null ? -1L : Duration.between(computedAt, now).toMillis();
+        boolean stale = (computedAt == null && copyGuardRequireWindowData)
+                || (computedAt != null && ageMs > copyGuardStaleSnapshotMaxAge.toMillis())
+                || (expiresAt != null && expiresAt.isBefore(now));
+        if (stale) {
+            CopyStrategyGuardDecision decision = copyGuardRequireWindowData
+                    ? CopyStrategyGuardDecision.blocked("STALE_COPY_GUARD_SNAPSHOT", "ageMs=" + ageMs + " maxAgeMs=" + copyGuardStaleSnapshotMaxAge.toMillis())
+                    : CopyStrategyGuardDecision.warn("STALE_COPY_GUARD_SNAPSHOT", "ageMs=" + ageMs + " maxAgeMs=" + copyGuardStaleSnapshotMaxAge.toMillis(), 1.0);
+            log.warn(
+                    "event=copy_guard.decision.stale walletId={} strategyCode={} ageMs={} maxAgeMs={} decision={}",
+                    safeLog(walletId),
+                    safeLog(strategyCode),
+                    ageMs,
+                    copyGuardStaleSnapshotMaxAge.toMillis(),
+                    decision.action()
+            );
+            return decision;
+        }
+
+        CopyStrategyGuardDecision strongest = strongerGuard(
+                CopyStrategyGuardDecision.allow(),
+                decisionFromSnapshotHeader(snapshot)
+        );
+        Map<String, CopyGuardWindowSnapshotDto.WindowDto> windows = snapshot.getWindows() == null ? Map.of() : snapshot.getWindows();
+        for (String window : copyGuardWindows) {
+            CopyGuardWindowSnapshotDto.WindowDto item = findWindow(windows, window);
+            if (item == null) {
+                log.info(
+                        "event=copy_guard.decision.missing_window walletId={} strategyCode={} window={} requireWindowData={} decision=INFO",
+                        safeLog(walletId),
+                        safeLog(strategyCode),
+                        safeLog(window),
+                        copyGuardRequireWindowData
+                );
+                continue;
+            }
+            if (Boolean.FALSE.equals(item.getDecisionEnabled()) || Boolean.FALSE.equals(item.getMature())) {
+                CopyStrategyGuardDecision informational = CopyStrategyGuardDecision.info(
+                        firstNonBlank(item.getInfoReason(), item.getReasonCode(), "WINDOW_" + windowReasonCode(window) + "_NOT_MATURE_INFO"),
+                        "window=" + window + " mature=" + item.getMature() + " decisionEnabled=" + item.getDecisionEnabled()
+                );
+                log.info(
+                        "event=copy_guard.window.info walletId={} strategyCode={} window={} reasonCode={} mature={} decisionEnabled={} copyImpact=informational",
+                        safeLog(walletId),
+                        safeLog(strategyCode),
+                        safeLog(window),
+                        informational.reason(),
+                        item.getMature(),
+                        item.getDecisionEnabled()
+                );
+                continue;
+            }
+            strongest = strongerGuard(strongest, decisionFromSnapshotWindow(window, item));
+        }
+
+        log.info(
+                "event=copy_guard.decision.resolved walletId={} strategyCode={} executionMode=NA action={} status={} reasonCode={} capitalMultiplier={} windowsUsed={} elapsedMs={}",
+                safeLog(walletId),
+                safeLog(strategyCode),
+                strongest.action(),
+                firstNonBlank(strongest.statusWhenBlocked(), snapshot.getStatus(), "OK"),
+                strongest.reason(),
+                strongest.capitalMultiplier(),
+                String.join(",", copyGuardWindows),
+                elapsedMs(startNs)
+        );
+        return strongest;
+    }
+
+    private CopyStrategyGuardDecision decisionFromSnapshotHeader(CopyGuardWindowSnapshotDto snapshot) {
+        if (snapshot == null) {
+            return null;
+        }
+        String action = normalizeToken(snapshot.getAction());
+        String status = normalizeToken(snapshot.getStatus());
+        String reason = firstNonBlank(
+                firstReason(snapshot.getDecisionReasons()),
+                firstReason(snapshot.getReasons()),
+                action
+        );
+        String detail = "status=" + status
+                + " action=" + action
+                + " downgradeType=" + snapshot.getDowngradeType()
+                + " requireMicroLiveAgain=" + snapshot.getRequireMicroLiveAgain()
+                + " infoReasons=" + String.join("|", snapshot.getInfoReasons() == null ? List.of() : snapshot.getInfoReasons());
+        if ("WATCHLIST_SHADOW".equals(action) || "OBSERVATION_SHADOW".equals(action) || "OBSERVATION_SHADOW".equals(status)) {
+            return CopyStrategyGuardDecision.watchlistShadow(firstNonBlank(reason, "NEW_WALLET_NOT_MATURE"), detail);
+        }
+        if ("SHADOW_REVALIDATION".equals(action) || "SHADOW_REVALIDATION".equals(status)) {
+            return CopyStrategyGuardDecision.shadowRevalidation(firstNonBlank(reason, "NEGATIVE_1MO_SHADOW_REVALIDATION"), detail);
+        }
+        if ("MICRO_LIVE_REQUIRED_REENTRY".equals(action) || "MICRO_LIVE_REQUIRED_REENTRY".equals(status)) {
+            return CopyStrategyGuardDecision.microLiveRequiredReentry(firstNonBlank(reason, "NEGATIVE_2MO_HARD_DOWNGRADE"), detail);
+        }
+        if ("MANUAL_REVIEW".equals(action) || "MANUAL_REVIEW".equals(status)) {
+            return CopyStrategyGuardDecision.manualReview(firstNonBlank(reason, "NEGATIVE_3MO_MANUAL_REVIEW"), detail);
+        }
+        if ("DISABLED".equals(action) || "DISABLED".equals(status)) {
+            return CopyStrategyGuardDecision.disabled(firstNonBlank(reason, "COPY_GUARD_DISABLED"), detail);
+        }
+        if ("PAUSE_OPEN".equals(action)) {
+            return CopyStrategyGuardDecision.blocked(firstNonBlank(reason, "COPY_GUARD_PAUSE_OPEN"), detail);
+        }
+        if ("SHADOW_ONLY".equals(action) || "SHADOW_ONLY".equals(status)) {
+            return CopyStrategyGuardDecision.shadowOnly(firstNonBlank(reason, "COPY_GUARD_SHADOW_ONLY"), detail, snapshot.getCapitalMultiplier() == null ? 0.25 : snapshot.getCapitalMultiplier());
+        }
+        if ("REDUCE_CAPITAL".equals(action)) {
+            return CopyStrategyGuardDecision.reduce(firstNonBlank(reason, "COPY_GUARD_REDUCE_CAPITAL"), detail, snapshot.getCapitalMultiplier() == null ? 0.5 : snapshot.getCapitalMultiplier());
+        }
+        if ("WARNING".equals(action)) {
+            return CopyStrategyGuardDecision.warn(firstNonBlank(reason, "COPY_GUARD_WARNING"), detail, snapshot.getCapitalMultiplier() == null ? 1.0 : snapshot.getCapitalMultiplier());
+        }
+        if ("INFO".equals(action)) {
+            return CopyStrategyGuardDecision.info(firstNonBlank(reason, "COPY_GUARD_INFO"), detail);
+        }
         return CopyStrategyGuardDecision.allow();
+    }
+
+    private CopyStrategyGuardDecision decisionFromSnapshotWindow(String window, CopyGuardWindowSnapshotDto.WindowDto item) {
+        String action = normalizeToken(firstNonBlank(item.getAction(), "ALLOW"));
+        String status = normalizeToken(item.getStatus());
+        String normalizedWindow = sanitizeWindowCode(firstNonBlank(item.getWindowCode(), window));
+        String reason = firstNonBlank(item.getReasonCode(), requiredWindowReason(normalizedWindow, item.getPnlNetUsd()));
+        double multiplier = item.getCapitalMultiplier() == null ? multiplierForWindowAction(normalizedWindow, action) : item.getCapitalMultiplier();
+        String detail = "window=" + normalizedWindow
+                + " pnlNetUsd=" + item.getPnlNetUsd()
+                + " lossPct=" + item.getLossPct()
+                + " capitalBaseUsd=" + item.getCapitalBaseUsd()
+                + " severeLossLevel=" + item.getSevereLossLevel()
+                + " severeLossGuardApplied=" + item.getSevereLossGuardApplied();
+        if ("DISABLED".equals(action) || "DISABLED".equals(status)) {
+            return CopyStrategyGuardDecision.disabled(reason, detail);
+        }
+        if ("PAUSE_OPEN".equals(action)) {
+            return CopyStrategyGuardDecision.blocked(reason, detail);
+        }
+        if ("SHADOW_ONLY".equals(action) || "SHADOW_ONLY".equals(status)) {
+            return CopyStrategyGuardDecision.shadowOnly(reason, detail, multiplier);
+        }
+        if ("SHADOW_REVALIDATION".equals(action) || "SHADOW_REVALIDATION".equals(status)) {
+            return CopyStrategyGuardDecision.shadowRevalidation(reason, detail + " downgradeType=" + item.getDowngradeType());
+        }
+        if ("MICRO_LIVE_REQUIRED_REENTRY".equals(action) || "MICRO_LIVE_REQUIRED_REENTRY".equals(status)) {
+            return CopyStrategyGuardDecision.microLiveRequiredReentry(reason, detail + " requireMicroLiveAgain=" + item.getRequireMicroLiveAgain());
+        }
+        if ("MANUAL_REVIEW".equals(action) || "MANUAL_REVIEW".equals(status)) {
+            return CopyStrategyGuardDecision.manualReview(reason, detail);
+        }
+        if ("WATCHLIST_SHADOW".equals(action) || "OBSERVATION_SHADOW".equals(action) || "OBSERVATION_SHADOW".equals(status)) {
+            return CopyStrategyGuardDecision.watchlistShadow(reason, detail);
+        }
+        if ("REDUCE_CAPITAL".equals(action)) {
+            return CopyStrategyGuardDecision.reduce(reason, detail, multiplier);
+        }
+        if ("WARNING".equals(action)) {
+            return CopyStrategyGuardDecision.warn(reason, detail, multiplier);
+        }
+        if ("INFO".equals(action)) {
+            return CopyStrategyGuardDecision.info(reason, detail);
+        }
+        Double pnl = item.getPnlNetUsd();
+        if (pnl != null && pnl < copyGuardMinWindowPnlUsdt) {
+            if ("1w".equals(normalizedWindow)) {
+                return CopyStrategyGuardDecision.warn("NEGATIVE_1W_WARNING_ONLY", "window=1w pnl=" + pnl, 1.0);
+            }
+            if ("2w".equals(normalizedWindow)) {
+                return CopyStrategyGuardDecision.reduce("NEGATIVE_2W_REDUCE_TO_60", "window=2w pnl=" + pnl, 0.60);
+            }
+            if ("3w".equals(normalizedWindow)) {
+                return CopyStrategyGuardDecision.reduce("NEGATIVE_3W_REDUCE_TO_30", "window=3w pnl=" + pnl, 0.30);
+            }
+            if ("1mo".equals(normalizedWindow)) {
+                return CopyStrategyGuardDecision.shadowRevalidation("NEGATIVE_1MO_SHADOW_REVALIDATION", "window=1mo pnl=" + pnl);
+            }
+            if ("2mo".equals(normalizedWindow)) {
+                return CopyStrategyGuardDecision.microLiveRequiredReentry("NEGATIVE_2MO_HARD_DOWNGRADE", "window=2mo pnl=" + pnl);
+            }
+            if ("3mo".equals(normalizedWindow)) {
+                return CopyStrategyGuardDecision.manualReview("NEGATIVE_3MO_MANUAL_REVIEW", "window=3mo pnl=" + pnl);
+            }
+        }
+        return CopyStrategyGuardDecision.allow();
+    }
+
+    private CopyStrategyGuardDecision strongerGuard(CopyStrategyGuardDecision current, CopyStrategyGuardDecision candidate) {
+        if (current == null) return candidate == null ? CopyStrategyGuardDecision.allow() : candidate;
+        if (candidate == null) return current;
+        int candidateRank = guardActionRank(candidate.action(), candidate.allowed());
+        int currentRank = guardActionRank(current.action(), current.allowed());
+        if (candidateRank > currentRank) {
+            return candidate;
+        }
+        if (candidateRank == currentRank && candidate.capitalMultiplier() < current.capitalMultiplier()) {
+            return candidate;
+        }
+        return current;
+    }
+
+    private int guardActionRank(String action, boolean allowed) {
+        String normalized = normalizeToken(action);
+        if ("DISABLED".equals(normalized)) return 9;
+        if ("MANUAL_REVIEW".equals(normalized)) return 8;
+        if ("MICRO_LIVE_REQUIRED_REENTRY".equals(normalized)) return 7;
+        if ("SHADOW_ONLY".equals(normalized)) return 6;
+        if ("SHADOW_REVALIDATION".equals(normalized)
+                || "WATCHLIST_SHADOW".equals(normalized)
+                || "OBSERVATION_SHADOW".equals(normalized)) return 5;
+        if ("PAUSE_OPEN".equals(normalized)) return 4;
+        if ("REDUCE_CAPITAL".equals(normalized)) return 3;
+        if ("WARNING".equals(normalized)) return 2;
+        if ("INFO".equals(normalized)) return 1;
+        if (!allowed) return 4;
+        return 0;
+    }
+
+    private double multiplierForWindowAction(String window, String action) {
+        String normalizedWindow = sanitizeWindowCode(window);
+        String normalizedAction = normalizeToken(action);
+        if ("REDUCE_CAPITAL".equals(normalizedAction) && "2w".equals(normalizedWindow)) {
+            return 0.60;
+        }
+        if ("REDUCE_CAPITAL".equals(normalizedAction) && "3w".equals(normalizedWindow)) {
+            return 0.30;
+        }
+        if ("SHADOW_ONLY".equals(normalizedAction) && "1mo".equals(normalizedWindow)) {
+            return copyGuardOneMonthCapitalMultiplier;
+        }
+        if ("SHADOW_ONLY".equals(normalizedAction) && "2mo".equals(normalizedWindow)) {
+            return 0.20;
+        }
+        if ("SHADOW_REVALIDATION".equals(normalizedAction)
+                || "MICRO_LIVE_REQUIRED_REENTRY".equals(normalizedAction)
+                || "MANUAL_REVIEW".equals(normalizedAction)
+                || "WATCHLIST_SHADOW".equals(normalizedAction)
+                || "OBSERVATION_SHADOW".equals(normalizedAction)) {
+            return 0.0;
+        }
+        if ("ALLOW".equals(normalizedAction) || "INFO".equals(normalizedAction) || "WARNING".equals(normalizedAction)) {
+            return 1.0;
+        }
+        return 0.5;
+    }
+
+    private static CopyGuardWindowSnapshotDto.WindowDto findWindow(Map<String, CopyGuardWindowSnapshotDto.WindowDto> windows, String window) {
+        if (windows == null || windows.isEmpty() || window == null) {
+            return null;
+        }
+        String normalizedWindow = sanitizeWindowCode(window);
+        CopyGuardWindowSnapshotDto.WindowDto exact = windows.get(window);
+        if (exact != null) return exact;
+        exact = windows.get(normalizedWindow);
+        if (exact != null) return exact;
+        for (Map.Entry<String, CopyGuardWindowSnapshotDto.WindowDto> entry : windows.entrySet()) {
+            if (normalizedWindow.equals(sanitizeWindowCode(entry.getKey()))) {
+                return entry.getValue();
+            }
+        }
+        return null;
     }
 
     private String requiredWindowReason(String window, Double pnl) {
@@ -782,6 +1193,18 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         if ("DISABLED".equals(action) || "DISABLED".equals(status)) {
             return CopyStrategyGuardDecision.disabled("METRIC_COPY_GUARD_DISABLED", detail);
         }
+        if ("WATCHLIST_SHADOW".equals(action) || "OBSERVATION_SHADOW".equals(action) || "OBSERVATION_SHADOW".equals(status)) {
+            return CopyStrategyGuardDecision.watchlistShadow("NEW_WALLET_NOT_MATURE", detail);
+        }
+        if ("SHADOW_REVALIDATION".equals(action) || "SHADOW_REVALIDATION".equals(status)) {
+            return CopyStrategyGuardDecision.shadowRevalidation("NEGATIVE_1MO_SHADOW_REVALIDATION", detail);
+        }
+        if ("MICRO_LIVE_REQUIRED_REENTRY".equals(action) || "MICRO_LIVE_REQUIRED_REENTRY".equals(status)) {
+            return CopyStrategyGuardDecision.microLiveRequiredReentry("NEGATIVE_2MO_HARD_DOWNGRADE", detail);
+        }
+        if ("MANUAL_REVIEW".equals(action) || "MANUAL_REVIEW".equals(status)) {
+            return CopyStrategyGuardDecision.manualReview("NEGATIVE_3MO_MANUAL_REVIEW", detail);
+        }
         if ("PAUSE_OPEN".equals(action) || !allowNewEntries) {
             return CopyStrategyGuardDecision.blocked("METRIC_COPY_GUARD_PAUSE_OPEN", detail);
         }
@@ -793,6 +1216,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         }
         if ("WARNING".equals(action) || "WATCHLIST".equals(status) || "DATA_RISK".equals(status)) {
             return CopyStrategyGuardDecision.warn("METRIC_COPY_GUARD_WARNING", detail, multiplier);
+        }
+        if ("INFO".equals(action)) {
+            return CopyStrategyGuardDecision.info("METRIC_COPY_GUARD_INFO", detail);
         }
         return null;
     }
@@ -889,10 +1315,27 @@ public class MetricWalletServiceImpl implements MetricWalletService {
         return strategyCode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
     }
 
+    private static String normalizeToken(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        return value.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+    }
+
     private static String firstNonBlank(String... values) {
         if (values == null) return null;
         for (String value : values) {
             if (value != null && !value.isBlank()) return value;
+        }
+        return null;
+    }
+
+    private static String firstReason(List<String> reasons) {
+        if (reasons == null) return null;
+        for (String reason : reasons) {
+            if (reason != null && !reason.isBlank() && !"OK".equalsIgnoreCase(reason.trim())) {
+                return reason;
+            }
         }
         return null;
     }
@@ -947,14 +1390,15 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     private static Double windowNetPnl(MetricaWalletDto.CopySimulationDto simulation, String window) {
         if (simulation == null || window == null) return null;
 
-        final String key = window.trim();
+        final String rawKey = window.trim();
+        final String key = sanitizeWindowCode(window);
         if (key.isEmpty()) return null;
 
         final Map<String, Double> net = simulation.getPnlCopyNet();
         if (net != null) {
-            Double exact = net.get(key);
+            Double exact = net.get(rawKey);
             if (exact != null) return exact;
-            Double lower = net.get(key.toLowerCase(java.util.Locale.ROOT));
+            Double lower = net.get(key);
             if (lower != null) return lower;
         }
 
@@ -971,8 +1415,9 @@ public class MetricWalletServiceImpl implements MetricWalletService {
     }
 
     private static String windowReasonCode(String window) {
-        if (window == null || window.isBlank()) return "UNKNOWN";
-        return window.trim().toUpperCase(java.util.Locale.ROOT).replaceAll("[^A-Z0-9]+", "_");
+        String normalized = sanitizeWindowCode(window);
+        if (normalized.isBlank()) return "UNKNOWN";
+        return normalized.toUpperCase(java.util.Locale.ROOT).replaceAll("[^A-Z0-9]+", "_");
     }
 
     private static List<String> parseGuardWindows(String raw) {
@@ -980,11 +1425,22 @@ public class MetricWalletServiceImpl implements MetricWalletService {
             return List.of("2w", "1mo");
         }
         final List<String> windows = java.util.Arrays.stream(raw.split(","))
-                .map(String::trim)
+                .map(MetricWalletServiceImpl::sanitizeWindowCode)
                 .filter(s -> !s.isEmpty())
                 .distinct()
                 .toList();
         return windows.isEmpty() ? List.of("2w", "1mo") : windows;
+    }
+
+    private static String sanitizeWindowCode(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        return value.trim()
+                .replaceAll("^[\"'`]+|[\"'`]+$", "")
+                .trim()
+                .toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("^[^a-z0-9]+|[^a-z0-9]+$", "");
     }
 
     private static boolean gte(Integer value, int threshold) {
@@ -1046,6 +1502,14 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
     private static String safeErr(Throwable t) {
         return t.getClass().getSimpleName() + ": " + (t.getMessage() == null ? "" : t.getMessage());
+    }
+
+    private static String safeLog(String value) {
+        if (value == null || value.isBlank()) {
+            return "NA";
+        }
+        String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
+        return clean.length() > 1000 ? clean.substring(0, 1000) : clean;
     }
 
     private void warnLastKnownGoodIfDue(int limit, HistorySnapshot snapshot) {
@@ -1171,6 +1635,84 @@ public class MetricWalletServiceImpl implements MetricWalletService {
 
         int walletSize() {
             return byWalletId.size();
+        }
+    }
+
+    private static final class CopyGuardWindowSnapshotIndex {
+        private static final CopyGuardWindowSnapshotIndex EMPTY = new CopyGuardWindowSnapshotIndex(Map.of(), Map.of());
+
+        private final Map<String, CopyGuardWindowSnapshotDto> byAllocationKey;
+        private final Map<String, CopyGuardWindowSnapshotDto> byWalletStrategy;
+
+        private CopyGuardWindowSnapshotIndex(Map<String, CopyGuardWindowSnapshotDto> byAllocationKey,
+                                             Map<String, CopyGuardWindowSnapshotDto> byWalletStrategy) {
+            this.byAllocationKey = byAllocationKey == null ? Map.of() : Map.copyOf(byAllocationKey);
+            this.byWalletStrategy = byWalletStrategy == null ? Map.of() : Map.copyOf(byWalletStrategy);
+        }
+
+        static CopyGuardWindowSnapshotIndex empty() {
+            return EMPTY;
+        }
+
+        static CopyGuardWindowSnapshotIndex from(List<CopyGuardWindowSnapshotDto> values, CopyStrategyRuntimeRouter router) {
+            if (values == null || values.isEmpty()) {
+                return empty();
+            }
+            Map<String, CopyGuardWindowSnapshotDto> byAllocationKey = new java.util.HashMap<>();
+            Map<String, CopyGuardWindowSnapshotDto> byWalletStrategy = new java.util.HashMap<>();
+            for (CopyGuardWindowSnapshotDto snapshot : values) {
+                if (snapshot == null) {
+                    continue;
+                }
+                String walletId = normalizeWalletId(snapshot.getWalletId());
+                if (walletId == null) {
+                    continue;
+                }
+                String strategyCode = normalizeStrategyCode(snapshot.getCopyStrategyCode());
+                String scopeType = snapshot.getScopeType() == null || snapshot.getScopeType().isBlank()
+                        ? "all"
+                        : snapshot.getScopeType().trim().toLowerCase(java.util.Locale.ROOT);
+                String scopeValue = snapshot.getScopeValue() == null || snapshot.getScopeValue().isBlank()
+                        ? "ALL"
+                        : snapshot.getScopeValue().trim();
+                String allocationKey = router == null
+                        ? walletId + "|" + strategyCode + "|" + scopeType + "|" + scopeValue
+                        : router.allocationKey(walletId, strategyCode, scopeType, scopeValue);
+                if (allocationKey != null) {
+                    byAllocationKey.put(allocationKey, snapshot);
+                }
+                byWalletStrategy.put(walletId + "|" + strategyCode, snapshot);
+            }
+            return byAllocationKey.isEmpty() && byWalletStrategy.isEmpty()
+                    ? empty()
+                    : new CopyGuardWindowSnapshotIndex(byAllocationKey, byWalletStrategy);
+        }
+
+        CopyGuardWindowSnapshotDto find(String walletId, String strategyCode, String allocationKey) {
+            if (allocationKey != null) {
+                CopyGuardWindowSnapshotDto direct = byAllocationKey.get(allocationKey);
+                if (direct != null) {
+                    return direct;
+                }
+            }
+            String wallet = normalizeWalletId(walletId);
+            if (wallet == null) {
+                return null;
+            }
+            String strategy = normalizeStrategyCode(strategyCode);
+            CopyGuardWindowSnapshotDto byStrategy = byWalletStrategy.get(wallet + "|" + strategy);
+            if (byStrategy != null) {
+                return byStrategy;
+            }
+            return byWalletStrategy.get(wallet + "|" + CopyStrategyRuntimeRouter.DEFAULT_STRATEGY_CODE);
+        }
+
+        int size() {
+            return byAllocationKey.size();
+        }
+
+        boolean isEmpty() {
+            return byAllocationKey.isEmpty() && byWalletStrategy.isEmpty();
         }
     }
 

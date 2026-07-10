@@ -1,11 +1,14 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.entity.CopyPromotionAuditEntity;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.repository.CopyOperationEventRepository;
 import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.MicroLivePromotionService;
+import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
+import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
 import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
@@ -38,6 +41,7 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
     private final CopyOperationEventRepository eventRepository;
     private final CopyPromotionAuditRepository auditRepository;
     private final LivePromotionProperties properties;
+    private final CopyDecisionGateway copyDecisionGateway;
 
     @Override
     @Transactional
@@ -305,10 +309,17 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             return rejected("MICRO_LIVE_NOT_READY_NEGATIVE_PNL", allocation, events, errors, errorRate, pnl, days);
         }
 
+        LiveDecision fullDecision = evaluateFullDecisionForLive(allocation, events, errors, errorRate, pnl, days, copyModeResolution);
+        if (!fullDecision.allowed()) {
+            return fullDecision;
+        }
+
+        Map<String, Object> finalDetails = details(allocation, events, errors, errorRate, pnl, days, copyModeResolution.copyMode(), copyModeResolution.reasonCode(), copyModeResolution.constraintReasonCode());
+        finalDetails.putAll(fullDecision.details());
         return new LiveDecision(
                 true,
                 "MICRO_LIVE_VALIDATED_READY_FOR_LIVE",
-                details(allocation, events, errors, errorRate, pnl, days, copyModeResolution.copyMode(), copyModeResolution.reasonCode(), copyModeResolution.constraintReasonCode()),
+                finalDetails,
                 events,
                 errors,
                 errorRate,
@@ -316,6 +327,82 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 days,
                 copyModeResolution.copyMode()
         );
+    }
+
+    private LiveDecision evaluateFullDecisionForLive(
+            UserCopyAllocationEntity allocation,
+            long events,
+            long errors,
+            BigDecimal errorRate,
+            BigDecimal pnl,
+            long days,
+            CopyModeResolution copyModeResolution
+    ) {
+        if (!properties.isRequireFullDecisionForLive()) {
+            return new LiveDecision(
+                    true,
+                    "FULL_DECISION_REQUIREMENT_DISABLED",
+                    Map.of("fullDecisionRequired", false),
+                    events,
+                    errors,
+                    errorRate,
+                    pnl,
+                    days,
+                    copyModeResolution.copyMode()
+            );
+        }
+        CopyDecisionRequest request = new CopyDecisionRequest(
+                normalizeWallet(allocation.getWalletId()),
+                normalizeStrategy(allocation.getCopyStrategyCode()),
+                normalizeScopeType(allocation.getScopeType()),
+                normalizeScopeValue(allocation.getScopeValue(), allocation.getCopyStrategyCode()),
+                "live-entry",
+                "full",
+                clampInt(properties.getCopyDecisionMinHistoryDays(), 1, 3650),
+                clampInt(properties.getCopyDecisionSimulationLookbackDays(), 1, 3650),
+                clampInt(properties.getCopyDecisionMaxFactsPerUnit(), 1, 50000),
+                clampInt(properties.getCopyDecisionTimeoutMs(), 1, 59000),
+                false
+        );
+        CopyDecisionDto decision;
+        try {
+            decision = copyDecisionGateway.getFullDecisionExact(request);
+        } catch (RuntimeException ex) {
+            log.warn(
+                    "event=micro_live.promotion.full_decision.result userId={} walletId={} microLiveAllocationId={} decision=REJECT reasonCode=FULL_DECISION_FAILED errorClass={} errorMessage=\"{}\"",
+                    allocation.getIdUser(),
+                    allocation.getWalletId(),
+                    allocation.getId(),
+                    ex.getClass().getSimpleName(),
+                    safe(ex.getMessage())
+            );
+            Map<String, Object> details = details(allocation, events, errors, errorRate, pnl, days, copyModeResolution.copyMode(), copyModeResolution.reasonCode(), copyModeResolution.constraintReasonCode());
+            details.put("fullDecisionRequired", true);
+            details.put("fullDecisionReasonCode", "FULL_DECISION_FAILED");
+            details.put("fullDecisionErrorClass", ex.getClass().getSimpleName());
+            details.put("fullDecisionError", safe(ex.getMessage()));
+            return new LiveDecision(false, "FULL_DECISION_FAILED", details, events, errors, errorRate, pnl, days, copyModeResolution.copyMode());
+        }
+
+        FullDecisionGate gate = fullDecisionGate(decision, false);
+        log.info(
+                "event=micro_live.promotion.full_decision.result userId={} walletId={} microLiveAllocationId={} decision={} reasonCode={} fullMaterialized={} factPayloadLoaded={} decisionFinal={} requiresFullSimulation={} copyGuardAction={} canMicroLive={} canLive={}",
+                allocation.getIdUser(),
+                allocation.getWalletId(),
+                allocation.getId(),
+                gate.allowed() ? "ALLOW" : "REJECT",
+                gate.reasonCode(),
+                decision != null && decision.isFullMaterialized(),
+                decision != null && decision.isFactPayloadLoaded(),
+                decision != null && decision.isDecisionFinal(),
+                decision != null && decision.isRequiresFullSimulation(),
+                copyGuardAction(decision),
+                decision != null && decision.isCanMicroLive(),
+                decision != null && decision.isCanLive()
+        );
+        Map<String, Object> details = details(allocation, events, errors, errorRate, pnl, days, copyModeResolution.copyMode(), copyModeResolution.reasonCode(), copyModeResolution.constraintReasonCode());
+        details.putAll(fullDecisionDetails(decision, gate));
+        return new LiveDecision(gate.allowed(), gate.reasonCode(), details, events, errors, errorRate, pnl, days, copyModeResolution.copyMode());
     }
 
     private LiveDecision rejected(
@@ -446,6 +533,107 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
         return details;
     }
 
+    private static FullDecisionGate fullDecisionGate(CopyDecisionDto decision, boolean requireMicroLive) {
+        if (decision == null) {
+            return new FullDecisionGate(false, "FULL_DECISION_FAILED");
+        }
+        if (!decision.isDecisionFinal()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_NOT_FINAL"));
+        }
+        if (decision.isRequiresFullSimulation() || !decision.isFullMaterialized()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_NOT_MATERIALIZED"));
+        }
+        if (!decision.isFactPayloadLoaded()) {
+            return new FullDecisionGate(false, "FULL_FACT_PAYLOAD_NOT_LOADED");
+        }
+        if (!"ALLOW".equals(copyGuardAction(decision))) {
+            return new FullDecisionGate(false, "FULL_DECISION_BLOCKED_BY_COPY_GUARD");
+        }
+        if (requireMicroLive && !decision.isCanMicroLive()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_CAN_MICRO_LIVE_FALSE"));
+        }
+        if (!requireMicroLive && !decision.isCanLive()) {
+            return new FullDecisionGate(false, firstNonBlank(decision.getReasonCode(), "FULL_DECISION_CAN_LIVE_FALSE"));
+        }
+        return new FullDecisionGate(true, firstNonBlank(decision.getReasonCode(), requireMicroLive ? "FULL_DECISION_OK_FOR_MICRO_LIVE" : "FULL_DECISION_OK_FOR_LIVE"));
+    }
+
+    private static Map<String, Object> fullDecisionDetails(CopyDecisionDto decision, FullDecisionGate gate) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("fullDecisionRequired", true);
+        details.put("fullDecisionReasonCode", gate.reasonCode());
+        details.put("fullDecisionResponseReasonCode", decision == null ? null : decision.getReasonCode());
+        details.put("fullDecisionResponseReasonDetail", decision == null ? null : decision.getReasonDetail());
+        details.put("fullDecisionMode", decision == null ? null : decision.getMode());
+        details.put("fullDecisionSimulationMode", decision == null ? null : decision.getSimulationMode());
+        details.put("fullDecisionMaterialized", decision != null && decision.isFullMaterialized());
+        details.put("fullDecisionFactPayloadLoaded", decision != null && decision.isFactPayloadLoaded());
+        details.put("fullDecisionFinal", decision != null && decision.isDecisionFinal());
+        details.put("fullDecisionRequiresFullSimulation", decision != null && decision.isRequiresFullSimulation());
+        details.put("fullDecisionCanMicroLive", decision != null && decision.isCanMicroLive());
+        details.put("fullDecisionCanLive", decision != null && decision.isCanLive());
+        details.put("fullDecisionAllowNewEntries", decision != null && decision.isAllowNewEntries());
+        details.put("fullDecisionCopyGuardStatus", copyGuardStatus(decision));
+        details.put("fullDecisionCopyGuardAction", copyGuardAction(decision));
+        details.put("fullDecisionCopyGuardReasons", copyGuardReasons(decision));
+        details.put("fullDecisionElapsedMs", decision == null ? null : decision.getElapsedMs());
+        details.put("fullDecisionFactsLoaded", decision == null ? null : decision.getFactsLoaded());
+        return details;
+    }
+
+    private static String copyGuardAction(CopyDecisionDto decision) {
+        return decision == null || decision.getCopyGuard() == null || decision.getCopyGuard().getAction() == null
+                ? ""
+                : normalizeToken(decision.getCopyGuard().getAction());
+    }
+
+    private static String copyGuardStatus(CopyDecisionDto decision) {
+        return decision == null || decision.getCopyGuard() == null || decision.getCopyGuard().getStatus() == null
+                ? ""
+                : normalizeToken(decision.getCopyGuard().getStatus());
+    }
+
+    private static List<String> copyGuardReasons(CopyDecisionDto decision) {
+        return decision == null || decision.getCopyGuard() == null || decision.getCopyGuard().getReasons() == null
+                ? List.of()
+                : decision.getCopyGuard().getReasons();
+    }
+
+    private static String normalizeWallet(String value) {
+        return value == null ? null : value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String normalizeStrategy(String value) {
+        if (value == null || value.isBlank()) return "MOVEMENT_ALL";
+        return value.trim().toUpperCase(Locale.ROOT).replace('-', '_');
+    }
+
+    private static String normalizeScopeType(String value) {
+        if (value == null || value.isBlank()) return "strategy";
+        return value.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static String normalizeScopeValue(String value, String strategy) {
+        if (value == null || value.isBlank()) return normalizeStrategy(strategy);
+        return value.trim();
+    }
+
+    private static String normalizeToken(String value) {
+        return value == null ? "" : value.trim().toUpperCase(Locale.ROOT).replace('-', '_');
+    }
+
+    private static int clampInt(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static String firstNonBlank(String... values) {
+        if (values == null) return null;
+        for (String value : values) {
+            if (value != null && !value.isBlank()) return value;
+        }
+        return null;
+    }
+
     private static BigDecimal errorRatePct(long events, long errors) {
         if (events <= 0) return ZERO;
         return BigDecimal.valueOf(Math.max(0L, errors))
@@ -488,5 +676,11 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             errorRatePct = nullToZero(errorRatePct);
             netPnlUsd = nullToZero(netPnlUsd);
         }
+    }
+
+    private record FullDecisionGate(
+            boolean allowed,
+            String reasonCode
+    ) {
     }
 }

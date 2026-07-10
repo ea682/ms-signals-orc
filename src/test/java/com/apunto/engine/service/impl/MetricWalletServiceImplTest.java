@@ -1,5 +1,7 @@
 package com.apunto.engine.service.impl;
 import com.apunto.engine.client.MetricWalletsInfoClient;
+import com.apunto.engine.dto.client.CopyDecisionDto;
+import com.apunto.engine.dto.client.CopyGuardWindowSnapshotDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.service.UserCopyAllocationService;
@@ -29,6 +31,21 @@ class MetricWalletServiceImplTest {
 
         assertNotNull(exchange);
         assertEquals("/operaciones/metrica/joyas", exchange.value());
+    }
+
+    @Test
+    void metricWalletClientUsesCopyGuardWindowSnapshotEndpointPath() throws Exception {
+        Method method = MetricWalletsInfoClient.class.getMethod(
+                "copyGuardWindows",
+                int.class,
+                int.class,
+                String.class,
+                String.class
+        );
+        GetExchange exchange = method.getAnnotation(GetExchange.class);
+
+        assertNotNull(exchange);
+        assertEquals("/operaciones/metrica/copy-guard/windows", exchange.value());
     }
 
     @Test
@@ -105,7 +122,7 @@ class MetricWalletServiceImplTest {
     }
 
     @Test
-    void oneWeekNegativeWindowReducesWithoutPausing() throws Exception {
+    void oneWeekNegativeWindowWarnsWithoutReducingOrPausing() throws Exception {
         MetricWalletServiceImpl service = service();
         MetricaWalletDto metric = MetricaWalletDto.builder()
                 .wallet(MetricaWalletDto.WalletDto.builder().idWallet("0xabc").build())
@@ -119,12 +136,12 @@ class MetricWalletServiceImplTest {
         CopyStrategyGuardDecision decision = evaluate(service, metric);
 
         assertTrue(decision.allowed());
-        assertEquals("REDUCE_CAPITAL", decision.action());
-        assertEquals(0.70, decision.capitalMultiplier(), 0.000001);
+        assertEquals("WARNING", decision.action());
+        assertEquals(1.0, decision.capitalMultiplier(), 0.000001);
     }
 
     @Test
-    void twoWeekNegativeWindowPausesLiveOpenings() throws Exception {
+    void twoWeekNegativeWindowReducesCapitalTo60Percent() throws Exception {
         MetricWalletServiceImpl service = service();
         MetricaWalletDto metric = MetricaWalletDto.builder()
                 .wallet(MetricaWalletDto.WalletDto.builder().idWallet("0xabc").build())
@@ -137,9 +154,10 @@ class MetricWalletServiceImplTest {
 
         CopyStrategyGuardDecision decision = evaluate(service, metric);
 
-        assertFalse(decision.allowed());
-        assertEquals("PAUSE_OPEN", decision.action());
-        assertEquals("PAUSED_BY_NEGATIVE_PNL", decision.statusWhenBlocked());
+        assertTrue(decision.allowed());
+        assertEquals("REDUCE_CAPITAL", decision.action());
+        assertEquals("NEGATIVE_2W_REDUCE_TO_60", decision.reason());
+        assertEquals(0.60, decision.capitalMultiplier(), 0.000001);
     }
 
     @Test
@@ -168,13 +186,13 @@ class MetricWalletServiceImplTest {
 
         CopyStrategyGuardDecision decision = evaluate(service, metric);
 
-        assertTrue(decision.allowed());
-        assertEquals("SHADOW_ONLY", decision.action());
-        assertEquals("NEGATIVE_REQUIRED_WINDOW_1MO", decision.reason());
+        assertFalse(decision.allowed());
+        assertEquals("SHADOW_REVALIDATION", decision.action());
+        assertEquals("NEGATIVE_1MO_SHADOW_REVALIDATION", decision.reason());
     }
 
     @Test
-    void incompleteRequiredWindowBlocksLiveOpenings() throws Exception {
+    void incompleteRequiredWindowIsInformationalOnly() throws Exception {
         MetricWalletServiceImpl service = service();
         MetricaWalletDto metric = MetricaWalletDto.builder()
                 .wallet(MetricaWalletDto.WalletDto.builder().idWallet("0xabc").build())
@@ -192,9 +210,8 @@ class MetricWalletServiceImplTest {
 
         CopyStrategyGuardDecision decision = evaluate(service, metric);
 
-        assertFalse(decision.allowed());
-        assertEquals("INCOMPLETE_REQUIRED_WINDOW_1MO", decision.reason());
-        assertEquals("PAUSE_OPEN", decision.action());
+        assertTrue(decision.allowed());
+        assertEquals("ALLOW", decision.action());
     }
 
     @Test
@@ -220,11 +237,307 @@ class MetricWalletServiceImplTest {
         assertEquals("PAUSE_OPEN", decision.action());
     }
 
+    @Test
+    void shouldUseSnapshotWindowsForCopyGuard() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 4.0, "ALLOW", "OK"),
+                "2w", window("2w", -1.0, "REDUCE_CAPITAL", "NEGATIVE_2W_REDUCE_TO_60"),
+                "1mo", window("1mo", 10.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("REDUCE_CAPITAL", decision.action());
+        assertEquals("NEGATIVE_2W_REDUCE_TO_60", decision.reason());
+        assertEquals(0.60, decision.capitalMultiplier(), 0.000001);
+    }
+
+    @Test
+    void shouldNotReduceCapitalWhenSnapshotOneWeekNegative() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", -1.0, "WARNING", "NEGATIVE_1W_WARNING_ONLY"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("WARNING", decision.action());
+        assertEquals(1.0, decision.capitalMultiplier(), 0.000001);
+    }
+
+    @Test
+    void shouldPauseOpenWhenSnapshotOneWeekSevereLoss() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", severeWindow("1w", -25.0, "PAUSE_OPEN", "SEVERE_NEGATIVE_1W_PAUSE_OPEN", -0.25, 100.0, "PAUSE_OPEN"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertFalse(decision.allowed());
+        assertEquals("PAUSE_OPEN", decision.action());
+        assertEquals("SEVERE_NEGATIVE_1W_PAUSE_OPEN", decision.reason());
+        assertEquals(0.0, decision.capitalMultiplier(), 0.000001);
+    }
+
+    @Test
+    void shouldShadowRevalidationWhenSnapshotOneWeekBrutalLoss() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", severeWindow("1w", -45.0, "SHADOW_REVALIDATION", "BRUTAL_NEGATIVE_1W_SHADOW_REVALIDATION", -0.45, 100.0, "SHADOW_REVALIDATION"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertFalse(decision.allowed());
+        assertEquals("SHADOW_REVALIDATION", decision.action());
+        assertEquals("BRUTAL_NEGATIVE_1W_SHADOW_REVALIDATION", decision.reason());
+        assertEquals("SHADOW", decision.targetExecutionMode());
+    }
+
+    @Test
+    void shouldFindSanitizedSnapshotWindowCodes() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w\"", severeWindow("1w\"", -25.0, "PAUSE_OPEN", "SEVERE_NEGATIVE_1W_PAUSE_OPEN", -0.25, 100.0, "PAUSE_OPEN"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertFalse(decision.allowed());
+        assertEquals("PAUSE_OPEN", decision.action());
+        assertEquals("SEVERE_NEGATIVE_1W_PAUSE_OPEN", decision.reason());
+    }
+
+    @Test
+    void shouldMoveToShadowRevalidationWhenSnapshotOneMonthNegative() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "1mo", window("1mo", -3.0, "SHADOW_REVALIDATION", "NEGATIVE_1MO_SHADOW_REVALIDATION")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertFalse(decision.allowed());
+        assertEquals("SHADOW_REVALIDATION", decision.action());
+        assertEquals("NEGATIVE_1MO_SHADOW_REVALIDATION", decision.reason());
+    }
+
+    @Test
+    void shouldReduceTo30PercentWhenSnapshotThreeWeekNegative() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", -2.0, "REDUCE_CAPITAL", "NEGATIVE_2W_REDUCE_TO_60"),
+                "3w", window("3w", -3.0, "REDUCE_CAPITAL", "NEGATIVE_3W_REDUCE_TO_30"),
+                "1mo", window("1mo", 4.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("REDUCE_CAPITAL", decision.action());
+        assertEquals("NEGATIVE_3W_REDUCE_TO_30", decision.reason());
+        assertEquals(0.30, decision.capitalMultiplier(), 0.000001);
+    }
+
+    @Test
+    void shouldRequireMicroLiveAgainWhenSnapshotTwoMonthNegative() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "3w", window("3w", 3.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 4.0, "ALLOW", "OK"),
+                "2mo", window("2mo", -5.0, "MICRO_LIVE_REQUIRED_REENTRY", "NEGATIVE_2MO_HARD_DOWNGRADE")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertFalse(decision.allowed());
+        assertEquals("MICRO_LIVE_REQUIRED_REENTRY", decision.action());
+        assertEquals("MICRO_LIVE", decision.targetExecutionMode());
+        assertEquals("NEGATIVE_2MO_HARD_DOWNGRADE", decision.reason());
+    }
+
+    @Test
+    void shouldManualReviewWhenSnapshotThreeMonthNegative() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "3w", window("3w", 3.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 4.0, "ALLOW", "OK"),
+                "2mo", window("2mo", 5.0, "ALLOW", "OK"),
+                "3mo", window("3mo", -6.0, "MANUAL_REVIEW", "NEGATIVE_3MO_MANUAL_REVIEW")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertFalse(decision.allowed());
+        assertEquals("MANUAL_REVIEW", decision.action());
+        assertEquals("NEGATIVE_3MO_MANUAL_REVIEW", decision.reason());
+    }
+
+    @Test
+    void shouldAllowWhenAllSnapshotWindowsPositive() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("ALLOW", decision.action());
+    }
+
+    @Test
+    void shouldNotPauseWhenRequiredSnapshotWindowIsMissing() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("ALLOW", decision.action());
+    }
+
+    @Test
+    void shouldNotPauseBecauseTwoMonthAndThreeMonthAreIncomplete() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "3w", window("3w", 3.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 4.0, "ALLOW", "OK"),
+                "2mo", informationalWindow("2mo", "WINDOW_2MO_NOT_MATURE_INFO", true),
+                "3mo", informationalWindow("3mo", "WINDOW_3MO_NOT_MATURE_INFO", true)
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("ALLOW", decision.action());
+    }
+
+    @Test
+    void shouldExposeFutureWindowsAsInformationalOnly() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "3w", window("3w", 3.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 4.0, "ALLOW", "OK"),
+                "6mo", informationalWindow("6mo", "WINDOW_6MO_NEGATIVE_INFORMATIONAL", false),
+                "9mo", informationalWindow("9mo", "WINDOW_9MO_NEGATIVE_INFORMATIONAL", false),
+                "1y", informationalWindow("1y", "WINDOW_1Y_NEGATIVE_INFORMATIONAL", false),
+                "2y", informationalWindow("2y", "WINDOW_2Y_NEGATIVE_INFORMATIONAL", false)
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("ALLOW", decision.action());
+    }
+
+    @Test
+    void shouldNotPromoteNewWalletBeforeOneMonthFromSnapshotHeader() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "3w", window("3w", 3.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 4.0, "ALLOW", "OK")
+        ));
+        snapshot.setAction("WATCHLIST_SHADOW");
+        snapshot.setStatus("OBSERVATION_SHADOW");
+        snapshot.setDecisionReasons(List.of("NEW_WALLET_NOT_MATURE"));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertFalse(decision.allowed());
+        assertEquals("WATCHLIST_SHADOW", decision.action());
+        assertEquals("NEW_WALLET_NOT_MATURE", decision.reason());
+        assertEquals("SHADOW", decision.targetExecutionMode());
+    }
+
+    @Test
+    void shouldNotCallFullSimulationInCopyGuardSnapshotHotPath() throws Exception {
+        CapturingMetricClient client = new CapturingMetricClient(List.of(metricForHistory("0xabc")));
+        MetricWalletServiceImpl service = service(client, 30, 45, "full");
+
+        loadCopyGuardSnapshot(service, 300);
+
+        assertEquals(1, client.copyGuardWindowsCalls);
+        assertEquals("snapshot", client.lastCopyGuardMode);
+        assertNotEquals("full", client.lastCopyGuardMode);
+        assertTrue(client.lastCopyGuardWindows.contains("6mo"));
+        assertTrue(client.lastCopyGuardWindows.contains("9mo"));
+        assertTrue(client.lastCopyGuardWindows.contains("1y"));
+        assertTrue(client.lastCopyGuardWindows.contains("2y"));
+        assertEquals(0, client.joyasCalls);
+        assertEquals(0, client.allPositionHistoryCalls);
+    }
+
+    @Test
+    void shouldWarnOrAllowWhenSnapshotWindowMissingAndFailOpen() throws Exception {
+        MetricWalletServiceImpl service = service(new FakeMetricClient(), 3, 30, "summary", false);
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("ALLOW", decision.action());
+    }
+
+    @Test
+    void shouldMarkSnapshotStale() throws Exception {
+        MetricWalletServiceImpl service = service();
+        CopyGuardWindowSnapshotDto snapshot = snapshot(Map.of(
+                "1w", window("1w", 1.0, "ALLOW", "OK"),
+                "2w", window("2w", 2.0, "ALLOW", "OK"),
+                "1mo", window("1mo", 3.0, "ALLOW", "OK")
+        ));
+        snapshot.setComputedAt(OffsetDateTime.now().minusHours(1));
+
+        CopyStrategyGuardDecision decision = evaluateSnapshot(service, snapshot);
+
+        assertTrue(decision.allowed());
+        assertEquals("WARNING", decision.action());
+        assertEquals("STALE_COPY_GUARD_SNAPSHOT", decision.reason());
+    }
+
     private static MetricWalletServiceImpl service() {
         return service(new FakeMetricClient(), 3, 30, "summary");
     }
 
     private static MetricWalletServiceImpl service(MetricWalletsInfoClient client, int joyasLimit, int joyasDayz, String joyasSimulation) {
+        return service(client, joyasLimit, joyasDayz, joyasSimulation, false);
+    }
+
+    private static MetricWalletServiceImpl service(MetricWalletsInfoClient client, int joyasLimit, int joyasDayz, String joyasSimulation, boolean requireWindowData) {
         return new MetricWalletServiceImpl(
                 client,
                 new FakeAllocationService(),
@@ -246,14 +559,17 @@ class MetricWalletServiceImplTest {
                 1.0,
                 true,
                 false,
-                true,
+                requireWindowData,
                 0.0,
                 0.0,
                 -50.0,
                 -25.0,
-                0.70,
+                1.0,
                 0.25,
-                "1w,2w,1mo"
+                "1w,2w,3w,1mo,2mo,3mo",
+                "1d,3d,1w,2w,3w,1mo,2mo,3mo,6mo,9mo,1y,2y,all",
+                true,
+                Duration.ofMinutes(10)
         );
     }
 
@@ -269,10 +585,125 @@ class MetricWalletServiceImplTest {
         return (int) method.invoke(snapshot);
     }
 
+    private static Object loadCopyGuardSnapshot(MetricWalletServiceImpl service, Integer limit) throws Exception {
+        Method method = MetricWalletServiceImpl.class.getDeclaredMethod("loadCopyGuardWindowSnapshots", Integer.class);
+        method.setAccessible(true);
+        return method.invoke(service, limit);
+    }
+
     private static CopyStrategyGuardDecision evaluate(MetricWalletServiceImpl service, MetricaWalletDto metric) throws Exception {
         Method method = MetricWalletServiceImpl.class.getDeclaredMethod("evaluateCopyGuard", MetricaWalletDto.class);
         method.setAccessible(true);
         return (CopyStrategyGuardDecision) method.invoke(service, metric);
+    }
+
+    private static CopyStrategyGuardDecision evaluateSnapshot(MetricWalletServiceImpl service, CopyGuardWindowSnapshotDto snapshot) throws Exception {
+        Method method = MetricWalletServiceImpl.class.getDeclaredMethod("evaluateCopyGuardSnapshot", CopyGuardWindowSnapshotDto.class, String.class, String.class);
+        method.setAccessible(true);
+        return (CopyStrategyGuardDecision) method.invoke(service, snapshot, "0xabc", "MOVEMENT_ALL");
+    }
+
+    private static CopyGuardWindowSnapshotDto snapshot(Map<String, CopyGuardWindowSnapshotDto.WindowDto> windows) {
+        return CopyGuardWindowSnapshotDto.builder()
+                .walletId("0xabc")
+                .copyStrategyCode("MOVEMENT_ALL")
+                .scopeType("strategy")
+                .scopeValue("MOVEMENT_ALL")
+                .status("OK")
+                .action("ALLOW")
+                .allowNewEntries(true)
+                .capitalMultiplier(1.0)
+                .windows(windows)
+                .computedAt(OffsetDateTime.now())
+                .expiresAt(OffsetDateTime.now().plusMinutes(10))
+                .sourceVersion("test")
+                .build();
+    }
+
+    private static CopyGuardWindowSnapshotDto.WindowDto window(String code, double pnl, String action, String reasonCode) {
+        return CopyGuardWindowSnapshotDto.WindowDto.builder()
+                .windowCode(code)
+                .complete(true)
+                .closedOperations(10)
+                .operations(10)
+                .pnlNetUsd(pnl)
+                .pnlGrossUsd(pnl)
+                .feesUsd(0.0)
+                .slippageUsd(0.0)
+                .action(action)
+                .status("ALLOW".equals(action) ? "OK" : action)
+                .reasonCode(reasonCode)
+                .capitalMultiplier(multiplierForTestWindow(code, action))
+                .mature(true)
+                .decisionEnabled(true)
+                .decisionParticipates(!"INFO".equals(action))
+                .build();
+    }
+
+    private static CopyGuardWindowSnapshotDto.WindowDto severeWindow(
+            String code,
+            double pnl,
+            String action,
+            String reasonCode,
+            double lossPct,
+            double capitalBaseUsd,
+            String level
+    ) {
+        return CopyGuardWindowSnapshotDto.WindowDto.builder()
+                .windowCode(code)
+                .complete(true)
+                .closedOperations(80)
+                .operations(80)
+                .pnlNetUsd(pnl)
+                .pnlGrossUsd(pnl)
+                .feesUsd(0.0)
+                .slippageUsd(0.0)
+                .lossPct(lossPct)
+                .capitalBaseUsd(capitalBaseUsd)
+                .severeLossGuardApplied(true)
+                .severeLossLevel(level)
+                .action(action)
+                .status("ALLOW".equals(action) ? "OK" : action)
+                .reasonCode(reasonCode)
+                .capitalMultiplier(multiplierForTestWindow(code, action))
+                .mature(true)
+                .decisionEnabled(true)
+                .decisionParticipates(!"INFO".equals(action))
+                .build();
+    }
+
+    private static CopyGuardWindowSnapshotDto.WindowDto informationalWindow(String code, String reasonCode, boolean decisionEnabled) {
+        return CopyGuardWindowSnapshotDto.WindowDto.builder()
+                .windowCode(code)
+                .complete(false)
+                .mature(false)
+                .decisionEnabled(decisionEnabled)
+                .futureWindow(!decisionEnabled)
+                .operations(5)
+                .closedOperations(5)
+                .pnlNetUsd(-1.0)
+                .pnlGrossUsd(-1.0)
+                .action("INFO")
+                .status("INFO")
+                .reasonCode(reasonCode)
+                .infoReason(reasonCode)
+                .capitalMultiplier(1.0)
+                .decisionParticipates(false)
+                .suggestedAction(decisionEnabled ? null : "MANUAL_REVIEW")
+                .build();
+    }
+
+    private static double multiplierForTestWindow(String code, String action) {
+        if ("REDUCE_CAPITAL".equals(action) && "2w".equals(code)) return 0.60;
+        if ("REDUCE_CAPITAL".equals(action) && "3w".equals(code)) return 0.30;
+        if ("REDUCE_CAPITAL".equals(action)) return 0.50;
+        if ("SHADOW_ONLY".equals(action)) return 0.25;
+        if ("PAUSE_OPEN".equals(action)
+                || "SHADOW_REVALIDATION".equals(action)
+                || "MICRO_LIVE_REQUIRED_REENTRY".equals(action)
+                || "MANUAL_REVIEW".equals(action)
+                || "WATCHLIST_SHADOW".equals(action)) return 0.0;
+        return 1.0;
     }
 
     private static MetricaWalletDto metricWithGuard(String status, String action, boolean allowNewEntries, double multiplier) {
@@ -307,15 +738,28 @@ class MetricWalletServiceImplTest {
         public List<MetricaWalletDto> joyas(int limit, int dayz, String simulation) {
             return List.of();
         }
+
+        @Override
+        public List<CopyGuardWindowSnapshotDto> copyGuardWindows(int limit, int dayz, String mode, String windows) {
+            return List.of();
+        }
+
+        @Override
+        public CopyDecisionDto copyDecision(String walletId, String strategyCode, String scopeType, String scopeValue, String mode, String simulation, int minHistoryDays, int simulationLookbackDays, int maxFactsPerUnit, int timeoutMs, boolean debug) {
+            return null;
+        }
     }
 
     private static final class CapturingMetricClient implements MetricWalletsInfoClient {
         private final List<MetricaWalletDto> joyasResponse;
         private int joyasCalls;
         private int allPositionHistoryCalls;
+        private int copyGuardWindowsCalls;
         private int lastLimit;
         private int lastDayz;
         private String lastSimulation;
+        private String lastCopyGuardMode;
+        private String lastCopyGuardWindows;
         private boolean throwNotFound;
 
         private CapturingMetricClient(List<MetricaWalletDto> joyasResponse) {
@@ -338,6 +782,21 @@ class MetricWalletServiceImplTest {
                 throw new RestClientResponseException("not found", 404, "Not Found", null, null, null);
             }
             return joyasResponse;
+        }
+
+        @Override
+        public List<CopyGuardWindowSnapshotDto> copyGuardWindows(int limit, int dayz, String mode, String windows) {
+            copyGuardWindowsCalls++;
+            lastLimit = limit;
+            lastDayz = dayz;
+            lastCopyGuardMode = mode;
+            lastCopyGuardWindows = windows;
+            return List.of();
+        }
+
+        @Override
+        public CopyDecisionDto copyDecision(String walletId, String strategyCode, String scopeType, String scopeValue, String mode, String simulation, int minHistoryDays, int simulationLookbackDays, int maxFactsPerUnit, int timeoutMs, boolean debug) {
+            return null;
         }
     }
 
