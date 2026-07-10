@@ -17,12 +17,32 @@ public record CopyStrategyGuardDecision(
         return new CopyStrategyGuardDecision(true, reason, detail == null ? "" : detail, null, "WARNING", clampMultiplier(capitalMultiplier), "KEEP");
     }
 
+    public static CopyStrategyGuardDecision info(String reason, String detail) {
+        return new CopyStrategyGuardDecision(true, reason, detail == null ? "" : detail, null, "INFO", 1.0, "KEEP");
+    }
+
     public static CopyStrategyGuardDecision reduce(String reason, String detail, double capitalMultiplier) {
         return new CopyStrategyGuardDecision(true, reason, detail == null ? "" : detail, null, "REDUCE_CAPITAL", clampMultiplier(capitalMultiplier), "KEEP");
     }
 
     public static CopyStrategyGuardDecision shadowOnly(String reason, String detail, double capitalMultiplier) {
         return new CopyStrategyGuardDecision(true, reason, detail == null ? "" : detail, null, "SHADOW_ONLY", clampMultiplier(capitalMultiplier), "SHADOW");
+    }
+
+    public static CopyStrategyGuardDecision watchlistShadow(String reason, String detail) {
+        return new CopyStrategyGuardDecision(false, reason, detail == null ? "" : detail, "OBSERVATION_SHADOW", "WATCHLIST_SHADOW", 0.0, "SHADOW");
+    }
+
+    public static CopyStrategyGuardDecision shadowRevalidation(String reason, String detail) {
+        return new CopyStrategyGuardDecision(false, reason, detail == null ? "" : detail, "SHADOW_REVALIDATION", "SHADOW_REVALIDATION", 0.0, "SHADOW");
+    }
+
+    public static CopyStrategyGuardDecision microLiveRequiredReentry(String reason, String detail) {
+        return new CopyStrategyGuardDecision(false, reason, detail == null ? "" : detail, "MICRO_LIVE_REQUIRED_REENTRY", "MICRO_LIVE_REQUIRED_REENTRY", 0.0, "MICRO_LIVE");
+    }
+
+    public static CopyStrategyGuardDecision manualReview(String reason, String detail) {
+        return new CopyStrategyGuardDecision(false, reason, detail == null ? "" : detail, "MANUAL_REVIEW", "MANUAL_REVIEW", 0.0, "KEEP");
     }
 
     public static CopyStrategyGuardDecision blocked(String reason, String detail) {

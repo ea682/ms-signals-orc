@@ -25,6 +25,11 @@ public class ShadowPromotionProperties {
     private String directLivePolicy = "REQUIRE_MICRO_LIVE";
     private BigDecimal microLiveInitialCapitalUsd = new BigDecimal("100");
     private BigDecimal microLiveMaxCapitalUsd = new BigDecimal("100");
+    private boolean requireFullDecisionForMicroLive = true;
+    private int copyDecisionMinHistoryDays = 30;
+    private int copyDecisionSimulationLookbackDays = 60;
+    private int copyDecisionMaxFactsPerUnit = 50000;
+    private int copyDecisionTimeoutMs = 55000;
 
     public boolean isEnabled() {
         return enabled;
@@ -168,5 +173,45 @@ public class ShadowPromotionProperties {
 
     public void setMicroLiveMaxCapitalUsd(BigDecimal microLiveMaxCapitalUsd) {
         this.microLiveMaxCapitalUsd = microLiveMaxCapitalUsd;
+    }
+
+    public boolean isRequireFullDecisionForMicroLive() {
+        return requireFullDecisionForMicroLive;
+    }
+
+    public void setRequireFullDecisionForMicroLive(boolean requireFullDecisionForMicroLive) {
+        this.requireFullDecisionForMicroLive = requireFullDecisionForMicroLive;
+    }
+
+    public int getCopyDecisionMinHistoryDays() {
+        return copyDecisionMinHistoryDays;
+    }
+
+    public void setCopyDecisionMinHistoryDays(int copyDecisionMinHistoryDays) {
+        this.copyDecisionMinHistoryDays = copyDecisionMinHistoryDays;
+    }
+
+    public int getCopyDecisionSimulationLookbackDays() {
+        return copyDecisionSimulationLookbackDays;
+    }
+
+    public void setCopyDecisionSimulationLookbackDays(int copyDecisionSimulationLookbackDays) {
+        this.copyDecisionSimulationLookbackDays = copyDecisionSimulationLookbackDays;
+    }
+
+    public int getCopyDecisionMaxFactsPerUnit() {
+        return copyDecisionMaxFactsPerUnit;
+    }
+
+    public void setCopyDecisionMaxFactsPerUnit(int copyDecisionMaxFactsPerUnit) {
+        this.copyDecisionMaxFactsPerUnit = copyDecisionMaxFactsPerUnit;
+    }
+
+    public int getCopyDecisionTimeoutMs() {
+        return copyDecisionTimeoutMs;
+    }
+
+    public void setCopyDecisionTimeoutMs(int copyDecisionTimeoutMs) {
+        this.copyDecisionTimeoutMs = copyDecisionTimeoutMs;
     }
 }

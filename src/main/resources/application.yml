@@ -173,6 +173,11 @@ copy:
     direct-live-policy: ${COPY_PROMOTION_DIRECT_LIVE_POLICY:REQUIRE_MICRO_LIVE}
     micro-live-initial-capital-usd: ${COPY_MICRO_LIVE_INITIAL_CAPITAL_USD:100}
     micro-live-max-capital-usd: ${COPY_MICRO_LIVE_MAX_CAPITAL_USD:100}
+    require-full-decision-for-micro-live: ${COPY_PROMOTION_REQUIRE_FULL_DECISION_FOR_MICRO_LIVE:true}
+    copy-decision-min-history-days: ${COPY_PROMOTION_COPY_DECISION_MIN_HISTORY_DAYS:30}
+    copy-decision-simulation-lookback-days: ${COPY_PROMOTION_COPY_DECISION_LOOKBACK_DAYS:60}
+    copy-decision-max-facts-per-unit: ${COPY_PROMOTION_COPY_DECISION_MAX_FACTS_PER_UNIT:50000}
+    copy-decision-timeout-ms: ${COPY_PROMOTION_COPY_DECISION_TIMEOUT_MS:55000}
     job:
       enabled: ${COPY_PROMOTION_JOB_ENABLED:true}
       initial-delay-ms: ${COPY_PROMOTION_JOB_INITIAL_DELAY_MS:30000}
@@ -185,6 +190,11 @@ copy:
     max-error-rate-pct: ${COPY_LIVE_PROMOTION_MAX_ERROR_RATE_PCT:5}
     require-positive-net-pnl: ${COPY_LIVE_PROMOTION_REQUIRE_POSITIVE_NET_PNL:false}
     min-net-pnl-usd: ${COPY_LIVE_PROMOTION_MIN_NET_PNL_USD:0}
+    require-full-decision-for-live: ${COPY_LIVE_PROMOTION_REQUIRE_FULL_DECISION_FOR_LIVE:true}
+    copy-decision-min-history-days: ${COPY_LIVE_PROMOTION_COPY_DECISION_MIN_HISTORY_DAYS:30}
+    copy-decision-simulation-lookback-days: ${COPY_LIVE_PROMOTION_COPY_DECISION_LOOKBACK_DAYS:60}
+    copy-decision-max-facts-per-unit: ${COPY_LIVE_PROMOTION_COPY_DECISION_MAX_FACTS_PER_UNIT:50000}
+    copy-decision-timeout-ms: ${COPY_LIVE_PROMOTION_COPY_DECISION_TIMEOUT_MS:55000}
     job:
       enabled: ${COPY_LIVE_PROMOTION_JOB_ENABLED:true}
       initial-delay-ms: ${COPY_LIVE_PROMOTION_JOB_INITIAL_DELAY_MS:45000}
@@ -305,15 +315,36 @@ metric-wallet:
     simulation: ${METRIC_WALLET_JOYAS_SIMULATION:summary}
   copy-guard:
     enabled: ${METRIC_WALLET_COPY_GUARD_ENABLED:true}
-    windows: ${METRIC_WALLET_COPY_GUARD_WINDOWS:1w,2w,1mo}
+    windows: ${METRIC_WALLET_COPY_GUARD_WINDOWS:1w,2w,3w,1mo,2mo,3mo}
+    decision-windows: ${METRIC_WALLET_COPY_GUARD_DECISION_WINDOWS:1w,2w,3w,1mo,2mo,3mo}
+    available-windows: ${METRIC_WALLET_COPY_GUARD_AVAILABLE_WINDOWS:1d,3d,1w,2w,3w,1mo,2mo,3mo,6mo,9mo,1y,2y,all}
+    future-windows: ${METRIC_WALLET_COPY_GUARD_FUTURE_WINDOWS:6mo,9mo,1y,2y}
+    snapshot:
+      enabled: ${METRIC_WALLET_COPY_GUARD_SNAPSHOT_ENABLED:true}
+    stale-snapshot-max-age: ${METRIC_WALLET_COPY_GUARD_STALE_SNAPSHOT_MAX_AGE:10m}
     min-window-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_MIN_WINDOW_PNL_USDT:0}
     min-total-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_MIN_TOTAL_PNL_USDT:0}
     pause-window-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_PAUSE_WINDOW_PNL_USDT:-25}
     pause-total-pnl-usdt: ${METRIC_WALLET_COPY_GUARD_PAUSE_TOTAL_PNL_USDT:-50}
-    one-week-capital-multiplier: ${METRIC_WALLET_COPY_GUARD_1W_CAPITAL_MULTIPLIER:0.70}
+    one-week-capital-multiplier: ${METRIC_WALLET_COPY_GUARD_1W_CAPITAL_MULTIPLIER:1.0}
     one-month-capital-multiplier: ${METRIC_WALLET_COPY_GUARD_1MO_CAPITAL_MULTIPLIER:0.25}
-    require-window-data: ${METRIC_WALLET_COPY_GUARD_REQUIRE_WINDOW_DATA:true}
+    severe-loss:
+      1w:
+        enabled: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_ENABLED:true}
+        min-closed-operations: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_MIN_CLOSED_OPERATIONS:10}
+        fallback-capital-base-usd: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_FALLBACK_CAPITAL_BASE_USD:100}
+        warning-loss-pct: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_WARNING_LOSS_PCT:-0.10}
+        pause-open-loss-pct: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_PAUSE_OPEN_LOSS_PCT:-0.20}
+        shadow-revalidation-loss-pct: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_SHADOW_REVALIDATION_LOSS_PCT:-0.40}
+        warning-reason: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_WARNING_REASON:NEGATIVE_1W_WARNING_ONLY}
+        strong-warning-reason: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_STRONG_WARNING_REASON:NEGATIVE_1W_STRONG_WARNING}
+        pause-open-reason: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_PAUSE_OPEN_REASON:SEVERE_NEGATIVE_1W_PAUSE_OPEN}
+        shadow-revalidation-reason: ${METRIC_WALLET_COPY_GUARD_SEVERE_LOSS_1W_SHADOW_REVALIDATION_REASON:BRUTAL_NEGATIVE_1W_SHADOW_REVALIDATION}
+    require-window-data: ${METRIC_WALLET_COPY_GUARD_REQUIRE_WINDOW_DATA:false}
     fail-open-on-missing-metric: ${METRIC_WALLET_COPY_GUARD_FAIL_OPEN_ON_MISSING_METRIC:false}
+    min-history-days-for-candidate-shadow: ${METRIC_WALLET_COPY_GUARD_MIN_HISTORY_DAYS_FOR_CANDIDATE_SHADOW:30}
+    min-operations-for-candidate-shadow: ${METRIC_WALLET_COPY_GUARD_MIN_OPERATIONS_FOR_CANDIDATE_SHADOW:30}
+    allow-watchlist-shadow-for-new-wallets: ${METRIC_WALLET_COPY_GUARD_ALLOW_WATCHLIST_SHADOW_FOR_NEW_WALLETS:true}
     cooldown-hours: ${METRIC_WALLET_COPY_GUARD_COOLDOWN_HOURS:48}
   shadow:
     separate-enabled: ${METRIC_WALLET_SHADOW_SEPARATE_ENABLED:true}
