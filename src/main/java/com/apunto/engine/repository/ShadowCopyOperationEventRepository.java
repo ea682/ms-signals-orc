@@ -7,6 +7,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Repository
@@ -34,4 +35,12 @@ public interface ShadowCopyOperationEventRepository extends JpaRepository<Shadow
     long countByWalletProfileIdAndDecision(Long walletProfileId, String decision);
 
     long countByShadowAllocationId(Long shadowAllocationId);
+
+    @Query(value = ShadowCoverageSql.ROLLING_BATCH_QUERY, nativeQuery = true)
+    List<ShadowCoverageCountsProjection> findRollingCoverageBatch(
+            @Param("allocationIds") List<Long> allocationIds,
+            @Param("windowStart") OffsetDateTime windowStart,
+            @Param("windowEnd") OffsetDateTime windowEnd,
+            @Param("maxEvents") int maxEvents
+    );
 }

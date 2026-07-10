@@ -37,4 +37,8 @@ public class CopyOperationDto {
     private String executionMode;
     private boolean shadow;
     private String shadowStatus;
+    private UUID dispatchIntentId;
+    private String sourceEventId;
+    private String clientOrderId;
+    private String priceStatus;
 }

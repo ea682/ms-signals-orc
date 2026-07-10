@@ -82,4 +82,16 @@ public class CopyOperationEntity {
 
     @Column(name = "shadow_status", length = 32)
     private String shadowStatus;
+
+    @Column(name = "dispatch_intent_id", columnDefinition = "uuid")
+    private UUID dispatchIntentId;
+
+    @Column(name = "source_event_id", length = 600)
+    private String sourceEventId;
+
+    @Column(name = "client_order_id", length = 36)
+    private String clientOrderId;
+
+    @Column(name = "price_status", length = 32)
+    private String priceStatus;
 }

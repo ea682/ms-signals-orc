@@ -31,6 +31,9 @@ public class CopyOperationEventEntity {
     @Column(name = "id_operation", columnDefinition = "uuid")
     private UUID idOperation;
 
+    @Column(name = "dispatch_intent_id", columnDefinition = "uuid")
+    private UUID dispatchIntentId;
+
     @Column(name = "user_copy_allocation_id")
     private Long userCopyAllocationId;
 
@@ -93,6 +96,9 @@ public class CopyOperationEventEntity {
 
     @Column(name = "price", precision = 38, scale = 12)
     private BigDecimal price;
+
+    @Column(name = "price_status", length = 32)
+    private String priceStatus;
 
     @Column(name = "notional_usd", precision = 38, scale = 12)
     private BigDecimal notionalUsd;

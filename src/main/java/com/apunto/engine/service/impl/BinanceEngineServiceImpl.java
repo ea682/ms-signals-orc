@@ -37,6 +37,10 @@ import com.apunto.engine.service.copy.accounting.PositionDeltaType;
 import com.apunto.engine.service.copy.budget.CopyBudgetResolver;
 import com.apunto.engine.service.copy.budget.CopyBudgetResolver.CopyBudgetDecision;
 import com.apunto.engine.service.copy.budget.CopyBudgetResolver.CopyBudgetRequest;
+import com.apunto.engine.service.copy.dispatch.BinanceOrderExecutionNormalizer;
+import com.apunto.engine.service.copy.dispatch.CopyDispatchCoordinator;
+import com.apunto.engine.service.copy.dispatch.CopyExecutionState;
+import com.apunto.engine.service.copy.dispatch.NormalizedBinanceExecution;
 import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocation;
 import com.apunto.engine.service.copy.capital.CopyGlobalCapitalAllocator;
 import com.apunto.engine.service.copy.leverage.CopyLeverageAuditCalculator;
@@ -56,6 +60,7 @@ import com.apunto.engine.shared.exception.BinanceApiReadinessException;
 import com.apunto.engine.shared.exception.CopyBinanceClientException;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
+import com.apunto.engine.shared.exception.CopyDispatchReconciliationPendingException;
 import com.apunto.engine.shared.exception.CopySymbolMetadataException;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.apunto.engine.shared.util.LogFmt;
@@ -209,6 +214,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     private final LiveCopyAccountingAdapter liveCopyAccountingAdapter;
     private final CopyBudgetResolver copyBudgetResolver;
+    private final CopyDispatchCoordinator copyDispatchCoordinator;
+    private final BinanceOrderExecutionNormalizer orderExecutionNormalizer = new BinanceOrderExecutionNormalizer();
 
     @Value("${binance.dispatch.delay-ms:0}")
     private long delayBetweenMs;
@@ -672,6 +679,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         prepared.dto.isReduceOnly(),
                         prepared.dto.getClientOrderId());
 
+                configureDispatchMetadata(prepared.dto, event.getSourceEventId(), "OPEN", prepared.marginRequired, prepared.notional, true, prepared.entryPrice);
                 order = executeOrShadow(prepared.dto, prepared.entryPrice, allocation, traceId);
                 if (!isValidOrderResponse(order)) {
                     final Map<String, Object> invalidOrderDetails = orderResponseDetails(
@@ -772,19 +780,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                 prepared.leverage
                         );
                         activeCopyOperationCache.markUncertain(uncertain, traceId, "persist_failed_after_order");
-                    }
-                    try {
-                        tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, order, userDetail, allocation);
-                    } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException | ArithmeticException panicEx) {
-                        log.error("event=copy_open_panic_close_failed traceId={} originId={} userId={} wallet={} symbol={} panicErrClass={} panicErr=\"{}\"",
-                                traceId,
-                                originId,
-                                userId,
-                                walletId,
-                                prepared.symbol,
-                                panicEx.getClass().getSimpleName(),
-                                safeLog(panicEx.getMessage()),
-                                panicEx);
+                        copyDispatchCoordinator.markPersistencePending(order.getDispatchIntentId(), order.getClientOrderId(),
+                                "COPY_OPERATION_PERSIST_FAILED", safeLog(ex.getMessage()));
                     }
                 } else {
                     activeCopyOperationCache.forgetPending(originId, userId, traceId, "order_not_sent_or_failed_before_response");
@@ -911,6 +908,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         prepared.notional.toPlainString(),
                         prepared.dto.getQuantity());
 
+                configureDispatchMetadata(prepared.dto, event.getSourceEventId(), "OPEN", prepared.marginRequired, prepared.notional, true, prepared.entryPrice);
                 order = executeOrShadow(prepared.dto, prepared.entryPrice, allocation, allocationTraceId);
                 if (!isValidOrderResponse(order)) {
                     throw new CopyBinanceClientException(
@@ -955,7 +953,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         order.getOrderId(), safeQty(copyTradingMapper.resolveFilledQty(order)).toPlainString(), prepared.notional.toPlainString());
             } catch (SkipExecutionException skip) {
                 skipped++;
-                activeCopyOperationCache.forgetPending(originId, userId, allocationTraceId, skip.getReasonCode());
+                if (!(skip instanceof CopyDispatchReconciliationPendingException)) {
+                    activeCopyOperationCache.forgetPending(originId, userId, allocationTraceId, skip.getReasonCode());
+                }
                 recordRejectedCopyOperationEvent(event, allocation, userId, walletId, originOperation.getParSymbol(), typeOperation, skip.getReasonCode(), allocationTraceId, "direct_open_rejected");
                 log.info("event=copy.dispatch.order_rejected userCopyAllocationId={} executionMode={} reasonCode={} elapsedMs=0",
                         allocationId, executionModeOf(allocation), safeLog(skip.getReasonCode()));
@@ -973,13 +973,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     );
                     applyCopyMetadata(uncertain, allocation);
                     activeCopyOperationCache.markUncertain(uncertain, allocationTraceId, "persist_failed_after_order");
-                    try {
-                        tryPanicCloseAfterPersistFailure(originId, userId, walletId, prepared, order, userDetail, allocation);
-                    } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException | ArithmeticException panicEx) {
-                        log.error("event=copy_open_panic_close_failed traceId={} originId={} userId={} allocationId={} strategy={} wallet={} symbol={} panicErrClass={} panicErr=\"{}\"",
-                                allocationTraceId, originId, userId, allocationId, strategyCode, walletId, prepared.symbol,
-                                panicEx.getClass().getSimpleName(), safeLog(panicEx.getMessage()), panicEx);
-                    }
+                    copyDispatchCoordinator.markPersistencePending(order.getDispatchIntentId(), order.getClientOrderId(),
+                            "COPY_OPERATION_PERSIST_FAILED", safeLog(ex.getMessage()));
                 } else {
                     activeCopyOperationCache.forgetPending(originId, userId, allocationTraceId, "order_not_sent_or_failed_before_response");
                 }
@@ -1054,7 +1049,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 if (currentCopy == null || !currentCopy.isActive()) {
                     continue;
                 }
-                executeCloseOperation(currentCopy, userDetail, "CLOSE", "direct_close", null, originClosePriceRef(originOperation));
+                executeCloseOperation(currentCopy, userDetail, "CLOSE", "direct_close", null, originClosePriceRef(originOperation), event.getSourceEventId());
                 closed++;
             }
             log.info("event=copy.close.fast_path.done traceId={} originId={} userId={} wallet={} symbol={} copies={} closed={} elapsedMs={}",
@@ -1164,7 +1159,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                             userDetail,
                             closeFromFlip ? "FLIP" : "CLOSE",
                             closeFromFlip ? "flip_close_previous_side" : "rebalance_full_close",
-                            closeFromFlip ? "flip_close_previous_side" : null
+                            closeFromFlip ? "flip_close_previous_side" : null,
+                            firstNonBlank(event.getSourceEventId(), triggerOriginId + "|" + triggerDeltaType)
                     );
                     current.remove(copyOriginId);
                     continue;
@@ -1175,7 +1171,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     if (canOpenOrResize) {
                         log.info("event=rebalance.copy.close_no_target originId={} userId={} wallet={} symbol={} reason=target_not_copiable",
                                 copyOriginId, userId, walletId, copy.getParsymbol());
-                        executeFullClose(copy, userDetail);
+                        executeFullClose(copy, userDetail, "CLOSE", "rebalance_full_close", null, firstNonBlank(event.getSourceEventId(), triggerOriginId + "|" + triggerDeltaType));
                         current.remove(copyOriginId);
                     }
                     continue;
@@ -1185,7 +1181,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 final BigDecimal targetQty = safeQty(target.targetQty());
                 if (shouldReduce(currentQty, targetQty)) {
                     if (targetQty.compareTo(ZERO) <= 0) {
-                        executeFullClose(copy, userDetail);
+                        executeFullClose(copy, userDetail, "CLOSE", "rebalance_full_close", null, firstNonBlank(event.getSourceEventId(), triggerOriginId + "|" + triggerDeltaType));
                         current.remove(copyOriginId);
                     } else {
                         CopyOperationDto updated = executePartialReduce(copy, target, triggerOriginId, userDetail, walletAllocation);
@@ -1384,7 +1380,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                 userDetail,
                                 closeFromFlip ? "FLIP" : "CLOSE",
                                 closeFromFlip ? "flip_close_previous_side" : "rebalance_full_close",
-                                closeFromFlip ? "flip_close_previous_side" : null
+                                closeFromFlip ? "flip_close_previous_side" : null,
+                                firstNonBlank(event.getSourceEventId(), triggerOriginId + "|" + triggerDeltaType)
                         );
                         current.remove(copyOriginId);
                         continue;
@@ -1395,7 +1392,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         if (canOpenOrResize) {
                             log.info("event=rebalance.copy.close_no_target originId={} userId={} allocationId={} strategy={} wallet={} symbol={} reason=target_not_copiable",
                                     copyOriginId, userId, allocationId, strategyCode, walletId, copy.getParsymbol());
-                            executeFullClose(copy, userDetail);
+                            executeFullClose(copy, userDetail, "CLOSE", "rebalance_full_close", null, firstNonBlank(event.getSourceEventId(), triggerOriginId + "|" + triggerDeltaType));
                             current.remove(copyOriginId);
                         }
                         continue;
@@ -1405,7 +1402,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     final BigDecimal targetQty = safeQty(target.targetQty());
                     if (shouldReduce(currentQty, targetQty)) {
                         if (targetQty.compareTo(ZERO) <= 0) {
-                            executeFullClose(copy, userDetail);
+                            executeFullClose(copy, userDetail, "CLOSE", "rebalance_full_close", null, firstNonBlank(event.getSourceEventId(), triggerOriginId + "|" + triggerDeltaType));
                             current.remove(copyOriginId);
                         } else {
                             CopyOperationDto updated = executePartialReduce(copy, target, triggerOriginId, userDetail, walletAllocation);
@@ -2577,6 +2574,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 dto.getClientOrderId(),
                 CopyLogAdvice.fields(effectiveReasonCode, CopyLogAdvice.context(null, null, null, null, null, null, activeCopyOperationCache.activeSize(), source == null ? "rebalance" : source)));
 
+        configureDispatchMetadata(dto, dto.getClientOrderId(), copyIntent == null ? "OPEN" : copyIntent,
+                marginFor(dto, target.priceRef(), target.leverage()), notionalFor(dto, target.priceRef()), true, target.priceRef());
         final BinanceFuturesOrderClientResponse response = executeOrShadow(dto, target.priceRef(), allocation, traceId);
         if (!isValidOrderResponse(response)) {
             throw new CopyBinanceClientException(
@@ -2614,7 +2613,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 allocation,
                 leverageSnapshot
         );
-        persistActiveAfterOrder(created, activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol()), "rebalance_open_persist_failed");
+        persistActiveAfterOrder(created, activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol()), "rebalance_open_persist_failed", response.getClientOrderId());
         log.info("event=rebalance.copy.open_ok category=rebalance reasonCode={} reasonAlias={} friendlyReason={} explanation={} copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} qty={} {}",
                 effectiveReasonCode,
                 flipOpen ? "flip_open_new_side" : "missing_copy_opened",
@@ -2647,6 +2646,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         log.info("event=rebalance.copy.reopen_send category=rebalance reasonAlias=inactive_copy_reopen friendlyReason=copia_inactiva_reabierta explanation=ya_existia_una_copia_inactiva_y_se_reabre_actualizando_la_misma_fila copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} copyId={} previousOrderId={} qty={} positionSide={} clientOrderId={}",
                 traceId, target.originId(), triggerOriginId, userId, target.walletId(), target.symbol(), existingCopy.getIdOperation(), existingCopy.getIdOrden(), dto.getQuantity(), dto.getPositionSide(), dto.getClientOrderId());
 
+        configureDispatchMetadata(dto, dto.getClientOrderId(), "REOPEN",
+                marginFor(dto, target.priceRef(), target.leverage()), notionalFor(dto, target.priceRef()), true, target.priceRef());
         final BinanceFuturesOrderClientResponse response = executeOrShadow(dto, target.priceRef(), allocation, traceId);
         if (!isValidOrderResponse(response)) {
             throw new CopyBinanceClientException(
@@ -2686,7 +2687,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 allocation,
                 leverageSnapshot
         );
-        persistActiveAfterOrder(reopened, activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol()), "rebalance_reopen_persist_failed");
+        persistActiveAfterOrder(reopened, activeCopyOperationCache.traceId(target.originId(), userId, target.walletId(), target.symbol()), "rebalance_reopen_persist_failed", response.getClientOrderId());
         log.info("event=rebalance.copy.reopen_ok category=rebalance reasonAlias=inactive_copy_reopened friendlyReason=copia_existente_reabierta explanation=se_actualizo_la_copia_existente_en_vez_de_insertar_una_nueva copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} copyId={} orderId={} qty={}",
                 traceId, target.originId(), triggerOriginId, userId, target.walletId(), target.symbol(), existingCopy.getIdOperation(), response.getOrderId(), safeQty(copyTradingMapper.resolveFilledQty(response)).toPlainString());
         return reopened;
@@ -2754,6 +2755,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         log.info("event=rebalance.copy.increase_send category=rebalance reasonAlias=resize_increase friendlyReason=aumento_de_copia explanation=se_envia_orden_para_aumentar_una_copia_existente copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} currentQty={} targetQty={} deltaQty={} positionSide={} clientOrderId={}",
                 traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(),
                 currentQty.toPlainString(), target.targetQty().toPlainString(), deltaQty.toPlainString(), dto.getPositionSide(), dto.getClientOrderId());
+        configureDispatchMetadata(dto, dto.getClientOrderId(), "INCREASE",
+                marginFor(dto, target.priceRef(), target.leverage()), notionalFor(dto, target.priceRef()), false, target.priceRef());
         final BinanceFuturesOrderClientResponse response = executeOrShadow(dto, target.priceRef(), allocation, traceId);
         if (!isValidOrderResponse(response)) {
             throw new CopyBinanceClientException(
@@ -2837,7 +2840,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .active(true)
                 .build();
         applyCopyMetadata(updated, allocation);
-        persistActiveAfterOrder(updated, activeCopyOperationCache.traceId(updated.getIdOrderOrigin(), updated.getIdUser(), updated.getIdWalletOrigin(), updated.getParsymbol()), "rebalance_update_persist_failed");
+        persistActiveAfterOrder(updated, activeCopyOperationCache.traceId(updated.getIdOrderOrigin(), updated.getIdUser(), updated.getIdWalletOrigin(), updated.getParsymbol()), "rebalance_update_persist_failed", response.getClientOrderId());
         log.info("event=rebalance.copy.increase_ok category=rebalance reasonAlias=resize_increase_applied friendlyReason=aumento_de_copia_aplicado explanation=la_copia_existente_quedo_actualizada_con_la_cantidad_ejecutada copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} filledQty={} newQty={} newNotional={}",
                 traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(),
                 response.getOrderId(), filledQty.toPlainString(), newQty.toPlainString(), newUsd.toPlainString());
@@ -2869,6 +2872,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         log.info("event=rebalance.copy.reduce_send category=rebalance reasonAlias=resize_reduce friendlyReason=reduccion_de_copia explanation=se_envia_orden_reduceOnly_para_bajar_la_copia_al_tamano_objetivo copyImpact=copy_order_sent traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} currentQty={} targetQty={} deltaQty={} positionSide={} clientOrderId={}",
                 traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(),
                 currentQty.toPlainString(), targetQty.toPlainString(), deltaQty.toPlainString(), dto.getPositionSide(), dto.getClientOrderId());
+        configureDispatchMetadata(dto, dto.getClientOrderId(), "REDUCE", ZERO, notionalFor(dto, target.priceRef()), false, target.priceRef());
         final BinanceFuturesOrderClientResponse response = executeOrShadow(dto, target.priceRef(), allocation, traceId);
 
         if (!isValidOrderResponse(response)) {
@@ -2927,6 +2931,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             applyCopyMetadata(closed, allocation);
 
             copyOperationService.closeOperation(closed);
+            copyDispatchCoordinator.markPersisted(response, closed.getIdOperation());
             activeCopyOperationCache.markClosed(currentCopy);
             log.info("event=rebalance.copy.reduce_to_close_ok category=rebalance reasonAlias=resize_reduce_closed friendlyReason=reduccion_cerro_copia explanation=la_reduccion_dejo_la_copia_en_cero_y_se_marco_como_cerrada copyImpact=copy_closed traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} filledQty={}",
                     traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(), response.getOrderId(), filledQty.toPlainString());
@@ -2958,7 +2963,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .build();
         applyCopyMetadata(updated, allocation);
 
-        persistActiveAfterOrder(updated, activeCopyOperationCache.traceId(updated.getIdOrderOrigin(), updated.getIdUser(), updated.getIdWalletOrigin(), updated.getParsymbol()), "rebalance_update_persist_failed");
+        persistActiveAfterOrder(updated, activeCopyOperationCache.traceId(updated.getIdOrderOrigin(), updated.getIdUser(), updated.getIdWalletOrigin(), updated.getParsymbol()), "rebalance_update_persist_failed", response.getClientOrderId());
         log.info("event=rebalance.copy.reduce_ok category=rebalance reasonAlias=resize_reduce_applied friendlyReason=reduccion_de_copia_aplicada explanation=la_copia_quedo_actualizada_con_la_cantidad_restante copyImpact=copy_tracked traceId={} originId={} triggerOriginId={} userId={} wallet={} symbol={} orderId={} filledQty={} remainingQty={}",
                 traceId, target.originId(), triggerOriginId, userDetail.getUser().getId(), target.walletId(), target.symbol(),
                 response.getOrderId(), filledQty.toPlainString(), remainingQty.max(ZERO).toPlainString());
@@ -2971,6 +2976,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
     private void executeFullClose(CopyOperationDto copyOperation, UserDetailDto userDetail, String copyIntent, String source, String reasonCode) {
         executeCloseOperation(copyOperation, userDetail, copyIntent, source, reasonCode);
+    }
+
+    private void executeFullClose(CopyOperationDto copyOperation, UserDetailDto userDetail, String copyIntent,
+                                  String source, String reasonCode, String sourceEventId) {
+        executeCloseOperation(copyOperation, userDetail, copyIntent, source, reasonCode, null, sourceEventId);
     }
 
     private OperationDto buildOpenOrIncreaseOrder(TargetLeg target, BigDecimal quantity, UserDetailDto userDetail, String clientOrderId, boolean configureAccountSettings) {
@@ -3164,7 +3174,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                                           CopyLeverageSnapshot leverageSnapshot) {
         final BigDecimal executedQty = order == null ? ZERO : safeQty(copyTradingMapper.resolveFilledQty(order));
         final BigDecimal executionPrice = executionPrice(order);
-        final BigDecimal price = resolvePriceRef(executionPrice, entryPrice);
+        final BigDecimal price = firstPositive(executionPrice,
+                order == null ? null : order.getReferencePrice(), entryPrice, ZERO);
         final BigDecimal notional = price.compareTo(ZERO) <= 0 ? ZERO : executedQty.multiply(price);
         final Side executionSide = side == null ? sideFromOrder(order) : side;
         final AdverseSlippageResult slippage = AdverseSlippageCalculator.calculateAdverseSlippage(
@@ -3189,14 +3200,15 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         long responseToPersistNs = timing.mark();
         long dbNs = timing.mark();
-        copyOperationEventService.record(CopyOperationEventRecordCommand.builder()
+        CopyOperationEventRecordCommand eventCommand = CopyOperationEventRecordCommand.builder()
+                .dispatchIntentId(order == null ? null : order.getDispatchIntentId())
                 .userCopyAllocationId(allocation == null ? null : allocation.getId())
                 .copyStrategyCode(allocation == null ? null : allocation.getCopyStrategyCode())
                 .executionMode(executionMode)
                 .shadow(shadow)
                 .decision("ALLOW_" + eventType)
                 .decisionReason(shadow ? "shadow_dummy_execution_real_price" : "live_execution")
-                .sourceMovementKey(originId)
+                .sourceMovementKey(firstNonBlank(order == null ? null : order.getSourceEventId(), originId))
                 .idOrderOrigin(originId)
                 .idUser(userId)
                 .idWalletOrigin(walletId)
@@ -3211,6 +3223,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .qtyRequested(requestedQty)
                 .qtyExecuted(executedQty)
                 .price(price.compareTo(ZERO) <= 0 ? null : price)
+                .priceStatus(order == null ? null : order.getAveragePriceStatus())
                 .notionalUsd(notional)
                 .previousQty(previousQty)
                 .resultingQty(resultingQty)
@@ -3220,7 +3233,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .source(source)
                 .reasonCode(reasonCode)
                 .eventTime(orderEventTime(order))
-                .build());
+                .build();
+        if (shadow) {
+            copyOperationEventService.record(eventCommand);
+        } else {
+            copyOperationEventService.recordRequired(eventCommand);
+        }
         timing.add(CopyFlowTiming.Stage.DB_PERSIST, dbNs);
         timing.add(CopyFlowTiming.Stage.BINANCE_RESPONSE_TO_PERSIST, responseToPersistNs);
         logLiveFlowLatency(timing, "success", eventType, accounting == null ? null : accounting.deltaType(), reasonCode, symbol, positionSide, originId, walletId, allocation, order, firstNonBlank(traceId, MDC.get("traceId")), slippage, priceSource, leverageSnapshot);
@@ -3678,92 +3696,6 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return v == null ? ZERO : v.abs();
     }
 
-    private void tryPanicCloseAfterPersistFailure(String originId, String userId, String walletId,
-                                                  PreparedOpen prepared,
-                                                  BinanceFuturesOrderClientResponse openResponse,
-                                                  UserDetailDto userDetail,
-                                                  UserCopyAllocationEntity allocation) {
-        if (prepared == null || userDetail == null) {
-            return;
-        }
-        final String traceId = activeCopyOperationCache.traceId(originId, userId, walletId, prepared.symbol, allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode());
-
-        BigDecimal qty = null;
-        if (openResponse != null) {
-            qty = openResponse.getExecutedQty();
-            if (qty == null || qty.compareTo(ZERO) <= 0) {
-                qty = openResponse.getCumQty();
-            }
-        }
-        if (qty == null || qty.compareTo(ZERO) <= 0) {
-            try {
-                qty = new BigDecimal(prepared.dto.getQuantity());
-            } catch (NumberFormatException ignored) {
-                // Fallback below uses zero quantity when the prepared DTO quantity is not numeric.
-            }
-        }
-        if (qty == null || qty.compareTo(ZERO) <= 0) {
-            log.warn("event=panic_close.skip reasonCode=qty_zero reason=qty_zero traceId={} originId={} userId={} wallet={} symbol={}",
-                    traceId, originId, userId, walletId, prepared.symbol);
-            return;
-        }
-
-        final Side closeSide = prepared.dto.getSide() == Side.BUY ? Side.SELL : Side.BUY;
-
-        final OperationDto close = OperationDto.builder()
-                .symbol(prepared.dto.getSymbol())
-                .side(closeSide)
-                .type(OrderType.MARKET)
-                .positionSide(prepared.dto.getPositionSide())
-                .quantity(qty.toPlainString())
-                .leverage(null)
-                .reduceOnly(true)
-                .configureAccountSettings(false)
-                .clientOrderId(IdempotencyKeyUtil.closeClientOrderId(originId, userId, walletId, allocation == null ? null : allocation.getId(), allocation == null ? null : allocation.getCopyStrategyCode()))
-                .originId(originId)
-                .userId(userId)
-                .walletId(walletId)
-                .apiKey(userDetail.getUserApiKey().getApiKey())
-                .secret(userDetail.getUserApiKey().getApiSecret())
-                .build();
-
-        final BinanceFuturesOrderClientResponse closeResp = executeOrShadow(close, openResponse == null ? null : openResponse.getAvgPrice(), allocation, traceId);
-        if (!isValidOrderResponse(closeResp)) {
-            throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "Panic close inválido");
-        }
-
-        recordCopyOperationEvent(
-                "PANIC_CLOSE",
-                "CLOSE",
-                originId,
-                userId,
-                walletId,
-                prepared.dto.getSymbol(),
-                prepared.dto.getPositionSide(),
-                close.getSide(),
-                close.getClientOrderId(),
-                closeResp,
-                qty,
-                qty,
-                ZERO,
-                openResponse == null ? null : openResponse.getAvgPrice(),
-                traceId,
-                "panic_close_after_persist_failure",
-                "persist_failed_after_binance_order",
-                allocation,
-                CopyLeverageAuditCalculator.inheritedForReduction(
-                        BigDecimal.valueOf(prepared.leverage),
-                        orderNotional(closeResp, openResponse == null ? null : openResponse.getAvgPrice()),
-                        computeBufferedMarginForNotionalValue(orderNotional(closeResp, openResponse == null ? null : openResponse.getAvgPrice()), BigDecimal.valueOf(prepared.leverage)),
-                        configuredLiveMarginType,
-                        "panic_close_open_response"
-                )
-        );
-        activeCopyOperationCache.forgetPending(originId, userId, traceId, "panic_close_after_persist_failure");
-        log.warn("event=panic_close.ok traceId={} originId={} userId={} wallet={} symbol={} qty={} orderId={}",
-                traceId, originId, userId, walletId, prepared.dto.getSymbol(), qty.toPlainString(), closeResp.getOrderId());
-    }
-
     private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail) {
         executeCloseOperation(copyOperation, userDetail, "CLOSE", "direct_close", null, null);
     }
@@ -3773,6 +3705,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail, String copyIntent, String source, String reasonCode, BigDecimal shadowPriceRef) {
+        executeCloseOperation(copyOperation, userDetail, copyIntent, source, reasonCode, shadowPriceRef, null);
+    }
+
+    private void executeCloseOperation(CopyOperationDto copyOperation, UserDetailDto userDetail, String copyIntent,
+                                       String source, String reasonCode, BigDecimal shadowPriceRef, String sourceEventId) {
         final String originId = copyOperation.getIdOrderOrigin();
         final String userId = userDetail.getUser().getId().toString();
         final String effectiveReasonCode = reasonCode == null ? "direct_close" : reasonCode;
@@ -3794,9 +3731,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 closeRequest.isReduceOnly(),
                 closeRequest.getClientOrderId(),
                 CopyLogAdvice.fields(effectiveReasonCode, CopyLogAdvice.context(null, null, null, null, null, true, activeCopyOperationCache.activeSize(), source == null ? "direct_close" : source)));
+        UserCopyAllocationEntity closeAllocation = allocationMetadataFromCopy(copyOperation);
+        configureDispatchMetadata(closeRequest, firstNonBlank(sourceEventId, closeRequest.getClientOrderId()), flipClose ? "FLIP_CLOSE" : firstNonBlank(copyIntent, "CLOSE"),
+                ZERO, notionalFor(closeRequest, shadowPriceRef), false, resolvePriceRef(shadowPriceRef, copyOperation.getPriceEntry()));
         final BinanceFuturesOrderClientResponse order = copyOperation.isShadow()
                 ? buildShadowOrderResponse(closeRequest, resolvePriceRef(shadowPriceRef, copyOperation.getPriceEntry()))
-                : procesBinanceService.operationPosition(closeRequest);
+                : copyDispatchCoordinator.dispatch(closeRequest, closeAllocation, resolvePriceRef(shadowPriceRef, copyOperation.getPriceEntry()), activeCopyOperationCache.traceId(originId, userId, copyOperation.getIdWalletOrigin(), copyOperation.getParsymbol()));
 
         if (!isValidOrderResponse(order)) {
             log.warn("event=binance.close.invalid_response originId={} userId={} wallet={} symbol={} orderId={} avgPrice={} executedQty={} cumQty={} origQty={} updateTime={}",
@@ -3886,7 +3826,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .active(true)
                     .build();
             applyCopyMetadata(partiallyClosed, allocationMetadataFromCopy(copyOperation));
-            persistActiveAfterOrder(partiallyClosed, traceId, "partial_close_persist_failed");
+            persistActiveAfterOrder(partiallyClosed, traceId, "partial_close_persist_failed", order.getClientOrderId());
             log.warn("event=copy.close.partial_fill category=copy reasonCode=PARTIAL_FILL reasonAlias=partial_close_kept_active friendlyReason=cierre_parcial explanation=binance_ejecuto_solo_parte_del_cierre_y_la_copia_sigue_activa copyImpact=copy_still_active originId={} userId={} wallet={} symbol={} orderId={} requestedQty={} executedQty={} remainingQty={}",
                     originId,
                     userId,
@@ -3903,6 +3843,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         applyCopyMetadata(buildCopyOperation, allocationMetadataFromCopy(copyOperation));
         final long saveNs = System.nanoTime();
         copyOperationService.closeOperation(buildCopyOperation);
+        copyDispatchCoordinator.markPersisted(order, copyOperation.getIdOperation());
         activeCopyOperationCache.markClosed(buildCopyOperation);
         log.info("event=copy.job.phase action=CLOSE phase=save_copy_operation originId={} userId={} wallet={} symbol={} elapsedMs={}",
                 originId, userId, copyOperation.getIdWalletOrigin(), copyOperation.getParsymbol(), elapsedMsSince(saveNs));
@@ -5250,11 +5191,14 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         );
     }
 
-    private void persistActiveAfterOrder(CopyOperationDto operation, String traceId, String reasonCode) {
+    private void persistActiveAfterOrder(CopyOperationDto operation, String traceId, String reasonCode, String clientOrderId) {
         try {
             copyOperationService.upsertActiveOperation(operation);
+            copyDispatchCoordinator.markPersisted(operation.getDispatchIntentId(), clientOrderId, operation.getIdOperation());
         } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException ex) {
             activeCopyOperationCache.markUncertain(operation, traceId, reasonCode);
+            copyDispatchCoordinator.markPersistencePending(operation.getDispatchIntentId(), clientOrderId,
+                    reasonCode, safeLog(ex.getMessage()));
             throw ex;
         }
     }
@@ -5291,6 +5235,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final CopyOperationDto buildCopyOperation = copyTradingMapper.buildCopyNewOperationDto(order, idWallet, idOperation, idUser, leverage);
         applyCopyMetadata(buildCopyOperation, allocation);
         copyOperationService.newOperation(buildCopyOperation);
+        CopyOperationDto persisted = copyOperationService.findOperation(order.getOrderId().toString());
+        copyDispatchCoordinator.markPersisted(order, persisted == null ? null : persisted.getIdOperation());
     }
 
     private void applyCopyMetadata(CopyOperationDto dto, UserCopyAllocationEntity allocation) {
@@ -5566,7 +5512,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         dto == null ? null : dto.getPositionSide(),
                         executionModeOf(allocation),
                         dto != null && dto.isReduceOnly());
-                BinanceFuturesOrderClientResponse response = procesBinanceService.operationPosition(dto);
+                BinanceFuturesOrderClientResponse response = copyDispatchCoordinator.dispatch(dto, allocation, priceRef, traceId);
                 long ackLatencyMs = Duration.ofNanos(Math.max(0L, System.nanoTime() - submittedNs)).toMillis();
                 log.info("event=copy.execution.order_ack exchange=BINANCE traceId={} userId={} walletId={} userCopyAllocationId={} strategy={} symbol={} orderId={} clientOrderId={} status={} executionMode={} ackLatencyMs={}",
                         traceId,
@@ -5759,23 +5705,34 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private boolean isValidOrderResponse(BinanceFuturesOrderClientResponse r) {
-        return r != null
-                && r.getOrderId() != null
-                && r.getSymbol() != null
-                && safeQty(copyTradingMapper.resolveFilledQty(r)).compareTo(ZERO) > 0
-                && hasExecutablePrice(r)
-                && r.getUpdateTime() != null;
+        NormalizedBinanceExecution execution = orderExecutionNormalizer.normalize(r);
+        return execution.accepted()
+                && (execution.executionState() == CopyExecutionState.FILLED
+                    || execution.executionState() == CopyExecutionState.PARTIALLY_FILLED)
+                && safeQty(execution.executedQty()).compareTo(ZERO) > 0;
     }
 
-    private boolean hasExecutablePrice(BinanceFuturesOrderClientResponse order) {
-        if (order == null) {
-            return false;
-        }
-        if (positive(order.getAvgPrice()) || positive(order.getPrice())) {
-            return true;
-        }
-        BigDecimal qty = safeQty(copyTradingMapper.resolveFilledQty(order));
-        return positive(order.getCumQuote()) && qty.compareTo(ZERO) > 0;
+    private void configureDispatchMetadata(OperationDto dto, String sourceEventId, String copyIntent,
+                                           BigDecimal requestedMargin, BigDecimal requestedNotional,
+                                           boolean reservePosition, BigDecimal referencePrice) {
+        if (dto == null) return;
+        dto.setSourceEventId(firstNonBlank(sourceEventId, dto.getSourceEventId(), dto.getClientOrderId()));
+        dto.setSourceEventType(firstNonBlank(dto.getSourceEventType(), copyIntent));
+        dto.setCopyIntent(copyIntent);
+        dto.setRequestedMarginUsd(requestedMargin == null ? ZERO : requestedMargin.max(ZERO));
+        dto.setRequestedNotionalUsd(requestedNotional == null ? ZERO : requestedNotional.max(ZERO));
+        dto.setReservePosition(reservePosition);
+        dto.setReferencePrice(referencePrice);
+    }
+
+    private BigDecimal notionalFor(OperationDto dto, BigDecimal price) {
+        BigDecimal qty = parseQuantity(dto == null ? null : dto.getQuantity());
+        return qty == null || !positive(price) ? ZERO : qty.abs().multiply(price.abs());
+    }
+
+    private BigDecimal marginFor(OperationDto dto, BigDecimal price, int leverage) {
+        BigDecimal notional = notionalFor(dto, price);
+        return leverage <= 0 ? ZERO : notional.divide(BigDecimal.valueOf(leverage), DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
     }
 
 

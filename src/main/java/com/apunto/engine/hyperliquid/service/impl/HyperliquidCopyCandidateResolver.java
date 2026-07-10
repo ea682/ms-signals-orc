@@ -9,10 +9,10 @@ import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.UserCopyAllocationService;
-import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
+import com.apunto.engine.service.copy.CopyStrategyGuardRuntimeCache;
 import com.apunto.engine.service.copy.CopyRuntimeGuardPolicy;
 import com.apunto.engine.shared.util.CopyLogAdvice;
 import lombok.extern.slf4j.Slf4j;
@@ -37,7 +37,7 @@ public class HyperliquidCopyCandidateResolver {
     private final UserCopyAllocationService userCopyAllocationService;
     private final ActiveCopyOperationCache activeCopyOperationCache;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
-    private final MetricWalletService metricWalletService;
+    private final CopyStrategyGuardRuntimeCache copyStrategyGuardRuntimeCache;
     private final CopyRuntimeGuardPolicy copyRuntimeGuardPolicy;
 
     @Value("${operation.job.ingest.filter-by-wallet-allocation:${copy.job.ingest.filter-by-wallet-allocation:true}}")
@@ -54,14 +54,14 @@ public class HyperliquidCopyCandidateResolver {
             UserCopyAllocationService userCopyAllocationService,
             ActiveCopyOperationCache activeCopyOperationCache,
             CopyStrategyRuntimeRouter copyStrategyRuntimeRouter,
-            MetricWalletService metricWalletService,
+            CopyStrategyGuardRuntimeCache copyStrategyGuardRuntimeCache,
             CopyRuntimeGuardPolicy copyRuntimeGuardPolicy
     ) {
         this.userDetailCachedService = userDetailCachedService;
         this.userCopyAllocationService = userCopyAllocationService;
         this.activeCopyOperationCache = activeCopyOperationCache;
         this.copyStrategyRuntimeRouter = copyStrategyRuntimeRouter;
-        this.metricWalletService = metricWalletService;
+        this.copyStrategyGuardRuntimeCache = copyStrategyGuardRuntimeCache;
         this.copyRuntimeGuardPolicy = copyRuntimeGuardPolicy;
     }
 
@@ -237,7 +237,7 @@ public class HyperliquidCopyCandidateResolver {
             profileKey = safeLog(allocation.getWalletId()) + "|" + safeLog(allocation.getCopyStrategyCode());
         }
         CopyStrategyGuardDecision decision = guardByProfile.computeIfAbsent(profileKey, ignored ->
-                metricWalletService.evaluateCopyStrategyForCopy(
+                copyStrategyGuardRuntimeCache.evaluateCached(
                         allocation.getWalletId(),
                         allocation.getCopyStrategyCode()
                 )

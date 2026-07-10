@@ -4,4 +4,6 @@ import com.apunto.engine.dto.CopyOperationEventRecordCommand;
 
 public interface CopyOperationEventService {
     void record(CopyOperationEventRecordCommand command);
+
+    void recordRequired(CopyOperationEventRecordCommand command);
 }

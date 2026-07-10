@@ -50,6 +50,15 @@ public interface BinanceClient {
             @RequestParam("origClientOrderId") String origClientOrderId
     );
 
+    @GetExchange("/order")
+    ApiResponse<BinanceFuturesOrderClientResponse> getOrderByOrderId(
+            @RequestHeader("X-BINANCE-APIKEY") String apiKey,
+            @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestHeader(value = "X-COPY-TRACE-ID", required = false) String traceId,
+            @RequestParam("symbol") String symbol,
+            @RequestParam("orderId") Long orderId
+    );
+
     @PostExchange("/settings/preconfigure")
     ApiResponse<TradingConfigPreconfigureClientResponse> preconfigureTradingSettings(
             @RequestHeader("X-BINANCE-APIKEY") String apiKey,

@@ -174,6 +174,31 @@ class ProcesBinanceServiceImplTest {
     }
 
     @Test
+    void explicitLookupDelegatesByBinanceOrderId() {
+        CapturingBinanceClient client = new CapturingBinanceClient();
+        CapturingBinanceClient closeClient = new CapturingBinanceClient();
+        client.lookupResponse = filledLookupResponse("BTCUSDT", "open-abc", 789L);
+        ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+
+        BinanceFuturesOrderClientResponse response = service.findOrderByOrderId(OperationDto.builder()
+                        .symbol("BTCUSDT")
+                        .side(Side.BUY)
+                        .type(OrderType.MARKET)
+                        .positionSide(PositionSide.LONG)
+                        .quantity("0.01")
+                        .clientOrderId("open-abc")
+                        .apiKey("api-key")
+                        .secret("secret")
+                        .build(), 789L)
+                .orElseThrow();
+
+        assertTrue(client.orderIdLookupCalled);
+        assertEquals(789L, client.lastLookupOrderId);
+        assertFalse(client.lookupCalled);
+        assertEquals(789L, response.getOrderId());
+    }
+
+    @Test
     void closeInvalidApiKeyThrowsReadinessException() {
         CapturingBinanceClient client = new CapturingBinanceClient();
         CapturingBinanceClient closeClient = new CapturingBinanceClient();
@@ -232,6 +257,8 @@ class ProcesBinanceServiceImplTest {
         private boolean lookupCalled;
         private String lastLookupClientOrderId;
         private BinanceFuturesOrderClientResponse lookupResponse;
+        private boolean orderIdLookupCalled;
+        private Long lastLookupOrderId;
 
         @Override
         public ApiResponse<BinanceFuturesOrderClientResponse> openPosition(
@@ -271,6 +298,22 @@ class ProcesBinanceServiceImplTest {
             return ApiResponse.<BinanceFuturesOrderClientResponse>builder()
                     .statusCode(200)
                     .data(orderResponse(request))
+                    .build();
+        }
+
+        @Override
+        public ApiResponse<BinanceFuturesOrderClientResponse> getOrderByOrderId(
+                String apiKey,
+                String secret,
+                String traceId,
+                String symbol,
+                Long orderId
+        ) {
+            this.orderIdLookupCalled = true;
+            this.lastLookupOrderId = orderId;
+            return ApiResponse.<BinanceFuturesOrderClientResponse>builder()
+                    .statusCode(200)
+                    .data(lookupResponse)
                     .build();
         }
 
