@@ -6,6 +6,8 @@ import com.apunto.engine.shared.enums.Side;
 import lombok.Builder;
 import lombok.Data;
 
+import java.math.BigDecimal;
+
 @Data
 @Builder
 public class OperationDto {
@@ -35,6 +37,15 @@ public class OperationDto {
     private String originId;
     private String userId;
     private String walletId;
+
+    /** Durable dispatch metadata. These fields are never sent to Binance. */
+    private String sourceEventId;
+    private String sourceEventType;
+    private String copyIntent;
+    private BigDecimal requestedMarginUsd;
+    private BigDecimal requestedNotionalUsd;
+    private BigDecimal referencePrice;
+    private Boolean reservePosition;
 
     private String apiKey;
     private String secret;

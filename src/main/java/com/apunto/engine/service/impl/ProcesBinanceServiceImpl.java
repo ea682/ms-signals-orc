@@ -474,6 +474,41 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
     }
 
     @Override
+    public Optional<BinanceFuturesOrderClientResponse> findOrderByOrderId(OperationDto dto, Long orderId) {
+        validateOperation(dto);
+        if (orderId == null || orderId <= 0) return Optional.empty();
+        try {
+            log.info("event=binance.futures.order.reconcile.start lookupBy=orderId traceId={} originId={} userId={} wallet={} symbol={} orderId={}",
+                    safeNull(MDC.get("traceId")), safeNull(dto.getOriginId()), safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()), dto.getSymbol(), orderId);
+            ApiResponse<BinanceFuturesOrderClientResponse> resp = binanceClient.getOrderByOrderId(
+                    dto.getApiKey(), dto.getSecret(), safeNull(MDC.get("traceId")), dto.getSymbol(), orderId);
+            BinanceFuturesOrderClientResponse data = unwrap(resp, "order_id_lookup.reconcile");
+            if (data == null || data.getOrderId() == null) {
+                log.warn("event=binance.futures.order.reconcile.not_found lookupBy=orderId originId={} userId={} wallet={} symbol={} orderId={}",
+                        safeNull(dto.getOriginId()), safeNull(dto.getUserId()), safeNull(dto.getWalletId()), dto.getSymbol(), orderId);
+                return Optional.empty();
+            }
+            log.info("event=binance.futures.order.reconcile.ok lookupBy=orderId traceId={} originId={} userId={} wallet={} symbol={} orderId={} status={} executedQty={} avgPrice={} clientOrderId={}",
+                    safeNull(MDC.get("traceId")), safeNull(dto.getOriginId()), safeNull(dto.getUserId()),
+                    safeNull(dto.getWalletId()), data.getSymbol(), data.getOrderId(), data.getStatus(),
+                    data.getExecutedQty(), data.getAvgPrice(), data.getClientOrderId());
+            return Optional.of(data);
+        } catch (RestClientResponseException ex) {
+            BinanceHttpError err = parseBinanceHttpError(ex);
+            log.warn("event=binance.futures.order.reconcile.fail lookupBy=orderId reason=http_error originId={} userId={} wallet={} symbol={} orderId={} httpStatus={} errorCode={} binanceCode={} binanceMsg=\"{}\"",
+                    safeNull(dto.getOriginId()), safeNull(dto.getUserId()), safeNull(dto.getWalletId()),
+                    dto.getSymbol(), orderId, err.httpStatus(), err.errorCode(), err.binanceCode(), safeLog(err.binanceMsg()));
+            return Optional.empty();
+        } catch (RuntimeException ex) {
+            log.warn("event=binance.futures.order.reconcile.fail lookupBy=orderId reason=client_error originId={} userId={} wallet={} symbol={} orderId={} errClass={} errMsg=\"{}\"",
+                    safeNull(dto.getOriginId()), safeNull(dto.getUserId()), safeNull(dto.getWalletId()),
+                    dto.getSymbol(), orderId, ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            return Optional.empty();
+        }
+    }
+
+    @Override
     public Optional<BinanceFuturesOrderClientResponse> findOrderByClientOrderId(OperationDto dto) {
         validateOperation(dto);
         return lookupOrderByClientOrderId(binanceClient, dto, "manual_lookup");

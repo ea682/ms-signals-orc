@@ -20,6 +20,13 @@ import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.repository.UserRepository;
 import com.apunto.engine.repository.UserWalletCopyPlanRepository;
 import com.apunto.engine.service.ShadowPromotionService;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageBatch;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageCalculator;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageDecision;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageQueryService;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageSnapshot;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageSource;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageWindowProperties;
 import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
 import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
@@ -38,6 +45,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -69,6 +77,9 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     private final CopySymbolResolver copySymbolResolver;
     private final ShadowPromotionProperties properties;
     private final CopyDecisionGateway copyDecisionGateway;
+    private final ShadowCoverageQueryService shadowCoverageQueryService;
+    private final ShadowCoverageCalculator shadowCoverageCalculator;
+    private final ShadowCoverageWindowProperties shadowCoverageProperties;
 
     @Override
     public ShadowPromotionResult promoteShadowToMicroLive() {
@@ -92,7 +103,8 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         int skipped = 0;
 
         log.info("event=copy.promotion.shadow_to_micro.started candidates={}", candidates.size());
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        ShadowCoverageBatch coverageBatch = loadCoverageBatch(candidates, now);
 
         for (ShadowCopyAllocationEntity shadow : candidates) {
             long candidateNs = System.nanoTime();
@@ -102,7 +114,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             }
             evaluated++;
             try {
-                PromotionDecision decision = evaluate(shadow, now);
+                PromotionDecision decision = evaluate(shadow, now, coverageBatch);
                 audit(shadow, decision, null, "SHADOW_EVALUATED");
                 log.info(
                         "event=copy.promotion.shadow_candidate.evaluated userId={} walletId={} shadowAllocationId={} strategy={} sourceSymbol={} targetSymbol={} executionMode=SHADOW decision={} reasonCode={} readinessPct={} elapsedMs={}",
@@ -336,7 +348,47 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         return new ShadowPromotionResult(evaluated, ready, created, rejected, skipped);
     }
 
-    private PromotionDecision evaluate(ShadowCopyAllocationEntity shadow, OffsetDateTime now) {
+    private ShadowCoverageBatch loadCoverageBatch(
+            List<ShadowCopyAllocationEntity> candidates,
+            OffsetDateTime now
+    ) {
+        List<Long> allocationIds = candidates.stream()
+                .filter(Objects::nonNull)
+                .map(ShadowCopyAllocationEntity::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        try {
+            ShadowCoverageBatch batch = shadowCoverageQueryService.load(allocationIds, now);
+            if (batch != null) return batch;
+        } catch (RuntimeException ex) {
+            log.warn(
+                    "event=shadow.coverage.query_failed allocationCount={} reasonCode=SHADOW_COVERAGE_ROLLING_QUERY_FAILED errorClass={} errorMessage=\"{}\"",
+                    allocationIds.size(),
+                    ex.getClass().getSimpleName(),
+                    safe(ex.getMessage())
+            );
+            return ShadowCoverageBatch.failure(
+                    allocationIds,
+                    now.minusDays(shadowCoverageProperties.getWindowDays()),
+                    now,
+                    ex
+            );
+        }
+        IllegalStateException failure = new IllegalStateException("shadow coverage query returned null");
+        return ShadowCoverageBatch.failure(
+                allocationIds,
+                now.minusDays(shadowCoverageProperties.getWindowDays()),
+                now,
+                failure
+        );
+    }
+
+    private PromotionDecision evaluate(
+            ShadowCopyAllocationEntity shadow,
+            OffsetDateTime now,
+            ShadowCoverageBatch coverageBatch
+    ) {
         if (shadow.getLinkedLiveAllocationId() != null) {
             return rejected("ALREADY_PROMOTED", shadow);
         }
@@ -397,7 +449,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         ShadowWalletProfileValidationEntity validation = shadow.getWalletProfileId() == null
                 ? null
                 : validationRepository.findFirstByWalletProfileIdOrderByStartedAtDesc(shadow.getWalletProfileId()).orElse(null);
-        Evidence evidence = evidence(shadow, validation, now);
+        Evidence evidence = evidence(shadow, validation, now, coverageBatch);
         PromotionDecision readiness = evaluateEvidence(shadow, evidence, now);
         if (!readiness.allowed()) {
             return readiness;
@@ -482,8 +534,9 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
 
     private PromotionDecision evaluateEvidence(ShadowCopyAllocationEntity shadow, Evidence evidence, OffsetDateTime now) {
         boolean summaryOnlyBlockedBySummary = summaryOnlyBlockedBySummary(shadow);
+        logCoverageEvaluated(shadow, evidence.coverageSnapshot());
         log.info(
-                "event=shadow.promotion.evidence.checked userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} shadowDays={} events={} closedPositions={} coveragePct={} netPnlUsd={} summaryOnlyOverride={}",
+                "event=shadow.promotion.evidence.checked userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} shadowDays={} events={} closedPositions={} historicalCoveragePct={} rollingCoveragePct={} coverageSourceUsed={} coverageDecision={} coverageReasonCode={} netPnlUsd={} summaryOnlyOverride={}",
                 shadow.getIdUser(),
                 shadow.getWalletId(),
                 shadow.getId(),
@@ -494,6 +547,10 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 evidence.events(),
                 evidence.closedPositions(),
                 evidence.coveragePct(),
+                evidence.coverageSnapshot().rollingCoveragePct(),
+                evidence.coverageSnapshot().coverageSourceUsed(),
+                evidence.coverageSnapshot().coverageDecision(),
+                evidence.coverageSnapshot().coverageReasonCode(),
                 evidence.netPnlUsd(),
                 summaryOnlyBlockedBySummary
         );
@@ -512,10 +569,36 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         if (evidence.closedPositions() < Math.max(0, properties.getMinShadowClosedPositions())) {
             return PromotionDecision.rejected("SHADOW_NOT_READY_MIN_CLOSED_POSITIONS", details(shadow, evidence, Map.of()));
         }
-        BigDecimal minCoverage = nullToZero(properties.getMinShadowCoveragePct());
-        if (minCoverage.compareTo(ZERO) > 0 && evidence.coveragePct().compareTo(minCoverage) < 0) {
-            return PromotionDecision.rejected("SHADOW_NOT_READY_COVERAGE", details(shadow, evidence, Map.of()));
+        ShadowCoverageSnapshot coverage = evidence.coverageSnapshot();
+        if (coverage.coverageSourceUsed() == ShadowCoverageSource.ROLLING) {
+            if (coverage.coverageDecision() != ShadowCoverageDecision.COVERAGE_READY) {
+                logCoverageBlocked(shadow, coverage);
+                return PromotionDecision.rejected(
+                        coverage.coverageReasonCode().name(),
+                        details(shadow, evidence, Map.of())
+                );
+            }
+        } else {
+            BigDecimal minCoverage = nullToZero(properties.getMinShadowCoveragePct());
+            if (minCoverage.compareTo(ZERO) > 0 && evidence.coveragePct().compareTo(minCoverage) < 0) {
+                logCoverageBlocked(shadow, coverage);
+                return PromotionDecision.rejected("SHADOW_NOT_READY_COVERAGE", details(shadow, evidence, Map.of()));
+            }
         }
+        log.info(
+                "event=shadow.promotion.coverage_ready shadowAllocationId={} walletId={} strategyCode={} scopeType={} scopeValue={} historicalCoveragePct={} rollingCoveragePct={} rollingEvaluable={} coverageSourceUsed={} coverageDecision={} reasonCode={} decision=CONTINUE_OTHER_GATES",
+                shadow.getId(),
+                shadow.getWalletId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                coverage.historicalCoveragePct(),
+                coverage.rollingCoveragePct(),
+                coverage.rollingEvaluableEvents(),
+                coverage.coverageSourceUsed(),
+                coverage.coverageDecision(),
+                coverage.coverageReasonCode()
+        );
         if (properties.isRequirePositiveShadowPnl()
                 && evidence.netPnlUsd().compareTo(nullToZero(properties.getMinShadowNetPnlUsd())) < 0) {
             return PromotionDecision.rejected("SHADOW_NOT_READY_NEGATIVE_PNL", details(shadow, evidence, Map.of()));
@@ -863,7 +946,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         return "LIVE_READY_FROM_SHADOW".equals(reason) || "SHADOW_FILTERS_PASSED".equals(reason);
     }
 
-    private Evidence evidence(ShadowCopyAllocationEntity shadow, ShadowWalletProfileValidationEntity validation, OffsetDateTime now) {
+    private Evidence evidence(
+            ShadowCopyAllocationEntity shadow,
+            ShadowWalletProfileValidationEntity validation,
+            OffsetDateTime now,
+            ShadowCoverageBatch coverageBatch
+    ) {
         long recordedSnapshot = validation == null || validation.getRecordedEvents() == null
                 ? 0L
                 : Math.max(0L, validation.getRecordedEvents());
@@ -888,7 +976,26 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         OffsetDateTime createdAt = firstNonNull(shadow.getCreatedAt(), shadow.getLastSeenAt(), now);
         long days = Math.max(0L, Duration.between(createdAt, now).toDays());
         BigDecimal coverage = coveragePct(events, skipped, errors);
-        return new Evidence(days, events, skipped, errors, closed, pnl, drawdown, coverage);
+        ShadowCoverageBatch batch = coverageBatch == null
+                ? ShadowCoverageBatch.failure(
+                List.of(shadow.getId()),
+                now.minusDays(shadowCoverageProperties.getWindowDays()),
+                now,
+                new IllegalStateException("missing shadow coverage batch")
+        )
+                : coverageBatch;
+        OffsetDateTime coverageWindowEnd = batch.windowEnd() == null ? now : batch.windowEnd();
+        ShadowCoverageSnapshot coverageSnapshot = shadowCoverageCalculator.calculate(
+                events,
+                skipped,
+                errors,
+                batch.countsFor(shadow.getId()),
+                batch.queryFailed(),
+                coverageWindowEnd,
+                shadowCoverageProperties,
+                properties.getMinShadowCoveragePct()
+        );
+        return new Evidence(days, events, skipped, errors, closed, pnl, drawdown, coverage, coverageSnapshot);
     }
 
     private CopySymbolResolution resolveSymbol(ShadowCopyAllocationEntity shadow, String capitalAsset) {
@@ -990,6 +1097,31 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             details.put("coveragePct", evidence.coveragePct());
             details.put("netPnlUsd", evidence.netPnlUsd());
             details.put("maxDrawdownPct", evidence.maxDrawdownPct());
+            ShadowCoverageSnapshot coverage = evidence.coverageSnapshot();
+            details.put("historicalSimulatedEvents", coverage.historicalSimulatedEvents());
+            details.put("historicalSkippedEvents", coverage.historicalSkippedEvents());
+            details.put("historicalErrorEvents", coverage.historicalErrorEvents());
+            details.put("historicalCoveragePct", coverage.historicalCoveragePct());
+            details.put("coverageHistoricalPct", coverage.historicalCoveragePct());
+            details.put("rollingSimulatedEvents", coverage.rollingSimulatedEvents());
+            details.put("rollingRecordedEvents", coverage.rollingRecordedEvents());
+            details.put("rollingSkippedEvents", coverage.rollingSkippedEvents());
+            details.put("rollingErrorEvents", coverage.rollingErrorEvents());
+            details.put("rollingEvaluableEvents", coverage.rollingEvaluableEvents());
+            details.put("rollingCoveragePct", coverage.rollingCoveragePct());
+            details.put("coverageRollingPct", coverage.rollingCoveragePct());
+            details.put("rollingWindowDays", coverage.rollingWindowDays());
+            details.put("rollingMaxEvents", coverage.rollingMaxEvents());
+            details.put("rollingMinEvents", coverage.rollingMinEvents());
+            details.put("rollingWindowStart", coverage.rollingWindowStart().toString());
+            details.put("rollingWindowEnd", coverage.rollingWindowEnd().toString());
+            details.put("coverageThresholdPct", coverage.coverageThresholdPct());
+            details.put("rollingThresholdPct", coverage.rollingThresholdPct());
+            details.put("coverageSourceUsed", coverage.coverageSourceUsed().name());
+            details.put("coverageDecision", coverage.coverageDecision().name());
+            details.put("coverageReasonCode", coverage.coverageReasonCode().name());
+            details.put("rollingCoverageDecision", coverage.rollingCoverageDecision().name());
+            details.put("rollingCoverageReasonCode", coverage.rollingCoverageReasonCode().name());
         }
         if (extra != null) {
             extra.forEach((key, value) -> {
@@ -997,6 +1129,54 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             });
         }
         return details;
+    }
+
+    private void logCoverageEvaluated(ShadowCopyAllocationEntity shadow, ShadowCoverageSnapshot coverage) {
+        log.info(
+                "event=shadow.coverage.evaluated shadowAllocationId={} walletId={} strategyCode={} scopeType={} scopeValue={} historicalSimulated={} historicalSkipped={} historicalErrors={} historicalCoveragePct={} rollingSimulated={} rollingSkipped={} rollingErrors={} rollingEvaluable={} rollingCoveragePct={} windowDays={} maxEvents={} minEvents={} thresholdPct={} windowStart={} windowEnd={} coverageSourceUsed={} decision={} reasonCode={}",
+                shadow.getId(),
+                shadow.getWalletId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                coverage.historicalSimulatedEvents(),
+                coverage.historicalSkippedEvents(),
+                coverage.historicalErrorEvents(),
+                coverage.historicalCoveragePct(),
+                coverage.rollingSimulatedEvents(),
+                coverage.rollingSkippedEvents(),
+                coverage.rollingErrorEvents(),
+                coverage.rollingEvaluableEvents(),
+                coverage.rollingCoveragePct(),
+                coverage.rollingWindowDays(),
+                coverage.rollingMaxEvents(),
+                coverage.rollingMinEvents(),
+                coverage.coverageThresholdPct(),
+                coverage.rollingWindowStart(),
+                coverage.rollingWindowEnd(),
+                coverage.coverageSourceUsed(),
+                coverage.coverageDecision(),
+                coverage.coverageReasonCode()
+        );
+    }
+
+    private void logCoverageBlocked(ShadowCopyAllocationEntity shadow, ShadowCoverageSnapshot coverage) {
+        log.info(
+                "event=shadow.promotion.coverage_blocked shadowAllocationId={} walletId={} strategyCode={} scopeType={} scopeValue={} historicalCoveragePct={} rollingCoveragePct={} rollingEvaluable={} requiredCoveragePct={} requiredMinEvents={} coverageSourceUsed={} decision={} reasonCode={}",
+                shadow.getId(),
+                shadow.getWalletId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue(),
+                coverage.historicalCoveragePct(),
+                coverage.rollingCoveragePct(),
+                coverage.rollingEvaluableEvents(),
+                coverage.coverageThresholdPct(),
+                coverage.rollingMinEvents(),
+                coverage.coverageSourceUsed(),
+                coverage.coverageDecision(),
+                coverage.coverageReasonCode()
+        );
     }
 
     private static Map<String, Object> extras(Object... keyValues) {
@@ -1325,12 +1505,14 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             long closedPositions,
             BigDecimal netPnlUsd,
             BigDecimal maxDrawdownPct,
-            BigDecimal coveragePct
+            BigDecimal coveragePct,
+            ShadowCoverageSnapshot coverageSnapshot
     ) {
         private Evidence {
             netPnlUsd = nullToZero(netPnlUsd);
             maxDrawdownPct = nullToZero(maxDrawdownPct);
             coveragePct = nullToZero(coveragePct);
+            Objects.requireNonNull(coverageSnapshot, "coverageSnapshot");
         }
     }
 

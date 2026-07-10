@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.UUID;
 
 @Data
 @NoArgsConstructor
@@ -54,4 +55,12 @@ public class BinanceFuturesOrderClientResponse {
     private Instant leverageConfirmedAt;
     private BigDecimal liveNotionalUsd;
     private BigDecimal liveRequiredMarginUsd;
+    private boolean accepted;
+    private String executionState;
+    private String averagePriceStatus;
+    private boolean requiresReconciliation;
+    private boolean safeToRetrySend;
+    private UUID dispatchIntentId;
+    private String sourceEventId;
+    private BigDecimal referencePrice;
 }

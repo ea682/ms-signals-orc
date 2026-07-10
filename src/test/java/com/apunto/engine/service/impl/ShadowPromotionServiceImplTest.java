@@ -21,6 +21,12 @@ import com.apunto.engine.repository.UserRepository;
 import com.apunto.engine.repository.UserWalletCopyPlanRepository;
 import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
 import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageBatch;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageCalculator;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageCounts;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageMode;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageQueryService;
+import com.apunto.engine.service.copy.coverage.ShadowCoverageWindowProperties;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
@@ -36,6 +42,7 @@ import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -478,6 +485,196 @@ class ShadowPromotionServiceImplTest {
     }
 
     @Test
+    void historicalBadButRecentGoodPassesRollingCoverage() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validationWithCoverage(5, 423, 0, 226, 0, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")),
+                rollingCoverageProperties(),
+                coverageBatch(10L, 111, 0, 3, 0)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.created());
+        assertNotNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "ROLLING".equals(a.getReasonDetails().get("coverageSourceUsed"))));
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_COVERAGE_ROLLING_READY".equals(a.getReasonDetails().get("coverageReasonCode"))));
+        assertTrue(audits.stream().anyMatch(a -> new BigDecimal("65.177196").equals(a.getReasonDetails().get("historicalCoveragePct"))));
+        assertTrue(audits.stream().anyMatch(a -> new BigDecimal("97.368421").equals(a.getReasonDetails().get("rollingCoveragePct"))));
+    }
+
+    @Test
+    void historicalGoodButRecentBadBlocksPromotion() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validationWithCoverage(5, 1_000, 0, 0, 0, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")),
+                rollingCoverageProperties(),
+                coverageBatch(10L, 90, 0, 10, 0)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_COVERAGE_ROLLING_BELOW_THRESHOLD".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void insufficientRecentSampleBlocksEvenAtOneHundredPercent() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validationWithCoverage(5, 1_000, 0, 0, 0, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                new AtomicReference<>(),
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")),
+                rollingCoverageProperties(),
+                coverageBatch(10L, 99, 0, 0, 0)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_COVERAGE_ROLLING_INSUFFICIENT_SAMPLE".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void historicalEventsButNoRecentEventsFailsClosedWithRollingNoEvents() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(
+                fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")
+        );
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validationWithCoverage(5, 1_000, 0, 0, 0, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                new AtomicReference<>(),
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(
+                        sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false
+                ),
+                0L,
+                promotionProperties(),
+                gateway,
+                rollingCoverageProperties(),
+                coverageBatch(10L, 0, 0, 0, 0)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals(0, gateway.calls.get());
+        assertTrue(audits.stream().anyMatch(a ->
+                "SHADOW_COVERAGE_ROLLING_NO_EVENTS".equals(a.getReasonCode())
+                        && "ROLLING".equals(a.getReasonDetails().get("coverageSourceUsed"))
+        ));
+    }
+
+    @Test
+    void rollingCoverageQueryFailureBlocksBeforeFullDecision() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE"));
+        OffsetDateTime now = OffsetDateTime.now();
+        ShadowCoverageBatch failed = ShadowCoverageBatch.failure(
+                List.of(10L), now.minusDays(14), now, new IllegalStateException("database unavailable")
+        );
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validationWithCoverage(5, 1_000, 0, 0, 0, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                new AtomicReference<>(),
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                gateway,
+                rollingCoverageProperties(),
+                failed
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals(0, gateway.calls.get());
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_COVERAGE_ROLLING_QUERY_FAILED".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void rollingReadyStillDoesNotBypassClosedPositionsGate() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validationWithCoverage(0, 1_000, 0, 0, 0, "8.5"),
+                activeUser(userId, true, 192, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                new AtomicReference<>(),
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
+                0L,
+                promotionProperties(),
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")),
+                rollingCoverageProperties(),
+                coverageBatch(10L, 100, 0, 0, 0)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertTrue(audits.stream().anyMatch(a -> "SHADOW_NOT_READY_MIN_CLOSED_POSITIONS".equals(a.getReasonCode())));
+    }
+
+    @Test
     void doesNotPromoteWithOperationsButWithoutClosedPositions() {
         UUID userId = UUID.randomUUID();
         ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
@@ -845,7 +1042,10 @@ class ShadowPromotionServiceImplTest {
                 auditRepository(audits),
                 (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false),
                 promotionProperties(),
-                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE"))
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")),
+                coverageQueryService(legacyCoverageBatch()),
+                new ShadowCoverageCalculator(),
+                legacyCoverageProperties()
         );
 
         ShadowPromotionResult result = service.promoteShadowToMicroLive();
@@ -1065,7 +1265,10 @@ class ShadowPromotionServiceImplTest {
                 auditRepository(audits),
                 (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(sourceSymbol, "BTCUSDC", "BTC", "USDC", capitalAsset, false),
                 promotionProperties(),
-                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE"))
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(true, false, "FULL_DECISION_OK_FOR_MICRO_LIVE")),
+                coverageQueryService(legacyCoverageBatch()),
+                new ShadowCoverageCalculator(),
+                legacyCoverageProperties()
         );
 
         ShadowPromotionResult result = service.promoteShadowToMicroLive();
@@ -1134,6 +1337,25 @@ class ShadowPromotionServiceImplTest {
             ShadowPromotionProperties properties,
             CopyDecisionGateway copyDecisionGateway
     ) {
+        return service(shadows, validation, user, apiKey, savedPlan, savedAllocation, audits, symbolResolver,
+                activeAllocationCount, properties, copyDecisionGateway, legacyCoverageProperties(), legacyCoverageBatch());
+    }
+
+    private static ShadowPromotionServiceImpl service(
+            List<ShadowCopyAllocationEntity> shadows,
+            ShadowWalletProfileValidationEntity validation,
+            UserBundle user,
+            UserApiKeyEntity apiKey,
+            AtomicReference<UserWalletCopyPlanEntity> savedPlan,
+            AtomicReference<UserCopyAllocationEntity> savedAllocation,
+            List<CopyPromotionAuditEntity> audits,
+            CopySymbolResolver symbolResolver,
+            long activeAllocationCount,
+            ShadowPromotionProperties properties,
+            CopyDecisionGateway copyDecisionGateway,
+            ShadowCoverageWindowProperties coverageProperties,
+            ShadowCoverageBatch coverageBatch
+    ) {
         return new ShadowPromotionServiceImpl(
                 shadowRepository(shadows),
                 validationRepository(validation),
@@ -1147,7 +1369,10 @@ class ShadowPromotionServiceImplTest {
                 auditRepository(audits),
                 symbolResolver,
                 properties,
-                copyDecisionGateway
+                copyDecisionGateway,
+                coverageQueryService(coverageBatch),
+                new ShadowCoverageCalculator(),
+                coverageProperties
         );
     }
 
@@ -1166,6 +1391,32 @@ class ShadowPromotionServiceImplTest {
         properties.setMicroLiveMaxCapitalUsd(new BigDecimal("100"));
         properties.setRequireFullDecisionForMicroLive(true);
         return properties;
+    }
+
+    private static ShadowCoverageWindowProperties legacyCoverageProperties() {
+        ShadowCoverageWindowProperties properties = rollingCoverageProperties();
+        properties.setRollingEnabled(false);
+        return properties;
+    }
+
+    private static ShadowCoverageWindowProperties rollingCoverageProperties() {
+        ShadowCoverageWindowProperties properties = new ShadowCoverageWindowProperties();
+        properties.setRollingEnabled(true);
+        properties.setMode(ShadowCoverageMode.ROLLING);
+        properties.setWindowDays(14);
+        properties.setMaxEvents(500);
+        properties.setMinEvaluableEvents(100);
+        properties.setMinimumPercent(new BigDecimal("95"));
+        return properties;
+    }
+
+    private static ShadowCoverageQueryService coverageQueryService(ShadowCoverageBatch batch) {
+        return (allocationIds, windowEnd) -> batch;
+    }
+
+    private static ShadowCoverageBatch legacyCoverageBatch() {
+        OffsetDateTime now = OffsetDateTime.now();
+        return ShadowCoverageBatch.success(Map.of(), now.minusDays(14), now);
     }
 
     private static CopyDecisionDto fullDecisionAllowed(boolean canMicroLive, boolean canLive, String reasonCode) {
@@ -1297,6 +1548,43 @@ class ShadowPromotionServiceImplTest {
         validation.setRecordedEvents(0L);
         validation.setSimulatedEvents(events);
         return validation;
+    }
+
+    private static ShadowWalletProfileValidationEntity validationWithCoverage(
+            long closed,
+            long simulated,
+            long recorded,
+            long skipped,
+            long errors,
+            String pnl
+    ) {
+        return ShadowWalletProfileValidationEntity.builder()
+                .id(200L)
+                .walletProfileId(100L)
+                .status("VALIDATED")
+                .closedPositions(closed)
+                .recordedEvents(recorded)
+                .simulatedEvents(simulated)
+                .skippedEvents(skipped)
+                .errorEvents(errors)
+                .netPnlUsd(new BigDecimal(pnl))
+                .maxDrawdown(BigDecimal.ZERO)
+                .startedAt(OffsetDateTime.now().minusDays(2))
+                .build();
+    }
+
+    private static ShadowCoverageBatch coverageBatch(
+            long allocationId,
+            long simulated,
+            long recorded,
+            long skipped,
+            long errors
+    ) {
+        OffsetDateTime now = OffsetDateTime.now();
+        ShadowCoverageCounts counts = new ShadowCoverageCounts(
+                allocationId, simulated, recorded, skipped, errors, now.minusDays(1), now, false
+        );
+        return ShadowCoverageBatch.success(Map.of(allocationId, counts), now.minusDays(14), now);
     }
 
     private static UserBundle activeUser(UUID userId, boolean binanceKeyActive, Integer capital, Integer maxWallet, String capitalAsset) {

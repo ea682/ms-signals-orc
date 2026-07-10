@@ -12,11 +12,11 @@ import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 import com.apunto.engine.jobs.model.CopyJobAction;
 import com.apunto.engine.service.ActiveCopyOperationCache;
-import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.service.copy.CopyRuntimeGuardPolicy;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
+import com.apunto.engine.service.copy.CopyStrategyGuardRuntimeCache;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.shared.enums.PositionSide;
 import org.junit.jupiter.api.Test;
@@ -126,7 +126,7 @@ class HyperliquidCopyCandidateResolverTest {
                 new FakeAllocationService(allocations),
                 new FakeActiveCopyOperationCache(),
                 new CopyStrategyRuntimeRouter(),
-                new FakeMetricWalletService(guardDecision),
+                new FakeGuardRuntimeCache(guardDecision),
                 new CopyRuntimeGuardPolicy()
         );
     }
@@ -197,24 +197,9 @@ class HyperliquidCopyCandidateResolverTest {
         }
     }
 
-    private record FakeMetricWalletService(CopyStrategyGuardDecision guardDecision) implements MetricWalletService {
+    private record FakeGuardRuntimeCache(CopyStrategyGuardDecision guardDecision) implements CopyStrategyGuardRuntimeCache {
         @Override
-        public List<MetricaWalletDto> getMetricWallets() {
-            return List.of();
-        }
-
-        @Override
-        public List<MetricaWalletDto> getCandidatesUser(UUID idUser) {
-            return List.of();
-        }
-
-        @Override
-        public boolean isCopyStrategyHealthyForCopy(String walletId, String strategyCode) {
-            return guardDecision == null || guardDecision.allowed();
-        }
-
-        @Override
-        public CopyStrategyGuardDecision evaluateCopyStrategyForCopy(String walletId, String strategyCode) {
+        public CopyStrategyGuardDecision evaluateCached(String walletId, String strategyCode) {
             return guardDecision == null ? CopyStrategyGuardDecision.allow() : guardDecision;
         }
     }

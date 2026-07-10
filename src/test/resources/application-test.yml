@@ -16,6 +16,12 @@ copy:
     enabled: false
     canary-enabled: false
     dry-run: true
+  reconciliation:
+    enabled: false
+  promotion:
+    coverage:
+      rolling-enabled: false
+      mode: LEGACY
 
 metric-wallet:
   allocation:

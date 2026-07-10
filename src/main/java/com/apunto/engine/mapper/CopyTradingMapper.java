@@ -70,6 +70,13 @@ public interface CopyTradingMapper {
         return null;
     }
 
+    default BigDecimal resolvePersistedEntryPrice(BinanceFuturesOrderClientResponse order) {
+        BigDecimal execution = resolveExecutionPrice(order);
+        if (execution != null && execution.compareTo(BigDecimal.ZERO) > 0) return execution;
+        return order != null && order.getReferencePrice() != null && order.getReferencePrice().compareTo(BigDecimal.ZERO) > 0
+                ? order.getReferencePrice() : null;
+    }
+
     default OperationDto buildClosePosition(CopyOperationDto copyOperation, UserDetailDto userDetail) {
 
         if ("LONG".equals(copyOperation.getTypeOperation())) {
@@ -127,10 +134,14 @@ public interface CopyTradingMapper {
     @Mapping(target = "typeOperation", source = "order.positionSide")
     @Mapping(target = "leverage", expression = "java(new java.math.BigDecimal(leverage))")
     @Mapping(target = "sizePar", expression = "java(resolveFilledQty(order))")
-    @Mapping(target = "priceEntry", expression = "java(resolveExecutionPrice(order))")
+    @Mapping(target = "priceEntry", expression = "java(resolvePersistedEntryPrice(order))")
     @Mapping(target = "priceClose", ignore = true)
     @Mapping(target = "dateClose", ignore = true)
-    @Mapping(target = "dateCreation", expression = "java(toUtcOffsetDateTime(order.getUpdateTime()))")
+    @Mapping(target = "dateCreation", expression = "java(toUtcOffsetDateTimeOrNow(order.getUpdateTime()))")
+    @Mapping(target = "dispatchIntentId", source = "order.dispatchIntentId")
+    @Mapping(target = "sourceEventId", source = "order.sourceEventId")
+    @Mapping(target = "clientOrderId", source = "order.clientOrderId")
+    @Mapping(target = "priceStatus", source = "order.averagePriceStatus")
     @Mapping(target = "active", constant = "true")
     @Mapping(target = "siseUsd", ignore = true)
     CopyOperationDto buildCopyNewOperationDto(BinanceFuturesOrderClientResponse order,
@@ -147,7 +158,7 @@ public interface CopyTradingMapper {
                                 String idUser,
                                 int leverage) {
         BigDecimal q = resolveFilledQty(order);
-        BigDecimal price = resolveExecutionPrice(order);
+        BigDecimal price = resolvePersistedEntryPrice(order);
         BigDecimal countUsd = (q == null ? BigDecimal.ZERO : q).multiply(price == null ? BigDecimal.ZERO : price);
         target.setSiseUsd(countUsd);
     }
@@ -163,7 +174,11 @@ public interface CopyTradingMapper {
     @Mapping(target = "priceEntry", source = "operation.priceEntry")
     @Mapping(target = "priceClose", expression = "java(resolveExecutionPrice(order))")
     @Mapping(target = "dateCreation", source = "operation.dateCreation")
-    @Mapping(target = "dateClose", expression = "java(toUtcOffsetDateTime(order.getUpdateTime()))")
+    @Mapping(target = "dateClose", expression = "java(toUtcOffsetDateTimeOrNow(order.getUpdateTime()))")
+    @Mapping(target = "dispatchIntentId", source = "order.dispatchIntentId")
+    @Mapping(target = "sourceEventId", source = "order.sourceEventId")
+    @Mapping(target = "clientOrderId", source = "order.clientOrderId")
+    @Mapping(target = "priceStatus", source = "order.averagePriceStatus")
     @Mapping(target = "active", constant = "false")
     @Mapping(target = "siseUsd", ignore = true)
     CopyOperationDto buildCopyCloseOperationDto(CopyOperationDto operation, BinanceFuturesOrderClientResponse order);
@@ -181,5 +196,9 @@ public interface CopyTradingMapper {
     default OffsetDateTime toUtcOffsetDateTime(Long epochMillis) {
         if (epochMillis == null) return null;
         return OffsetDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), ZoneOffset.UTC);
+    }
+
+    default OffsetDateTime toUtcOffsetDateTimeOrNow(Long epochMillis) {
+        return epochMillis == null ? OffsetDateTime.now(ZoneOffset.UTC) : toUtcOffsetDateTime(epochMillis);
     }
 }

@@ -2,12 +2,10 @@ package com.apunto.engine.events;
 
 import com.apunto.engine.dto.OperacionDto;
 import com.fasterxml.jackson.annotation.JsonAlias;
-import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
 @Data
-@AllArgsConstructor
 @NoArgsConstructor
 public class OperacionEvent {
 
@@ -27,8 +25,27 @@ public class OperacionEvent {
      */
     private String deltaType;
 
+    /** Immutable upstream delta identity, normally Hyperliquid's idempotency key. */
+    private String sourceEventId;
+
+    /** Upstream lifecycle position key, retained only for audit/context. */
+    private String sourcePositionKey;
+
     public OperacionEvent(Tipo tipo, OperacionDto operacion) {
         this.tipo = tipo;
         this.operacion = operacion;
+    }
+
+    public OperacionEvent(Tipo tipo, OperacionDto operacion, String deltaType) {
+        this(tipo, operacion, deltaType, null, null);
+    }
+
+    public OperacionEvent(Tipo tipo, OperacionDto operacion, String deltaType,
+                          String sourceEventId, String sourcePositionKey) {
+        this.tipo = tipo;
+        this.operacion = operacion;
+        this.deltaType = deltaType;
+        this.sourceEventId = sourceEventId;
+        this.sourcePositionKey = sourcePositionKey;
     }
 }

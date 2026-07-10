@@ -19,6 +19,10 @@ public interface ProcesBinanceService {
      */
     BinanceFuturesOrderClientResponse operationPosition(OperationDto dto);
 
+    default Optional<BinanceFuturesOrderClientResponse> findOrderByOrderId(OperationDto dto, Long orderId) {
+        return Optional.empty();
+    }
+
     Optional<BinanceFuturesOrderClientResponse> findOrderByClientOrderId(OperationDto dto);
 
     /**

@@ -16,6 +16,23 @@ public interface CopyOperationEventRepository extends JpaRepository<CopyOperatio
     Optional<CopyOperationEventEntity> findByClientOrderId(String clientOrderId);
 
     @Query(value = """
+            select exists (
+                select 1
+                from futuros_operaciones.copy_operation_event e
+                where e.dispatch_intent_id = :dispatchIntentId
+                  and e.event_type = :eventType
+                  and coalesce(e.qty_executed, 0) = coalesce(:qtyExecuted, 0)
+                  and coalesce(e.resulting_qty, 0) = coalesce(:resultingQty, 0)
+            )
+            """, nativeQuery = true)
+    boolean existsDispatchProgress(
+            @Param("dispatchIntentId") UUID dispatchIntentId,
+            @Param("eventType") String eventType,
+            @Param("qtyExecuted") BigDecimal qtyExecuted,
+            @Param("resultingQty") BigDecimal resultingQty
+    );
+
+    @Query(value = """
             select count(*)
             from futuros_operaciones.copy_operation_event e
             where e.user_copy_allocation_id = :allocationId
