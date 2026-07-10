@@ -19,7 +19,7 @@ Un SHADOW puede pasar a MICRO_LIVE solo si:
 - La promocion SHADOW esta habilitada.
 - La asignacion SHADOW esta activa, sin `ends_at` y sin `linked_live_allocation_id`.
 - Tiene antiguedad minima, eventos minimos y posiciones cerradas minimas.
-- Tiene cobertura suficiente.
+- Tiene cobertura suficiente segun `shadow-promotion-rolling-coverage-sdd.md`: rolling por allocation cuando el modo es `ROLLING`, historica solo en `LEGACY/AUDIT`.
 - Cumple PnL/drawdown si esas politicas estan habilitadas.
 - `copy_guard_status` no esta bloqueado y `copy_guard_action` no bloquea entrada.
 - Existe usuario activo.
@@ -163,6 +163,11 @@ El scheduler de capital:
 - `SHADOW_NOT_READY_MIN_EVENTS`
 - `SHADOW_NOT_READY_MIN_CLOSED_POSITIONS`
 - `SHADOW_NOT_READY_COVERAGE`
+- `SHADOW_COVERAGE_ROLLING_READY`
+- `SHADOW_COVERAGE_ROLLING_BELOW_THRESHOLD`
+- `SHADOW_COVERAGE_ROLLING_INSUFFICIENT_SAMPLE`
+- `SHADOW_COVERAGE_ROLLING_NO_EVENTS`
+- `SHADOW_COVERAGE_ROLLING_QUERY_FAILED`
 - `SHADOW_NOT_READY_COPY_GUARD`
 - `SHADOW_NOT_READY_PNL`
 - `SHADOW_NOT_READY_DRAWDOWN`

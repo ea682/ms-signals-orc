@@ -178,6 +178,13 @@ copy:
     copy-decision-simulation-lookback-days: ${COPY_PROMOTION_COPY_DECISION_LOOKBACK_DAYS:60}
     copy-decision-max-facts-per-unit: ${COPY_PROMOTION_COPY_DECISION_MAX_FACTS_PER_UNIT:50000}
     copy-decision-timeout-ms: ${COPY_PROMOTION_COPY_DECISION_TIMEOUT_MS:55000}
+    coverage:
+      rolling-enabled: ${SHADOW_PROMOTION_COVERAGE_ROLLING_ENABLED:true}
+      mode: ${SHADOW_COVERAGE_MODE:AUDIT}
+      window-days: ${SHADOW_PROMOTION_COVERAGE_WINDOW_DAYS:14}
+      max-events: ${SHADOW_PROMOTION_COVERAGE_MAX_EVENTS:500}
+      min-evaluable-events: ${SHADOW_PROMOTION_COVERAGE_MIN_EVENTS:100}
+      minimum-percent: ${SHADOW_PROMOTION_COVERAGE_MIN_PERCENT:95}
     job:
       enabled: ${COPY_PROMOTION_JOB_ENABLED:true}
       initial-delay-ms: ${COPY_PROMOTION_JOB_INITIAL_DELAY_MS:30000}
@@ -254,6 +261,13 @@ copy:
     active-cache:
       refresh-ms: ${COPY_OPERATION_ACTIVE_CACHE_REFRESH_MS:60000}
       pending-ttl-ms: ${COPY_OPERATION_ACTIVE_CACHE_PENDING_TTL_MS:120000}
+  reconciliation:
+    enabled: ${COPY_RECONCILIATION_ENABLED:true}
+    initial-delay-ms: ${COPY_RECONCILIATION_INITIAL_DELAY_MS:10000}
+    fixed-delay-ms: ${COPY_RECONCILIATION_FIXED_DELAY_MS:5000}
+    batch-size: ${COPY_RECONCILIATION_BATCH_SIZE:50}
+    max-attempts: ${COPY_RECONCILIATION_MAX_ATTEMPTS:20}
+    dispatch-stale-after: ${COPY_RECONCILIATION_DISPATCH_STALE_AFTER:PT30S}
 
 operation:
   movement-ledger:

@@ -356,6 +356,10 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         entity.setExecutionMode(normalizeExecutionMode(operation.getExecutionMode()));
         entity.setShadow(operation.isShadow());
         entity.setShadowStatus(operation.getShadowStatus());
+        entity.setDispatchIntentId(operation.getDispatchIntentId());
+        entity.setSourceEventId(operation.getSourceEventId());
+        entity.setClientOrderId(operation.getClientOrderId());
+        entity.setPriceStatus(operation.getPriceStatus());
 
         return entity;
     }
@@ -363,15 +367,10 @@ public class CopyOperationServiceImpl implements CopyOperationService {
     private Optional<CopyOperationEntity> findOperationEntityForUpsert(CopyOperationDto operation) {
         final String typeOperation = operation.getTypeOperation();
         if (operation.getUserCopyAllocationId() != null && typeOperation != null && !typeOperation.isBlank()) {
-            final Optional<CopyOperationEntity> byAllocation = copyOperationRepository
-                    .findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(
+            return copyOperationRepository.findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(
                             operation.getUserCopyAllocationId(),
                             operation.getIdOrderOrigin(),
-                            typeOperation
-                    );
-            if (byAllocation.isPresent()) {
-                return byAllocation;
-            }
+                            typeOperation);
         }
         if (operation.getCopyStrategyCode() != null && !operation.getCopyStrategyCode().isBlank()
                 && typeOperation != null && !typeOperation.isBlank()) {
@@ -454,6 +453,10 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         entity.setExecutionMode(normalizeExecutionMode(operation.getExecutionMode()));
         entity.setShadow(operation.isShadow());
         entity.setShadowStatus(operation.getShadowStatus());
+        entity.setDispatchIntentId(operation.getDispatchIntentId());
+        entity.setSourceEventId(operation.getSourceEventId());
+        entity.setClientOrderId(operation.getClientOrderId());
+        entity.setPriceStatus(operation.getPriceStatus());
     }
 
     private boolean isUniqueViolation(DataIntegrityViolationException ex) {

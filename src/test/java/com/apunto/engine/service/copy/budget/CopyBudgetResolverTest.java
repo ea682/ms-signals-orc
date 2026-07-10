@@ -200,7 +200,7 @@ class CopyBudgetResolverTest {
     }
 
     @Test
-    void liveUsesSourceExposurePercent() {
+    void liveUsesSourceExposureSizingNotMicroFixedTwenty() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("LIVE")
                 .accountCapitalUsd(new BigDecimal("1000"))
@@ -219,7 +219,7 @@ class CopyBudgetResolverTest {
     }
 
     @Test
-    void liveRejectsWhenSourceExposureMissing() {
+    void liveMissingExposureRejectsBeforeDispatch() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("LIVE")
                 .accountCapitalUsd(new BigDecimal("1000"))

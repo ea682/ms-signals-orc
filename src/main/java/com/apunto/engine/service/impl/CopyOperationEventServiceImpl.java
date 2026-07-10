@@ -30,6 +30,16 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void record(CopyOperationEventRecordCommand command) {
+        persist(command, false);
+    }
+
+    @Override
+    @Transactional
+    public void recordRequired(CopyOperationEventRecordCommand command) {
+        persist(command, true);
+    }
+
+    private void persist(CopyOperationEventRecordCommand command, boolean required) {
         if (!isRecordable(command)) {
             log.warn("event=copy_operation_event.skip category=audit reasonAlias=ledger_payload_incomplete friendlyReason=evento_de_historial_incompleto explanation=no_se_guardo_el_evento_porque_faltan_campos_minimos copyImpact=ledger_missing traceId={} originId={} userId={} symbol={} eventType={}",
                     safe(command == null ? null : command.getTraceId()),
@@ -37,10 +47,16 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                     safe(command == null ? null : command.getIdUser()),
                     safe(command == null ? null : command.getParsymbol()),
                     safe(command == null ? null : command.getEventType()));
+            if (required) {
+                throw new IllegalArgumentException(
+                        "Required copy_operation_event is missing minimum ledger fields");
+            }
             return;
         }
 
-        if (StringUtils.hasText(command.getClientOrderId())) {
+        // Durable intents may generate multiple cumulative partial-fill progress
+        // events. Legacy events without an intent retain clientOrderId idempotency.
+        if (command.getDispatchIntentId() == null && StringUtils.hasText(command.getClientOrderId())) {
             var existing = repository.findByClientOrderId(command.getClientOrderId());
             if (existing.isPresent()) {
                 log.info("event=copy_operation_event.idempotent category=audit reasonAlias=client_order_already_recorded friendlyReason=evento_ya_registrado explanation=el_clientOrderId_ya_existia_en_el_historial_y_no_se_duplica copyImpact=ledger_idempotent traceId={} originId={} userId={} symbol={} eventType={} clientOrderId={} existingEventId={}",
@@ -48,6 +64,16 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                         safe(command.getEventType()), safe(command.getClientOrderId()), existing.get().getIdEvent());
                 return;
             }
+        }
+
+        if (command.getDispatchIntentId() != null
+                && repository.existsDispatchProgress(command.getDispatchIntentId(), command.getEventType(),
+                command.getQtyExecuted(), command.getResultingQty())) {
+            log.info("event=copy_operation_event.idempotent category=audit reasonAlias=dispatch_progress_already_recorded copyImpact=ledger_idempotent dispatchIntentId={} traceId={} originId={} userId={} symbol={} eventType={} qtyExecuted={} resultingQty={}",
+                    command.getDispatchIntentId(), safe(command.getTraceId()), safe(command.getIdOrderOrigin()),
+                    safe(command.getIdUser()), safe(command.getParsymbol()), safe(command.getEventType()),
+                    command.getQtyExecuted(), command.getResultingQty());
+            return;
         }
 
         CopyOperationEventEntity entity = toEntity(command);
@@ -68,10 +94,12 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
             log.error("event=copy_operation_event.insert_failed category=audit reasonAlias=ledger_insert_failed friendlyReason=no_se_pudo_guardar_historial explanation=fallo_bd_al_guardar_evento_de_copy_operation copyImpact=ledger_missing traceId={} originId={} userId={} symbol={} eventType={} errClass={} errMsg=\"{}\"",
                     safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getParsymbol()),
                     safe(command.getEventType()), ex.getClass().getSimpleName(), safe(ex.getMessage()));
+            if (required) throw ex;
         } catch (DataAccessException | IllegalStateException | IllegalArgumentException ex) {
             log.error("event=copy_operation_event.insert_failed category=audit reasonAlias=ledger_insert_failed friendlyReason=no_se_pudo_guardar_historial explanation=fallo_bd_al_guardar_evento_de_copy_operation copyImpact=ledger_missing traceId={} originId={} userId={} symbol={} eventType={} errClass={} errMsg=\"{}\"",
                     safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getParsymbol()),
                     safe(command.getEventType()), ex.getClass().getSimpleName(), safe(ex.getMessage()));
+            if (required) throw ex;
         }
     }
 
@@ -89,6 +117,7 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         return CopyOperationEventEntity.builder()
                 .idOperation(command.getIdOperation())
+                .dispatchIntentId(command.getDispatchIntentId())
                 .userCopyAllocationId(command.getUserCopyAllocationId())
                 .copyStrategyCode(normalizeStrategy(command.getCopyStrategyCode()))
                 .executionMode(normalizeExecutionMode(command.getExecutionMode()))
@@ -110,6 +139,7 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                 .qtyRequested(command.getQtyRequested())
                 .qtyExecuted(command.getQtyExecuted())
                 .price(command.getPrice())
+                .priceStatus(command.getPriceStatus())
                 .notionalUsd(command.getNotionalUsd())
                 .previousQty(command.getPreviousQty())
                 .resultingQty(command.getResultingQty())
@@ -131,7 +161,8 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                 String normalized = msg.toLowerCase();
                 if (normalized.contains("23505")
                         || normalized.contains("duplicate key value violates unique constraint")
-                        || normalized.contains("ux_copy_operation_event_client_order_id")) {
+                        || normalized.contains("ux_copy_operation_event_client_order_id")
+                        || normalized.contains("ux_copy_operation_event_dispatch_progress")) {
                     return true;
                 }
             }

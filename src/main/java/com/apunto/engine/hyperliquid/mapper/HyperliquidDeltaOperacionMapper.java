@@ -69,7 +69,7 @@ public class HyperliquidDeltaOperacionMapper {
                 symbol,
                 side.name(),
                 deltaType,
-                new OperacionEvent(eventType, operacion, deltaType),
+                new OperacionEvent(eventType, operacion, deltaType, idempotencyKey, positionKey(wallet, symbol, side.name())),
                 request
         );
     }

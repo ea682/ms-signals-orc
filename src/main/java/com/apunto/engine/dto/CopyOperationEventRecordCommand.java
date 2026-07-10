@@ -15,6 +15,7 @@ import java.util.UUID;
 @AllArgsConstructor
 public class CopyOperationEventRecordCommand {
     private UUID idOperation;
+    private UUID dispatchIntentId;
     private Long userCopyAllocationId;
     private String copyStrategyCode;
     private String executionMode;
@@ -36,6 +37,7 @@ public class CopyOperationEventRecordCommand {
     private BigDecimal qtyRequested;
     private BigDecimal qtyExecuted;
     private BigDecimal price;
+    private String priceStatus;
     private BigDecimal notionalUsd;
     private BigDecimal previousQty;
     private BigDecimal resultingQty;

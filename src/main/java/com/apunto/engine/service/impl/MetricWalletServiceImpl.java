@@ -9,6 +9,7 @@ import com.apunto.engine.service.CopyExecutionAccountsDiagnosticsService;
 import com.apunto.engine.service.MetricWalletService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.CopyStrategyGuardRuntimeCache;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
@@ -41,7 +42,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 @Service
 @Slf4j
-public class MetricWalletServiceImpl implements MetricWalletService {
+public class MetricWalletServiceImpl implements MetricWalletService, CopyStrategyGuardRuntimeCache {
 
     private static final String JOYAS_ENDPOINT = "/operaciones/metrica/joyas";
     private static final String COPY_GUARD_WINDOWS_ENDPOINT = "/operaciones/metrica/copy-guard/windows";
@@ -410,6 +411,48 @@ public class MetricWalletServiceImpl implements MetricWalletService {
                     decision.detail()
             );
         }
+        return decision;
+    }
+
+    @Override
+    public CopyStrategyGuardDecision evaluateCached(String walletId, String strategyCode) {
+        if (!copyGuardEnabled) {
+            return CopyStrategyGuardDecision.allow();
+        }
+        final String walletKey = normalizeWalletId(walletId);
+        final String strategyKey = copyStrategyRuntimeRouter.strategyCodeOf(
+                UserCopyAllocationEntity.builder().copyStrategyCode(strategyCode).build()
+        );
+        if (walletKey == null) {
+            return CopyStrategyGuardDecision.blocked("WALLET_MISSING", "walletId is blank");
+        }
+
+        CopyGuardWindowSnapshotDto guardSnapshot = findCopyGuardSnapshotFast(walletKey, strategyKey, null);
+        if (guardSnapshot != null) {
+            return evaluateCopyGuardSnapshot(guardSnapshot, walletKey, strategyKey);
+        }
+
+        // IMPORTANT: this runtime method must never call LoadingCache#get. A cache
+        // miss may trigger HTTP to the metrics service and stall the event hot path.
+        HistorySnapshot history = allPositionHistoryCache.getIfPresent(historyLimit);
+        String source = "cache_if_present";
+        if (history == null || history.isEmpty()) {
+            history = lastKnownGoodHistory.get();
+            source = "last_known_good";
+        }
+        HistoryIndex index = history == null ? HistoryIndex.empty() : history.index();
+        MetricaWalletDto metric = index.find(walletKey, strategyKey);
+        if (metric == null) {
+            boolean allowed = copyGuardFailOpenOnMissingMetric;
+            log.warn("event=copy.guard.runtime_cache.miss walletId={} strategyCode={} cacheSource={} decision={} reasonCode=METRIC_CACHE_MISSING hotPathRemoteCall=false",
+                    walletKey, strategyKey, source, allowed ? "ALLOW" : "BLOCK");
+            return allowed
+                    ? CopyStrategyGuardDecision.allow()
+                    : CopyStrategyGuardDecision.blocked("METRIC_CACHE_MISSING", "runtime cache has no wallet+strategy snapshot");
+        }
+        CopyStrategyGuardDecision decision = evaluateCopyGuard(metric);
+        log.debug("event=copy.guard.runtime_cache.hit walletId={} strategyCode={} cacheSource={} decision={} reasonCode={} hotPathRemoteCall=false",
+                walletKey, strategyKey, source, decision.allowed() ? "ALLOW" : "BLOCK", decision.reason());
         return decision;
     }
 
