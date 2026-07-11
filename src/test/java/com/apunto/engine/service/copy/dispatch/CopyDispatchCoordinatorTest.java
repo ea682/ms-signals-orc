@@ -452,7 +452,7 @@ class CopyDispatchCoordinatorTest {
         assertEquals(1, gateway.calls.get());
     }
 
-    private CopyDispatchCoordinator coordinator(FakeStore store, FakeGateway gateway) {
+    private CopyDispatchCoordinator coordinator(CopyDispatchIntentStore store, FakeGateway gateway) {
         return new CopyDispatchCoordinator(store, gateway, new BinanceOrderExecutionNormalizer(),
                 new CopyIdempotencyKeyFactory(), new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     }
@@ -645,8 +645,28 @@ class CopyDispatchCoordinatorTest {
 
         assertEquals(1L, registry.find("copy_binance_engine_duration")
                 .tag("result", "error").timer().count());
+        assertEquals(1L, registry.find("copy.hot.path.duration")
+                .tag("stage", "binance_adapter").tag("result", "error").timer().count());
+        assertEquals(1.0, registry.find("copy.dispatch.total")
+                .tag("mode", "micro_live").tag("result", "ambiguous").counter().count());
         assertTrue(registry.find("copy_binance_engine_duration")
                 .tag("result", "completed").timer() == null);
+    }
+
+    @Test
+    void atomicBudgetRejectionPreservesItsDurableReasonCode() {
+        UUID intentId = UUID.randomUUID();
+        CopyDispatchIntentStore store = new RejectedAcquireStore(intentId,
+                "REJECTED:MICRO_LIVE_TOTAL_MARGIN_EXCEEDED");
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+
+        SkipExecutionException rejected = assertThrows(SkipExecutionException.class,
+                () -> coordinator.dispatch(open("evt-budget-reject"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals("MICRO_LIVE_TOTAL_MARGIN_EXCEEDED", rejected.getReasonCode());
+        assertEquals(0, gateway.calls.get());
     }
 
     @Test
@@ -669,6 +689,16 @@ class CopyDispatchCoordinatorTest {
     private static final class FailingAcquireStore implements CopyDispatchIntentStore {
         @Override public CopyDispatchPermit acquire(CopyDispatchRequest request) {
             throw new org.springframework.dao.QueryTimeoutException("simulated intent insert timeout");
+        }
+        @Override public void acknowledge(UUID id, NormalizedBinanceExecution execution, BinanceFuturesOrderClientResponse response) { }
+        @Override public void markAmbiguous(UUID id, String code, String detail) { }
+        @Override public void markRejected(UUID id, String code, String detail) { }
+        @Override public void markPersistencePending(String clientOrderId, String code, String detail) { }
+    }
+
+    private record RejectedAcquireStore(UUID intentId, String status) implements CopyDispatchIntentStore {
+        @Override public CopyDispatchPermit acquire(CopyDispatchRequest request) {
+            return CopyDispatchPermit.rejected(intentId, status);
         }
         @Override public void acknowledge(UUID id, NormalizedBinanceExecution execution, BinanceFuturesOrderClientResponse response) { }
         @Override public void markAmbiguous(UUID id, String code, String detail) { }

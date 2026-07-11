@@ -37,14 +37,14 @@ class BinanceEngineServiceCapitalPolicyTest {
     }
 
     @Test
-    void microLiveBudgetCannotExceedAvailableUserCapital() {
+    void microLiveTargetDoesNotShrinkWhenUserCapitalIsBelowTarget() {
         BigDecimal budget = BinanceEngineServiceImpl.resolveStrategyMarginBudget(
                 60,
                 0.25,
                 "MICRO_LIVE"
         );
 
-        assertEquals(new BigDecimal("60.000000000000"), budget);
+        assertEquals(new BigDecimal("100.000000000000"), budget);
     }
 
     @Test

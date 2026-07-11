@@ -13,6 +13,42 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CopyBudgetResolverTest {
 
     @Test
+    void liveRetainsWeightedSizingAndDoesNotInheritMicroLimits() {
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                .executionMode("LIVE")
+                .accountCapitalUsd(new BigDecimal("805"))
+                .allocationPct(new BigDecimal("0.000001"))
+                .microLiveFixedBudgetUsd(new BigDecimal("100"))
+                .sourceExposurePct(new BigDecimal("0.10"))
+                .requireSourceExposure(true)
+                .leverage(new BigDecimal("20"))
+                .capitalAsset("USDC")
+                .build());
+
+        assertTrue(decision.allowed());
+        assertEquals(new BigDecimal("0.000805000000"), decision.budgetUsd());
+        assertEquals(new BigDecimal("0.000080500000"), decision.copyMarginUsd());
+        assertEquals(new BigDecimal("0.001610000000"), decision.copyNotionalUsd());
+        assertTrue(decision.usesAllocationPct());
+    }
+
+    @Test
+    void microLiveRejectsInsteadOfSilentlyReducingOneHundredUsdcTarget() {
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                .executionMode("MICRO_LIVE")
+                .accountCapitalUsd(new BigDecimal("60"))
+                .allocationPct(new BigDecimal("0.000001"))
+                .microLiveFixedBudgetUsd(new BigDecimal("100"))
+                .maxMarginPerOperationUsd(new BigDecimal("20"))
+                .capitalAsset("USDC")
+                .build());
+
+        assertFalse(decision.allowed());
+        assertEquals("INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL", decision.reasonCode());
+        assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
+    }
+
+    @Test
     void microLiveDoesNotUseAllocationPct() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("MICRO_LIVE")
@@ -77,7 +113,7 @@ class CopyBudgetResolverTest {
     }
 
     @Test
-    void microLiveWithPartialCapitalUsesAvailableAsHardLimit() {
+    void microLiveWithPartialCapitalRejectsExactTarget() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("MICRO_LIVE")
                 .accountCapitalUsd(new BigDecimal("60"))
@@ -90,10 +126,10 @@ class CopyBudgetResolverTest {
                 .capitalAsset("USDC")
                 .build());
 
-        assertTrue(decision.allowed());
-        assertEquals(new BigDecimal("60.000000000000"), decision.budgetUsd());
-        assertEquals(new BigDecimal("20.000000000000"), decision.copyMarginUsd());
-        assertEquals(CopyBudgetResolver.MICRO_LIVE_FIXED_PER_OPERATION_USD, decision.reasonCode());
+        assertFalse(decision.allowed());
+        assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
+        assertEquals(BigDecimal.ZERO.setScale(12), decision.copyMarginUsd());
+        assertEquals(CopyBudgetResolver.INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL, decision.reasonCode());
     }
 
     @Test
@@ -111,8 +147,8 @@ class CopyBudgetResolverTest {
                 .build());
 
         assertFalse(decision.allowed());
-        assertEquals(BigDecimal.ZERO.setScale(12), decision.budgetUsd());
-        assertEquals(CopyBudgetResolver.INSUFFICIENT_BALANCE_FOR_MICRO_LIVE, decision.reasonCode());
+        assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
+        assertEquals(CopyBudgetResolver.INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL, decision.reasonCode());
     }
 
     @Test

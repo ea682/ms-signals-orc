@@ -21,6 +21,7 @@ public class CopyExecutionAccountsDiagnosticsServiceImpl implements CopyExecutio
     private final DetailUserRepository detailUserRepository;
     private final UserApiKeyRepository userApiKeyRepository;
     private final UserCopyAllocationRepository allocationRepository;
+    private final boolean newDispatchEnabled;
     private final boolean microLiveEnabled;
     private final boolean liveEnabled;
     private final boolean liveDryRun;
@@ -32,6 +33,7 @@ public class CopyExecutionAccountsDiagnosticsServiceImpl implements CopyExecutio
             DetailUserRepository detailUserRepository,
             UserApiKeyRepository userApiKeyRepository,
             UserCopyAllocationRepository allocationRepository,
+            @Value("${copy.new-dispatch.enabled:false}") boolean newDispatchEnabled,
             @Value("${copy.micro-live.enabled:true}") boolean microLiveEnabled,
             @Value("${copy.live.enabled:false}") boolean liveEnabled,
             @Value("${copy.live.dry-run:true}") boolean liveDryRun,
@@ -42,6 +44,7 @@ public class CopyExecutionAccountsDiagnosticsServiceImpl implements CopyExecutio
         this.detailUserRepository = detailUserRepository;
         this.userApiKeyRepository = userApiKeyRepository;
         this.allocationRepository = allocationRepository;
+        this.newDispatchEnabled = newDispatchEnabled;
         this.microLiveEnabled = microLiveEnabled;
         this.liveEnabled = liveEnabled;
         this.liveDryRun = liveDryRun;
@@ -80,6 +83,7 @@ public class CopyExecutionAccountsDiagnosticsServiceImpl implements CopyExecutio
         }
 
         CopyExecutionAccountsDiagnostics diagnostics = CopyExecutionAccountsDiagnostics.fromCounts(
+                newDispatchEnabled,
                 microLiveEnabled,
                 liveEnabled,
                 liveDryRun,
@@ -98,9 +102,10 @@ public class CopyExecutionAccountsDiagnosticsServiceImpl implements CopyExecutio
         );
 
         log.info(
-                "event=copy.execution_accounts.diagnostics hasActiveUsers={} hasActiveBinanceKeys={} hasMicroLiveEnabled={} hasLiveEnabled={} liveDryRun={} liveCanaryEnabled={} activeUsers={} activeDetailUsers={} activeBinanceFlagUsers={} usableApiKeyUsers={} activeCapitalUsers={} activeMaxWalletUsers={} activeMicroLiveAllocations={} activeLiveAllocations={} eligibleMicroLiveUsers={} eligibleLiveUsers={} eligibleExecutionUsers={} reasonsIfZero={}",
+                "event=copy.execution_accounts.diagnostics hasActiveUsers={} hasActiveBinanceKeys={} hasNewDispatchEnabled={} hasMicroLiveEnabled={} hasLiveEnabled={} liveDryRun={} liveCanaryEnabled={} activeUsers={} activeDetailUsers={} activeBinanceFlagUsers={} usableApiKeyUsers={} activeCapitalUsers={} activeMaxWalletUsers={} activeMicroLiveAllocations={} activeLiveAllocations={} eligibleMicroLiveUsers={} eligibleLiveUsers={} eligibleExecutionUsers={} reasonsIfZero={}",
                 diagnostics.hasActiveUsers(),
                 diagnostics.hasActiveBinanceKeys(),
+                diagnostics.hasNewDispatchEnabled(),
                 diagnostics.hasMicroLiveEnabled(),
                 diagnostics.hasLiveEnabled(),
                 diagnostics.liveDryRun(),

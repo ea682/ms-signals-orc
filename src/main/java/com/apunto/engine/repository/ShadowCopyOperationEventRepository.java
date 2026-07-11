@@ -16,6 +16,9 @@ public interface ShadowCopyOperationEventRepository extends JpaRepository<Shadow
     @Query(value = "select 1 from (select pg_advisory_xact_lock(hashtext(:lockKey))) locked", nativeQuery = true)
     Integer lockShadowEventIdempotency(@Param("lockKey") String lockKey);
 
+    @Query(value = "select 1 from (select pg_advisory_xact_lock(hashtextextended(cast(:lockKey as text), 0))) locked", nativeQuery = true)
+    Integer lockShadowProfileMutation(@Param("lockKey") String lockKey);
+
     boolean existsByShadowAllocationIdAndIdOrderOriginAndEventTypeAndPositionSideAndEventTime(
             Long shadowAllocationId,
             String idOrderOrigin,

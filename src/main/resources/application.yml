@@ -33,6 +33,12 @@ spring:
     ansi:
       enabled: ${SPRING_OUTPUT_ANSI_ENABLED:NEVER}
 
+  flyway:
+    postgresql:
+      # Transactional advisory locks keep an old snapshot that self-blocks
+      # CREATE INDEX CONCURRENTLY in non-transactional migrations.
+      transactional-lock: ${FLYWAY_POSTGRESQL_TRANSACTIONAL_LOCK:false}
+
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:kafka:9092}
 
@@ -204,6 +210,17 @@ copy:
     candidate-limit: ${COPY_LIVE_PROMOTION_CANDIDATE_LIMIT:100}
     min-micro-days: ${COPY_LIVE_PROMOTION_MIN_MICRO_DAYS:7}
     min-micro-orders: ${COPY_LIVE_PROMOTION_MIN_MICRO_ORDERS:10}
+    min-submitted-orders: ${COPY_LIVE_PROMOTION_MIN_SUBMITTED_ORDERS:${COPY_LIVE_PROMOTION_MIN_MICRO_ORDERS:10}}
+    min-acknowledged-orders: ${COPY_LIVE_PROMOTION_MIN_ACKNOWLEDGED_ORDERS:10}
+    min-filled-orders: ${COPY_LIVE_PROMOTION_MIN_FILLED_ORDERS:10}
+    min-closed-operations: ${COPY_LIVE_PROMOTION_MIN_CLOSED_OPERATIONS:3}
+    max-dispatch-errors: ${COPY_LIVE_PROMOTION_MAX_DISPATCH_ERRORS:0}
+    max-reconciliation-pending: ${COPY_LIVE_PROMOTION_MAX_RECONCILIATION_PENDING:0}
+    max-duplicate-count: ${COPY_LIVE_PROMOTION_MAX_DUPLICATE_COUNT:0}
+    max-unresolved-ambiguous-timeouts: ${COPY_LIVE_PROMOTION_MAX_UNRESOLVED_AMBIGUOUS_TIMEOUTS:0}
+    min-slippage-samples: ${COPY_LIVE_PROMOTION_MIN_SLIPPAGE_SAMPLES:3}
+    max-adverse-slippage-p95-bps: ${COPY_LIVE_PROMOTION_MAX_ADVERSE_SLIPPAGE_P95_BPS:10}
+    max-drawdown-usd: ${COPY_LIVE_PROMOTION_MAX_DRAWDOWN_USD:20}
     max-error-rate-pct: ${COPY_LIVE_PROMOTION_MAX_ERROR_RATE_PCT:5}
     require-positive-net-pnl: ${COPY_LIVE_PROMOTION_REQUIRE_POSITIVE_NET_PNL:false}
     min-net-pnl-usd: ${COPY_LIVE_PROMOTION_MIN_NET_PNL_USD:0}
@@ -220,6 +237,11 @@ copy:
     enabled: ${COPY_CAPITAL_ALLOCATOR_ENABLED:true}
     scale-enabled: ${COPY_CAPITAL_ALLOCATOR_SCALE_ENABLED:false}
     safety-reserve-pct: ${COPY_CAPITAL_ALLOCATOR_SAFETY_RESERVE_PCT:0.10}
+  postgres:
+    deadlock-retry:
+      max-attempts: ${COPY_POSTGRES_DEADLOCK_RETRY_MAX_ATTEMPTS:3}
+      initial-backoff-ms: ${COPY_POSTGRES_DEADLOCK_RETRY_INITIAL_BACKOFF_MS:25}
+      max-backoff-ms: ${COPY_POSTGRES_DEADLOCK_RETRY_MAX_BACKOFF_MS:250}
   live-readiness:
     min-closed-positions: ${COPY_LIVE_READINESS_MIN_CLOSED_POSITIONS:50}
     min-profit-factor: ${COPY_LIVE_READINESS_MIN_PROFIT_FACTOR:1.3}

@@ -70,7 +70,7 @@ public class CopyDispatchIntentEntity {
     @Column(name = "requested_leverage")
     private Integer requestedLeverage;
     @Column(name = "reserved_position_count", nullable = false)
-    private int reservedPositionCount;
+    private short reservedPositionCount;
     @Column(name = "reservation_status", nullable = false, length = 24)
     private String reservationStatus;
     @Column(name = "client_order_id", nullable = false, length = 36)

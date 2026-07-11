@@ -10,8 +10,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CopyExecutionAccountsDiagnosticsTest {
 
     @Test
+    void eligibleMicroLiveRowsAreNotExecutableWhenNewDispatchIsDisabled() {
+        CopyExecutionAccountsDiagnostics diagnostics = CopyExecutionAccountsDiagnostics.fromCounts(
+                false,
+                true,
+                false,
+                true,
+                false,
+                true,
+                1, 1, 1, 1, 1, 1,
+                1, 0, 1, 0
+        );
+
+        assertFalse(diagnostics.hasExecutableAccounts());
+        assertEquals(0, diagnostics.eligibleExecutionUsers());
+        assertTrue(diagnostics.reasonsIfZero().contains("COPY_NEW_DISPATCH_DISABLED"));
+    }
+
+    @Test
     void noExecutableAccountsReportsConcreteReasons() {
         CopyExecutionAccountsDiagnostics diagnostics = CopyExecutionAccountsDiagnostics.fromCounts(
+                false,
                 false,
                 false,
                 true,
@@ -33,6 +52,7 @@ class CopyExecutionAccountsDiagnosticsTest {
         assertTrue(diagnostics.reasonsIfZero().contains("NO_ACTIVE_BINANCE_API_KEY"));
         assertTrue(diagnostics.reasonsIfZero().contains("NO_CAPITAL_CONFIG"));
         assertTrue(diagnostics.reasonsIfZero().contains("NO_MAX_WALLET_CONFIG"));
+        assertTrue(diagnostics.reasonsIfZero().contains("COPY_NEW_DISPATCH_DISABLED"));
         assertTrue(diagnostics.reasonsIfZero().contains("MICRO_LIVE_DISABLED"));
         assertTrue(diagnostics.reasonsIfZero().contains("LIVE_DISABLED"));
         assertTrue(diagnostics.reasonsIfZero().contains("LIVE_DRY_RUN"));
@@ -42,6 +62,7 @@ class CopyExecutionAccountsDiagnosticsTest {
     @Test
     void liveCanaryWithoutEligibleUserReportsCanaryReason() {
         CopyExecutionAccountsDiagnostics diagnostics = CopyExecutionAccountsDiagnostics.fromCounts(
+                true,
                 false,
                 true,
                 false,
@@ -66,6 +87,7 @@ class CopyExecutionAccountsDiagnosticsTest {
     @Test
     void executableMicroLiveAccountClearsReasons() {
         CopyExecutionAccountsDiagnostics diagnostics = CopyExecutionAccountsDiagnostics.fromCounts(
+                true,
                 true,
                 false,
                 true,

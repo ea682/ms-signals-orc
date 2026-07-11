@@ -5,7 +5,9 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MicroLiveBudgetPolicyTest {
@@ -81,5 +83,20 @@ class MicroLiveBudgetPolicyTest {
     void reductionDoesNotConsumeNewPositionSlot() {
         BudgetSnapshot snapshot = new BudgetSnapshot(new BigDecimal("100"), BigDecimal.ZERO, 5, 0);
         assertTrue(policy.evaluate(snapshot, BigDecimal.ZERO, false).allowed());
+    }
+
+    @Test
+    void productionMicroLiveLimitsAreExactlyOneHundredTwentyAndFive() {
+        assertDoesNotThrow(() -> PostgresCopyDispatchIntentStore.requireFixedMicroLiveLimits(
+                new BigDecimal("100"), new BigDecimal("20"), 5));
+        assertThrows(IllegalStateException.class,
+                () -> PostgresCopyDispatchIntentStore.requireFixedMicroLiveLimits(
+                        new BigDecimal("99"), new BigDecimal("20"), 5));
+        assertThrows(IllegalStateException.class,
+                () -> PostgresCopyDispatchIntentStore.requireFixedMicroLiveLimits(
+                        new BigDecimal("100"), new BigDecimal("21"), 5));
+        assertThrows(IllegalStateException.class,
+                () -> PostgresCopyDispatchIntentStore.requireFixedMicroLiveLimits(
+                        new BigDecimal("100"), new BigDecimal("20"), 6));
     }
 }

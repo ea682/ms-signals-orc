@@ -81,6 +81,7 @@ class HyperliquidCopyCandidateResolverTest {
         ).resolve(mapped(PositionSide.LONG, "OPEN", "SOLUSDT"), CopyJobAction.OPEN);
 
         assertTrue(result.eligibleUsers().isEmpty());
+        assertEquals("SUMMARY_NOT_FINAL_LIVE_BLOCKED", result.reasonCode());
     }
 
     @Test
