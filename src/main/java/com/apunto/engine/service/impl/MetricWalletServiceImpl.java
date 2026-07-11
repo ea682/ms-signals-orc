@@ -11,6 +11,7 @@ import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.service.copy.CopyStrategyGuardRuntimeCache;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
+import com.apunto.engine.service.copy.concurrency.PostgresDeadlockRetryExecutor;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -18,6 +19,7 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataAccessException;
@@ -29,6 +31,9 @@ import org.springframework.web.client.RestClientResponseException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
@@ -87,6 +92,9 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
 
     private final LoadingCache<Integer, HistorySnapshot> allPositionHistoryCache;
     private final LoadingCache<Integer, CopyGuardWindowSnapshotIndex> copyGuardWindowSnapshotCache;
+
+    @Autowired(required = false)
+    private PostgresDeadlockRetryExecutor postgresDeadlockRetryExecutor;
 
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
@@ -572,9 +580,20 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             return;
         }
         try {
-            userCopyAllocationService.syncDistribution(liveCandidates, shadowCandidates);
+            if (postgresDeadlockRetryExecutor == null) {
+                userCopyAllocationService.syncDistribution(liveCandidates, shadowCandidates);
+            } else {
+                postgresDeadlockRetryExecutor.execute("allocation_sync", "copy_wallet_profile", () -> {
+                    userCopyAllocationService.syncDistribution(liveCandidates, shadowCandidates);
+                    return null;
+                });
+            }
         } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException ex) {
-            log.warn("event=user_copy_allocation.sync_failed errClass={} errMsg=\"{}\"", ex.getClass().getSimpleName(), safeErr(ex));
+            boolean deadlockExhausted = PostgresDeadlockRetryExecutor.isDeadlock(ex);
+            log.warn("event=user_copy_allocation.sync_failed reasonCode={} result={} errClass={} errMsg=\"{}\"",
+                    deadlockExhausted ? "ALLOCATION_SYNC_DEADLOCK_RETRY_EXHAUSTED" : "ALLOCATION_SYNC_FAILED",
+                    deadlockExhausted ? "RECOVERABLE_NEXT_SCHEDULE" : "FAILED",
+                    ex.getClass().getSimpleName(), safeErr(ex));
         }
     }
 
@@ -1040,7 +1059,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
                     copyGuardStaleSnapshotMaxAge.toMillis(),
                     decision.action()
             );
-            return decision;
+            return withSnapshotMetadata(decision, snapshot);
         }
 
         CopyStrategyGuardDecision strongest = strongerGuard(
@@ -1079,8 +1098,9 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             strongest = strongerGuard(strongest, decisionFromSnapshotWindow(window, item));
         }
 
+        strongest = withSnapshotMetadata(strongest, snapshot);
         log.info(
-                "event=copy_guard.decision.resolved walletId={} strategyCode={} executionMode=NA action={} status={} reasonCode={} capitalMultiplier={} windowsUsed={} elapsedMs={}",
+                "event=copy_guard.decision.resolved walletId={} strategyCode={} executionMode=NA action={} status={} reasonCode={} capitalMultiplier={} windowsUsed={} guardSource={} decisionVersion={} computedAt={} expiresAt={} decisionFinal={} materializationStatus={} inputFingerprint={} elapsedMs={}",
                 safeLog(walletId),
                 safeLog(strategyCode),
                 strongest.action(),
@@ -1088,9 +1108,52 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
                 strongest.reason(),
                 strongest.capitalMultiplier(),
                 String.join(",", copyGuardWindows),
+                strongest.decisionSource(),
+                strongest.decisionVersion(),
+                strongest.computedAt(),
+                strongest.expiresAt(),
+                strongest.decisionFinal(),
+                strongest.materializationStatus(),
+                strongest.inputFingerprint(),
                 elapsedMs(startNs)
         );
         return strongest;
+    }
+
+    private CopyStrategyGuardDecision withSnapshotMetadata(CopyStrategyGuardDecision decision,
+                                                           CopyGuardWindowSnapshotDto snapshot) {
+        if (decision == null || snapshot == null) return decision;
+        String source = firstNonBlank(snapshot.getSource(), "METRIC_GUARD_SUMMARY");
+        String version = firstNonBlank(snapshot.getSourceVersion(), "UNVERSIONED_SUMMARY");
+        String fingerprint = sha256Hex(String.join("|",
+                firstNonBlank(snapshot.getUnitKey(), ""),
+                firstNonBlank(snapshot.getWalletId(), ""),
+                firstNonBlank(snapshot.getCopyStrategyCode(), ""),
+                version,
+                String.valueOf(snapshot.getComputedAt()),
+                String.valueOf(snapshot.getExpiresAt()),
+                String.valueOf(snapshot.getStatus()),
+                String.valueOf(snapshot.getAction())
+        ));
+        return decision.withMetadata(
+                source,
+                version,
+                snapshot.getComputedAt(),
+                snapshot.getExpiresAt(),
+                false,
+                "SUMMARY_SNAPSHOT",
+                fingerprint
+        );
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 not available", impossible);
+        }
     }
 
     private CopyStrategyGuardDecision decisionFromSnapshotHeader(CopyGuardWindowSnapshotDto snapshot) {

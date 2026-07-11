@@ -20,6 +20,7 @@ public class CopyBudgetResolver {
     public static final String MICRO_LIVE_FIXED_PER_OPERATION_USD = "MICRO_LIVE_FIXED_PER_OPERATION_USD";
     public static final String MICRO_LIVE_CAPACITY_EXCEEDED = "MICRO_LIVE_CAPACITY_EXCEEDED";
     public static final String INSUFFICIENT_BALANCE_FOR_MICRO_LIVE = "INSUFFICIENT_BALANCE_FOR_MICRO_LIVE";
+    public static final String INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL = "INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL";
     public static final String LIVE_WEIGHTED_ALLOCATION_PCT = "LIVE_WEIGHTED_ALLOCATION_PCT";
     public static final String LIVE_SOURCE_EXPOSURE_PERCENT = "LIVE_SOURCE_EXPOSURE_PERCENT";
     public static final String LIVE_SOURCE_EXPOSURE_PERCENT_OF_ALLOCATED_CAPITAL = "LIVE_SOURCE_EXPOSURE_PERCENT_OF_ALLOCATED_CAPITAL";
@@ -43,12 +44,15 @@ public class CopyBudgetResolver {
         String executionMode = UserCopyAllocationEntity.normalizeExecutionMode(safeRequest.executionMode());
         BigDecimal accountCapital = positive(safeRequest.accountCapitalUsd());
         BigDecimal allocationPct = pct(safeRequest.allocationPct());
-        BigDecimal configuredMicroTotal = positive(safeRequest.microLiveFixedBudgetUsd());
+        BigDecimal configuredTargetCapital = positive(safeRequest.microLiveFixedBudgetUsd());
+        BigDecimal targetCapital = configuredTargetCapital.compareTo(BigDecimal.ZERO) > 0
+                ? configuredTargetCapital
+                : DEFAULT_MICRO_TOTAL;
         String capitalAsset = FuturesCapitalAsset.fromNullable(safeRequest.capitalAsset()).name();
 
         CopyBudgetDecision decision;
         if ("MICRO_LIVE".equals(executionMode)) {
-            decision = resolveMicroLive(safeRequest, executionMode, accountCapital, allocationPct, configuredMicroTotal, capitalAsset);
+            decision = resolveMicroLive(safeRequest, executionMode, accountCapital, allocationPct, targetCapital, capitalAsset);
         } else {
             decision = resolveLive(safeRequest, executionMode, accountCapital, allocationPct, capitalAsset);
         }
@@ -74,19 +78,16 @@ public class CopyBudgetResolver {
                                                        String executionMode,
                                                        BigDecimal accountCapital,
                                                        BigDecimal allocationPct,
-                                                       BigDecimal configuredMicroTotal,
+                                                       BigDecimal targetCapital,
                                                        String capitalAsset) {
-        if (accountCapital.compareTo(BigDecimal.ZERO) <= 0) {
-            return decision(false, executionMode, MICRO_LIVE_FIXED_PER_OPERATION, ZERO, accountCapital, allocationPct,
-                    INSUFFICIENT_BALANCE_FOR_MICRO_LIVE, false, capitalAsset)
-                    .withMicroFields(ZERO, ZERO, ZERO, perOperation(request), openMargin(request), ZERO,
+        if (accountCapital.compareTo(targetCapital) < 0) {
+            return decision(false, executionMode, MICRO_LIVE_FIXED_PER_OPERATION, targetCapital, accountCapital, allocationPct,
+                    INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL, false, capitalAsset)
+                    .withMicroFields(ZERO, ZERO, targetCapital, perOperation(request), openMargin(request), ZERO,
                             maxConcurrent(request), openPositions(request), leverage(request));
         }
 
-        BigDecimal configuredTotal = configuredMicroTotal.compareTo(BigDecimal.ZERO) > 0
-                ? configuredMicroTotal
-                : DEFAULT_MICRO_TOTAL;
-        BigDecimal totalCapital = accountCapital.min(configuredTotal).setScale(SCALE, RoundingMode.HALF_UP);
+        BigDecimal totalCapital = targetCapital.setScale(SCALE, RoundingMode.HALF_UP);
         BigDecimal perOperation = perOperation(request);
         BigDecimal openMarginUsed = openMargin(request);
         BigDecimal remaining = totalCapital.subtract(openMarginUsed).max(BigDecimal.ZERO).setScale(SCALE, RoundingMode.HALF_UP);

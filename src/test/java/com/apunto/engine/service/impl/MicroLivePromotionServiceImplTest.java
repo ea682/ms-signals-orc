@@ -3,7 +3,8 @@ package com.apunto.engine.service.impl;
 import com.apunto.engine.entity.CopyPromotionAuditEntity;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.dto.client.CopyDecisionDto;
-import com.apunto.engine.repository.CopyOperationEventRepository;
+import com.apunto.engine.repository.CopyDispatchIntentRepository;
+import com.apunto.engine.repository.MicroLiveExecutionEvidenceProjection;
 import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
@@ -11,7 +12,15 @@ import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
+import com.apunto.engine.service.copy.readiness.MicroLiveExecutionEvidencePolicy;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationHandler;
@@ -30,6 +39,30 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MicroLivePromotionServiceImplTest {
+
+    @Test
+    void genericRuntimeEventsCannotPromoteWhenNoOrderWasActuallySubmitted() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        LivePromotionProperties properties = properties();
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                allocationRepository(allocation, saved),
+                evidenceRepository(0L, 0L, 0L, 0L, 0L, "0", OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits),
+                properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations()
+        );
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals(0, result.promoted());
+        assertEquals("MICRO_LIVE_NOT_READY_ZERO_SUBMITTED_ORDERS", saved.get().getStatusReason());
+    }
 
     @Test
     void approvedMicroLiveClosesMicroAndCreatesLiveAllocationAndAudits() {
@@ -70,8 +103,8 @@ class MicroLivePromotionServiceImplTest {
 
         assertEquals(1, result.rejected());
         assertEquals("MICRO_LIVE", saved.get().getExecutionMode());
-        assertEquals("MICRO_LIVE_NOT_READY_MIN_ORDERS", saved.get().getStatusReason());
-        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_NOT_READY_MIN_ORDERS".equals(a.getReasonCode())));
+        assertEquals("MICRO_LIVE_NOT_READY_MIN_SUBMITTED_ORDERS", saved.get().getStatusReason());
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_NOT_READY_MIN_SUBMITTED_ORDERS".equals(a.getReasonCode())));
     }
 
     @Test
@@ -85,8 +118,8 @@ class MicroLivePromotionServiceImplTest {
         LivePromotionResult result = service.promoteMicroLiveToLive();
 
         assertEquals(1, result.rejected());
-        assertEquals("MICRO_LIVE_NOT_READY_ERROR_RATE", saved.get().getStatusReason());
-        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_NOT_READY_ERROR_RATE".equals(a.getReasonCode())));
+        assertEquals("MICRO_LIVE_NOT_READY_DISPATCH_ERRORS", saved.get().getStatusReason());
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_NOT_READY_DISPATCH_ERRORS".equals(a.getReasonCode())));
     }
 
     @Test
@@ -146,12 +179,15 @@ class MicroLivePromotionServiceImplTest {
         AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
         List<CopyPromotionAuditEntity> audits = new ArrayList<>();
 
+        LivePromotionProperties properties = properties();
         MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
                 allocationRepository(allocation, existingLive, saved, false),
-                eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
+                evidenceRepository(12L, 12L, 12L, 3L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
                 auditRepository(audits),
-                properties(),
-                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"))
+                properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations()
         );
 
         LivePromotionResult result = service.promoteMicroLiveToLive();
@@ -169,12 +205,15 @@ class MicroLivePromotionServiceImplTest {
         AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
         List<CopyPromotionAuditEntity> audits = new ArrayList<>();
 
+        LivePromotionProperties properties = properties();
         MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
                 allocationRepository(allocation, existingLive, saved, true),
-                eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
+                evidenceRepository(12L, 12L, 12L, 3L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
                 auditRepository(audits),
-                properties(),
-                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"))
+                properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations()
         );
 
         LivePromotionResult result = service.promoteMicroLiveToLive();
@@ -190,12 +229,15 @@ class MicroLivePromotionServiceImplTest {
         List<CopyPromotionAuditEntity> audits = new ArrayList<>();
         CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"));
 
+        LivePromotionProperties properties = properties();
         MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
                 allocationRepository(allocation, saved),
-                eventRepository(1L, 0L, new BigDecimal("1"), OffsetDateTime.now().minusDays(8)),
+                evidenceRepository(1L, 1L, 1L, 1L, 0L, "1", OffsetDateTime.now().minusDays(8)),
                 auditRepository(audits),
-                properties(),
-                gateway
+                properties,
+                gateway,
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations()
         );
 
         LivePromotionResult result = service.promoteMicroLiveToLive();
@@ -211,12 +253,15 @@ class MicroLivePromotionServiceImplTest {
         List<CopyPromotionAuditEntity> audits = new ArrayList<>();
         CapturingCopyDecisionGateway gateway = new CapturingCopyDecisionGateway(fullDecisionBlocked("NEGATIVE_REQUIRED_WINDOW_1MO"));
 
+        LivePromotionProperties properties = properties();
         MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
                 allocationRepository(allocation, saved),
-                eventRepository(12L, 0L, new BigDecimal("7.5"), OffsetDateTime.now().minusDays(8)),
+                evidenceRepository(12L, 12L, 12L, 3L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
                 auditRepository(audits),
-                properties(),
-                gateway
+                properties,
+                gateway,
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations()
         );
 
         LivePromotionResult result = service.promoteMicroLiveToLive();
@@ -237,12 +282,15 @@ class MicroLivePromotionServiceImplTest {
             AtomicReference<UserCopyAllocationEntity> saved,
             List<CopyPromotionAuditEntity> audits
     ) {
+        LivePromotionProperties properties = properties();
         return new MicroLivePromotionServiceImpl(
                 allocationRepository(allocation, saved),
-                eventRepository(events, errors, new BigDecimal(pnl), OffsetDateTime.now().minusDays(days)),
+                evidenceRepository(events, events, events, Math.min(events, 3L), errors, pnl, OffsetDateTime.now().minusDays(days)),
                 auditRepository(audits),
-                properties(),
-                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE"))
+                properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations()
         );
     }
 
@@ -251,6 +299,15 @@ class MicroLivePromotionServiceImplTest {
         properties.setEnabled(true);
         properties.setMinMicroDays(7);
         properties.setMinMicroOrders(2);
+        properties.setMinSubmittedOrders(2);
+        properties.setMinAcknowledgedOrders(2);
+        properties.setMinFilledOrders(2);
+        properties.setMinClosedOperations(1);
+        properties.setMinSlippageSamples(1);
+        properties.setMaxDispatchErrors(0);
+        properties.setMaxReconciliationPending(0);
+        properties.setMaxDuplicateCount(0);
+        properties.setMaxUnresolvedAmbiguousTimeouts(0);
         properties.setMaxErrorRatePct(new BigDecimal("5"));
         properties.setRequirePositiveNetPnl(false);
         properties.setRequireFullDecisionForLive(true);
@@ -399,21 +456,52 @@ class MicroLivePromotionServiceImplTest {
         });
     }
 
-    private static CopyOperationEventRepository eventRepository(
-            long events,
+    private static CopyDispatchIntentRepository evidenceRepository(
+            long submitted,
+            long acknowledged,
+            long filled,
+            long closed,
             long errors,
-            BigDecimal pnl,
-            OffsetDateTime firstEventAt
+            String pnl,
+            OffsetDateTime firstSubmittedAt
     ) {
-        return proxy(CopyOperationEventRepository.class, (method, args) -> {
-            return switch (method.getName()) {
-                case "countRuntimeEventsForAllocation" -> events;
-                case "countRuntimeErrorEventsForAllocation" -> errors;
-                case "sumRuntimeRealizedPnlUsdForAllocation" -> pnl;
-                case "findFirstRuntimeEventTimeForAllocation" -> firstEventAt;
-                default -> unexpected(method);
-            };
+        MicroLiveExecutionEvidenceProjection projection = proxy(MicroLiveExecutionEvidenceProjection.class, (method, args) -> switch (method.getName()) {
+            case "getAllocationId" -> 400L;
+            case "getSubmittedOrders" -> submitted;
+            case "getAcknowledgedOrders" -> acknowledged;
+            case "getFilledOrders" -> filled;
+            case "getClosedOperations" -> closed;
+            case "getDispatchErrors" -> errors;
+            case "getReconciliationPending", "getDuplicateCount", "getUnresolvedAmbiguousTimeouts" -> 0L;
+            case "getSlippageSamples" -> submitted;
+            case "getRealizedPnlUsd" -> new BigDecimal(pnl);
+            case "getMaxDrawdownUsd" -> BigDecimal.ZERO;
+            case "getAdverseSlippageP95Bps" -> new BigDecimal("1");
+            case "getFirstSubmittedAt" -> firstSubmittedAt;
+            default -> unexpected(method);
         });
+        return proxy(CopyDispatchIntentRepository.class, (method, args) -> {
+            if ("findMicroLiveExecutionEvidence".equals(method.getName())) return List.of(projection);
+            return unexpected(method);
+        });
+    }
+
+    private static TransactionOperations transactionOperations() {
+        PlatformTransactionManager manager = new PlatformTransactionManager() {
+            @Override
+            public TransactionStatus getTransaction(TransactionDefinition definition) {
+                return new SimpleTransactionStatus();
+            }
+
+            @Override
+            public void commit(TransactionStatus status) {
+            }
+
+            @Override
+            public void rollback(TransactionStatus status) {
+            }
+        };
+        return new TransactionTemplate(manager);
     }
 
     private static CopyPromotionAuditRepository auditRepository(List<CopyPromotionAuditEntity> audits) {

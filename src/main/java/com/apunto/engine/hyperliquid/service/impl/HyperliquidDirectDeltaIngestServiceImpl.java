@@ -10,6 +10,8 @@ import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.service.HyperliquidDirectCopyDispatchService;
 import com.apunto.engine.service.OperationMovementEventService;
 import com.apunto.engine.service.ShadowCopyTradingService;
+import com.apunto.engine.service.copy.concurrency.PostgresDeadlockRetryExecutor;
+import com.apunto.engine.service.copy.recovery.ShadowEventDeadLetterStore;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.util.CopyTraceIdUtil;
 import com.apunto.engine.shared.util.CopyLogAdvice;
@@ -23,6 +25,7 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -85,6 +88,12 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final AtomicLong shadowWorkerRestarts = new AtomicLong(0);
     private final AtomicLong shadowWorkerStops = new AtomicLong(0);
     private final AtomicLong shadowQueueHighWaterMark = new AtomicLong(0);
+
+    @Autowired(required = false)
+    private PostgresDeadlockRetryExecutor postgresDeadlockRetryExecutor;
+
+    @Autowired(required = false)
+    private ShadowEventDeadLetterStore shadowEventDeadLetterStore;
 
     public HyperliquidDirectDeltaIngestServiceImpl(
             HyperliquidDirectIngestProperties properties,
@@ -500,6 +509,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             }
             return recorded;
         } catch (RuntimeException ex) {
+            if (PostgresDeadlockRetryExecutor.isDeadlock(ex)) {
+                persistRecoverableShadowFailure(mappedDelta, ex);
+            }
             log.warn("event=shadow_ingest_failed idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} reasonCode=SHADOW_INGEST_FAILED copyImpact=LIVE_NOT_BLOCKED errClass={} errMsg=\"{}\" elapsedMs={}",
                     mappedDelta.idempotencyKey(), mappedDelta.positionKey(), mappedDelta.wallet(), mappedDelta.symbol(), mappedDelta.side(), mappedDelta.deltaType(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(startedNs));
             return 0;
@@ -599,7 +611,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mappedDelta = task.mappedDelta();
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", task.traceId())) {
-            int recorded = shadowCopyTradingService.recordShadowEvent(mappedDelta.event(), task.acceptedNs());
+            int recorded = recordShadowWithDeadlockRetry(mappedDelta, task.acceptedNs());
             if (recorded > 0) {
                 shadowRecorded.addAndGet(recorded);
             } else {
@@ -620,9 +632,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     queueDelayMs, elapsedMs, shadowQueueDepth());
         } catch (RuntimeException ex) {
             shadowFailed.incrementAndGet();
+            boolean deadlockExhausted = PostgresDeadlockRetryExecutor.isDeadlock(ex);
+            if (deadlockExhausted) {
+                persistRecoverableShadowFailure(mappedDelta, ex);
+            }
             meterRegistry.timer("signals.copy.shadow.async.worker.duration", Tags.of("result", "error", "deltaType", safeTag(mappedDelta == null ? null : mappedDelta.deltaType())))
                     .record(Duration.ofNanos(System.nanoTime() - startedNs));
-            log.warn("event=shadow_worker_failed reasonCode=SHADOW_WORKER_FAILED workerIndex={} idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={} liveImpact=LIVE_NOT_BLOCKED",
+            log.warn("event=shadow_worker_failed reasonCode={} workerIndex={} idempotencyKey={} positionKey={} walletId={} symbol={} side={} deltaType={} attempt={} result={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={} liveImpact=LIVE_NOT_BLOCKED",
+                    deadlockExhausted ? "SHADOW_DEADLOCK_RETRY_EXHAUSTED" : "SHADOW_WORKER_FAILED",
                     workerIndex,
                     mappedDelta == null ? "NA" : safeLog(mappedDelta.idempotencyKey()),
                     mappedDelta == null ? "NA" : safeLog(mappedDelta.positionKey()),
@@ -630,6 +647,8 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     mappedDelta == null ? "NA" : safeLog(mappedDelta.symbol()),
                     mappedDelta == null ? "NA" : safeLog(mappedDelta.side()),
                     mappedDelta == null ? "NA" : safeLog(mappedDelta.deltaType()),
+                    deadlockExhausted && postgresDeadlockRetryExecutor != null ? postgresDeadlockRetryExecutor.maxAttempts() : 1,
+                    deadlockExhausted ? "RECOVERABLE" : "FAILED",
                     ex.getClass().getSimpleName(),
                     safeLog(ex.getMessage()),
                     elapsedMs(task.acceptedNs()),
@@ -638,6 +657,32 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     ex);
         } finally {
             MDC.remove("traceId");
+        }
+    }
+
+    private int recordShadowWithDeadlockRetry(HyperliquidMappedDelta mappedDelta, long eventReceivedNs) {
+        if (postgresDeadlockRetryExecutor == null) {
+            return shadowCopyTradingService.recordShadowEvent(mappedDelta.event(), eventReceivedNs);
+        }
+        return postgresDeadlockRetryExecutor.execute(
+                "shadow_event",
+                "shadow_copy_allocation",
+                () -> shadowCopyTradingService.recordShadowEvent(mappedDelta.event(), eventReceivedNs)
+        );
+    }
+
+    private void persistRecoverableShadowFailure(HyperliquidMappedDelta mappedDelta, RuntimeException failure) {
+        if (shadowEventDeadLetterStore == null || mappedDelta == null) {
+            log.error("event=shadow_dead_letter_unavailable idempotencyKey={} reasonCode=SHADOW_DEAD_LETTER_STORE_UNAVAILABLE result=NOT_RECOVERABLE",
+                    mappedDelta == null ? "NA" : safeLog(mappedDelta.idempotencyKey()));
+            return;
+        }
+        try {
+            int attempts = postgresDeadlockRetryExecutor == null ? 1 : postgresDeadlockRetryExecutor.maxAttempts();
+            shadowEventDeadLetterStore.recordRecoverable(mappedDelta, failure, attempts);
+        } catch (RuntimeException storeFailure) {
+            log.error("event=shadow_dead_letter_failed idempotencyKey={} reasonCode=SHADOW_DEAD_LETTER_PERSIST_FAILED result=NOT_RECOVERABLE errorClass={} errorMessage=\"{}\"",
+                    safeLog(mappedDelta.idempotencyKey()), storeFailure.getClass().getSimpleName(), safeLog(storeFailure.getMessage()), storeFailure);
         }
     }
 

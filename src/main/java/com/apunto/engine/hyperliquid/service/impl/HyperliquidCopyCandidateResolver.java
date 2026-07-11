@@ -23,6 +23,7 @@ import org.springframework.stereotype.Service;
 import java.time.OffsetDateTime;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -94,6 +95,11 @@ public class HyperliquidCopyCandidateResolver {
         Set<String> activeUserIds = activeCopyOperationCache.activeUserIds(originId);
         List<UserDetailDto> eligible = filterUsersById(usersCached, activeUserIds);
         String reasonCode = eligible.isEmpty() ? ("active_copy_close".equals(source) ? "close_without_open_copy" : "resize_without_open_copy") : "active_copy_users_found";
+        if (eligible.isEmpty()) {
+            meterRegistry.counter("copy.orphan.movement.total",
+                    "type", "active_copy_close".equals(source) ? "close" : "resize",
+                    "reason", metricTag(reasonCode)).increment();
+        }
         String diagnostic = eligible.isEmpty()
                 ? CopyLogAdvice.fields(reasonCode, CopyLogAdvice.context(activeUserIds.size(), eligible.size(), 0, 0, null, null, activeUserIds.size(), source))
                 : "";
@@ -179,9 +185,12 @@ public class HyperliquidCopyCandidateResolver {
 
         List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWalletCachedOnly(walletId);
         Map<String, CopyStrategyGuardDecision> guardByProfile = new HashMap<>();
+        Map<String, Integer> excluded = new LinkedHashMap<>();
         Set<UUID> activeUserIds = new java.util.LinkedHashSet<>();
+        int matchingAllocations = 0;
         for (UserCopyAllocationEntity allocation : activeAllocations) {
             if (allocation == null) {
+                exclude(excluded, "ALLOCATION_MISSING", "unknown");
                 continue;
             }
             log.info("event=copy.candidate.resolve.allocation_seen userCopyAllocationId={} executionMode={} status={} isActive={} endsAt={} strategyCode={}",
@@ -192,12 +201,14 @@ public class HyperliquidCopyCandidateResolver {
                     allocation.getEndsAt(),
                     safeLog(allocation.getCopyStrategyCode()));
             if (!copyStrategyRuntimeRouter.allocationAppliesToEvent(allocation, action, deltaType, side, symbol)) {
+                exclude(excluded, "STRATEGY_SCOPE_NOT_MATCHED", allocation.getExecutionMode());
                 log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode=STRATEGY_SCOPE_NOT_MATCHED",
                         allocation.getId(), safeLog(allocation.getExecutionMode()));
                 continue;
             }
             CopyRuntimeGuardPolicy.Decision guardDecision = guardAllowsNewEntry(allocation, guardByProfile);
             if (!guardDecision.allowed()) {
+                exclude(excluded, guardDecision.reasonCode(), allocation.getExecutionMode());
                 log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode={}",
                         allocation.getId(), safeLog(allocation.getExecutionMode()), safeLog(guardDecision.reasonCode()));
                 continue;
@@ -205,17 +216,25 @@ public class HyperliquidCopyCandidateResolver {
             if (allocation.getIdUser() != null) {
                 activeUserIds.add(allocation.getIdUser());
             }
+            matchingAllocations++;
+            meterRegistry.counter("copy.eligibility.total",
+                    "mode", metricTag(allocation.getExecutionMode()),
+                    "result", "eligible",
+                    "reason", "allowed").increment();
             log.info("event=copy.candidate.resolve.allocation_matched userCopyAllocationId={} executionMode={} reasonCode={}",
                     allocation.getId(), safeLog(allocation.getExecutionMode()), safeLog(guardDecision.reasonCode()));
         }
         if (activeUserIds.isEmpty()) {
-            log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} side={} deltaType={} action={} activeAllocations={} matchingAllocationUsers=0 usersCached={} eligibleUsers=0 fallbackAllUsers={} reasonCode=ALLOCATION_EMPTY {}",
+            String primaryReason = primaryExclusionReason(activeAllocations, excluded);
+            EligibilitySummary summary = new EligibilitySummary(activeAllocations.size(), 0, Map.copyOf(excluded));
+            log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} side={} deltaType={} action={} activeAllocations={} matchingAllocationUsers=0 usersCached={} eligibleUsers=0 fallbackAllUsers={} reasonCode={} eligibilitySummary={} {}",
                     safeLog(walletId), safeLog(side), deltaType, action, activeAllocations.size(), usersCached.size(), fallbackAllUsersOnEmptyAllocation,
-                    CopyLogAdvice.fields("ALLOCATION_EMPTY", CopyLogAdvice.context(activeAllocations.size(), 0, 0, 0, null, null, 0, "allocation")));
+                    primaryReason, summary,
+                    CopyLogAdvice.fields(primaryReason, CopyLogAdvice.context(activeAllocations.size(), 0, 0, 0, null, null, 0, "allocation")));
             log.info("event=copy.candidate.resolve.finished usersCached={} activeAllocations={} eligibleUsers=0 eligibleUserIds= elapsedMs={}",
                     usersCached.size(), activeAllocations.size(), elapsedMs(startedNs));
             List<UserDetailDto> eligible = fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
-            return new CandidateUsers(usersCached, eligible, "allocation_empty", "ALLOCATION_EMPTY");
+            return new CandidateUsers(usersCached, eligible, "allocation_empty", primaryReason, summary);
         }
 
         List<UserDetailDto> eligible = usersCached.stream()
@@ -224,11 +243,40 @@ public class HyperliquidCopyCandidateResolver {
                 .filter(u -> activeUserIds.contains(u.getUser().getId()))
                 .toList();
 
+        int usersMissingFromSnapshot = Math.max(0, activeUserIds.size() - eligible.size());
+        if (usersMissingFromSnapshot > 0) {
+            excluded.merge("USER_NOT_IN_RUNTIME_CACHE", usersMissingFromSnapshot, Integer::sum);
+            meterRegistry.counter("copy.eligibility.total",
+                    "mode", "unknown", "result", "excluded", "reason", "user_not_in_runtime_cache")
+                    .increment(usersMissingFromSnapshot);
+        }
+        EligibilitySummary summary = new EligibilitySummary(activeAllocations.size(), matchingAllocations, Map.copyOf(excluded));
+
         log.info("event=hyperliquid.direct_copy.user_filter source=allocation wallet={} side={} deltaType={} action={} activeAllocations={} matchingHealthyAllocationUsers={} usersCached={} eligibleUsers={} eligibleUserIds={}",
                 safeLog(walletId), safeLog(side), deltaType, action, activeAllocations.size(), activeUserIds.size(), usersCached.size(), eligible.size(), userIdsCsv(eligible));
-        log.info("event=copy.candidate.resolve.finished usersCached={} activeAllocations={} eligibleUsers={} eligibleUserIds={} elapsedMs={}",
-                usersCached.size(), activeAllocations.size(), eligible.size(), userIdsCsv(eligible), elapsedMs(startedNs));
-        return new CandidateUsers(usersCached, eligible, "allocation");
+        log.info("event=copy.candidate.resolve.finished usersCached={} activeAllocations={} eligibleUsers={} eligibleUserIds={} eligibilitySummary={} elapsedMs={}",
+                usersCached.size(), activeAllocations.size(), eligible.size(), userIdsCsv(eligible), summary, elapsedMs(startedNs));
+        String reasonCode = eligible.isEmpty() ? firstReason(excluded, "USER_NOT_IN_RUNTIME_CACHE") : null;
+        return new CandidateUsers(usersCached, eligible, "allocation", reasonCode, summary);
+    }
+
+    private void exclude(Map<String, Integer> excluded, String reasonCode, String executionMode) {
+        String reason = reasonCode == null || reasonCode.isBlank() ? "UNKNOWN_EXCLUSION" : reasonCode;
+        excluded.merge(reason, 1, Integer::sum);
+        meterRegistry.counter("copy.eligibility.total",
+                "mode", metricTag(executionMode),
+                "result", "excluded",
+                "reason", metricTag(reason)).increment();
+    }
+
+    private String primaryExclusionReason(List<UserCopyAllocationEntity> allocations, Map<String, Integer> excluded) {
+        if (allocations == null || allocations.isEmpty()) return "ALLOCATION_EMPTY";
+        return firstReason(excluded, "ALLOCATION_FILTERED");
+    }
+
+    private String firstReason(Map<String, Integer> excluded, String fallback) {
+        if (excluded == null || excluded.isEmpty()) return fallback;
+        return excluded.keySet().iterator().next();
     }
 
     private CopyRuntimeGuardPolicy.Decision guardAllowsNewEntry(UserCopyAllocationEntity allocation, Map<String, CopyStrategyGuardDecision> guardByProfile) {
@@ -247,16 +295,31 @@ public class HyperliquidCopyCandidateResolver {
                 )
         );
         CopyRuntimeGuardPolicy.Decision runtimeDecision = copyRuntimeGuardPolicy.decide(allocation, decision);
+        if ("PROMOTED_FULL_DECISION".equals(runtimeDecision.guardSource()) && decision != null) {
+            meterRegistry.counter("copy.guard.conflict.total",
+                    "stored_source", "promoted_full_decision",
+                    "incoming_source", metricTag(decision.decisionSource())).increment();
+        }
         meterRegistry.timer("copy_runtime_guard_duration",
                         "execution_mode", metricTag(allocation.getExecutionMode()),
                         "result", runtimeDecision.allowed() ? "allowed" : "blocked")
                 .record(System.nanoTime() - startedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
-        log.info("event=copy.guard.decision userCopyAllocationId={} executionMode={} decision={} reasonCode={} guardSource={} elapsedMs={}",
+        meterRegistry.counter("copy.guard.decision.total",
+                "mode", metricTag(allocation.getExecutionMode()),
+                "status", runtimeDecision.allowed() ? "allowed" : "blocked",
+                "source", metricTag(runtimeDecision.guardSource())).increment();
+        log.info("event=copy.guard.decision userCopyAllocationId={} executionMode={} decision={} reasonCode={} guardSource={} decisionVersion={} computedAt={} expiresAt={} decisionFinal={} materializationStatus={} inputFingerprint={} elapsedMs={}",
                 allocation.getId(),
                 safeLog(allocation.getExecutionMode()),
                 runtimeDecision.allowed() ? "ALLOW" : "BLOCK",
                 safeLog(runtimeDecision.reasonCode()),
                 safeLog(runtimeDecision.guardSource()),
+                safeLog(runtimeDecision.decisionVersion()),
+                runtimeDecision.computedAt(),
+                runtimeDecision.expiresAt(),
+                runtimeDecision.decisionFinal(),
+                safeLog(runtimeDecision.materializationStatus()),
+                safeLog(runtimeDecision.inputFingerprint()),
                 elapsedMs(startedNs));
         if (!runtimeDecision.allowed()) {
             log.warn("event=hyperliquid.direct_copy.guard_block allocationId={} userId={} wallet={} strategy={} status={} reason={} detail={} decision=BLOCK reasonCode={} mutation=none hotPathDbWrite=false",
@@ -317,10 +380,23 @@ public class HyperliquidCopyCandidateResolver {
             List<UserDetailDto> usersCached,
             List<UserDetailDto> eligibleUsers,
             String source,
-            String reasonCode
+            String reasonCode,
+            EligibilitySummary eligibilitySummary
     ) {
         public CandidateUsers(List<UserDetailDto> usersCached, List<UserDetailDto> eligibleUsers, String source) {
-            this(usersCached, eligibleUsers, source, null);
+            this(usersCached, eligibleUsers, source, null,
+                    new EligibilitySummary(0, eligibleUsers == null ? 0 : eligibleUsers.size(), Map.of()));
+        }
+
+        public CandidateUsers(List<UserDetailDto> usersCached, List<UserDetailDto> eligibleUsers, String source, String reasonCode) {
+            this(usersCached, eligibleUsers, source, reasonCode,
+                    new EligibilitySummary(0, eligibleUsers == null ? 0 : eligibleUsers.size(), Map.of()));
+        }
+    }
+
+    public record EligibilitySummary(int totalAllocations, int eligibleAllocations, Map<String, Integer> excluded) {
+        public EligibilitySummary {
+            excluded = excluded == null ? Map.of() : Map.copyOf(excluded);
         }
     }
 }

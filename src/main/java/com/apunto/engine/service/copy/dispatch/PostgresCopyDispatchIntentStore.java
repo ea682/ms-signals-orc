@@ -8,6 +8,7 @@ import com.apunto.engine.shared.exception.SkipExecutionException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.annotation.PostConstruct;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -29,6 +30,9 @@ import java.util.UUID;
 public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
+    private static final BigDecimal FIXED_MICRO_LIVE_TOTAL_USD = new BigDecimal("100");
+    private static final BigDecimal FIXED_MICRO_LIVE_OPERATION_USD = new BigDecimal("20");
+    private static final int FIXED_MICRO_LIVE_POSITIONS = 5;
     private final CopyDispatchIntentRepository repository;
     private final EntityManager entityManager;
     private final ObjectMapper objectMapper;
@@ -41,18 +45,37 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
     @Value("${copy.micro-live.max-concurrent-positions:5}")
     private int maxConcurrentPositions;
 
+    @PostConstruct
+    void validateFixedMicroLiveLimits() {
+        requireFixedMicroLiveLimits(maxTotalMarginUsd, maxMarginPerOrderUsd, maxConcurrentPositions);
+    }
+
+    static void requireFixedMicroLiveLimits(BigDecimal totalMarginUsd,
+                                            BigDecimal marginPerOperationUsd,
+                                            int concurrentPositions) {
+        if (totalMarginUsd == null || totalMarginUsd.compareTo(FIXED_MICRO_LIVE_TOTAL_USD) != 0
+                || marginPerOperationUsd == null || marginPerOperationUsd.compareTo(FIXED_MICRO_LIVE_OPERATION_USD) != 0
+                || concurrentPositions != FIXED_MICRO_LIVE_POSITIONS) {
+            throw new IllegalStateException(
+                    "MICRO_LIVE limits must be exactly total=100 USDC, perOperation=20 USDC, positions=5");
+        }
+    }
+
     @Override
     @Transactional
     public CopyDispatchPermit acquire(CopyDispatchRequest request) {
         long started = System.nanoTime();
         validate(request);
         CopyDispatchIdentity identity = request.identity();
-        lockBudget(identity);
+        boolean requiresMicroLiveBudget = requiresMicroLiveBudgetLock(request);
+        if (requiresMicroLiveBudget) {
+            lockBudget(request);
+        }
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         UUID candidateId = UUID.randomUUID();
         int inserted = repository.insertIfAbsent(
                 candidateId, request.idempotencyKey(), identity.userId(), identity.userCopyAllocationId(),
-                realMode(identity.executionMode()), trim(request.walletId(), 180), trim(identity.strategyCode(), 64),
+                realMode(identity.executionMode()), trim(normalizedWalletId(request.walletId()), 180), trim(identity.strategyCode(), 64),
                 trim(identity.scopeType(), 32), trim(identity.scopeValue(), 180), trim(identity.sourceEventId(), 600),
                 trim(request.operation().getOriginId(), 120), trim(request.sourceEventType(), 40),
                 trim(identity.copyIntent(), 40), trim(request.symbol(), 40), trim(request.side(), 12),
@@ -71,12 +94,13 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
             return duplicatePermit(intent, request);
         }
 
-        if ("MICRO_LIVE".equals(realMode(identity.executionMode()))) {
-            BudgetSnapshot snapshot = budgetSnapshot(identity);
+        if (requiresMicroLiveBudget) {
+            BudgetSnapshot snapshot = budgetSnapshot(request);
             MicroLiveBudgetPolicy policy = new MicroLiveBudgetPolicy(maxMarginPerOrderUsd, maxTotalMarginUsd, maxConcurrentPositions);
             BudgetDecision decision = policy.evaluate(snapshot, request.requestedMarginUsd(), request.reservePosition());
-            log.info("event=copy.budget.reserved userCopyAllocationId={} executionMode=MICRO_LIVE limitMarginUsd={} usedMarginUsd={} reservedMarginUsd={} requestedMarginUsd={} openPositions={} reservedPositions={} projectedMarginUsd={} projectedPositions={} allowed={}",
-                    identity.userCopyAllocationId(), maxTotalMarginUsd, snapshot.usedMarginUsd(),
+            log.info("event=copy.budget.reserved userId={} walletId={} userCopyAllocationId={} executionMode=MICRO_LIVE limitMarginUsd={} usedMarginUsd={} reservedMarginUsd={} requestedMarginUsd={} openPositions={} reservedPositions={} projectedMarginUsd={} projectedPositions={} allowed={}",
+                    identity.userId(), normalizedWalletId(request.walletId()), identity.userCopyAllocationId(),
+                    maxTotalMarginUsd, snapshot.usedMarginUsd(),
                     snapshot.reservedPendingMarginUsd(), request.requestedMarginUsd(), snapshot.openPositions(),
                     snapshot.reservedPositions(), decision.projectedMarginUsd(), decision.projectedPositions(), decision.allowed());
             if (!decision.allowed()) {
@@ -290,7 +314,10 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
             return CopyDispatchPermit.noop(intent.getId(), status);
         }
         if (List.of("REJECTED", "FAILED_FINAL", "CANCELLED", "MANUAL_REVIEW").contains(status)) {
-            return CopyDispatchPermit.rejected(intent.getId(), status);
+            String durableStatus = intent.getLastErrorCode() == null || intent.getLastErrorCode().isBlank()
+                    ? status
+                    : "REJECTED:" + intent.getLastErrorCode();
+            return CopyDispatchPermit.rejected(intent.getId(), durableStatus);
         }
         if (intent.getBinanceOrderId() != null && List.of("NEW", "PARTIALLY_FILLED", "FILLED", "PERSISTENCE_PENDING", "PERSISTED").contains(status)) {
             return CopyDispatchPermit.reuse(intent.getId(), response(intent), status);
@@ -324,9 +351,10 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         return response;
     }
 
-    private BudgetSnapshot budgetSnapshot(CopyDispatchIdentity identity) {
+    private BudgetSnapshot budgetSnapshot(CopyDispatchRequest request) {
+        CopyDispatchIdentity identity = request.identity();
         CopyBudgetSnapshotProjection snapshot = repository.loadBudgetSnapshot(
-                identity.userId(), identity.userCopyAllocationId(), realMode(identity.executionMode()));
+                identity.userId(), normalizedWalletId(request.walletId()), realMode(identity.executionMode()));
         if (snapshot == null) return BudgetSnapshot.empty();
         return new BudgetSnapshot(
                 nonNegative(snapshot.getUsedMarginUsd()),
@@ -349,11 +377,22 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         }
     }
 
-    private void lockBudget(CopyDispatchIdentity identity) {
-        String key = identity.userId() + '|' + identity.userCopyAllocationId() + '|' + realMode(identity.executionMode());
+    private void lockBudget(CopyDispatchRequest request) {
+        CopyDispatchIdentity identity = request.identity();
+        String mode = realMode(identity.executionMode());
+        String budgetOwner = "MICRO_LIVE".equals(mode)
+                ? normalizedWalletId(request.walletId())
+                : String.valueOf(identity.userCopyAllocationId());
+        String key = identity.userId() + '|' + budgetOwner + '|' + mode;
         entityManager.createNativeQuery("select pg_advisory_xact_lock(hashtextextended(cast(:lockKey as text), 0))")
                 .setParameter("lockKey", key)
                 .getSingleResult();
+    }
+
+    private boolean requiresMicroLiveBudgetLock(CopyDispatchRequest request) {
+        return request != null && request.identity() != null
+                && "MICRO_LIVE".equals(realMode(request.identity().executionMode()))
+                && !request.reduceOnly();
     }
 
     private CopyDispatchIntentEntity required(UUID id) {
@@ -364,7 +403,21 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         if (request == null || request.identity() == null) throw new IllegalArgumentException("copy dispatch request is required");
         if (request.identity().userId() == null || request.identity().userId().isBlank()) throw new IllegalArgumentException("userId is required");
         if (request.identity().userCopyAllocationId() == null) throw new SkipExecutionException("COPY_ALLOCATION_REQUIRED_FOR_REAL_DISPATCH", "Allocation durable requerida para MICRO_LIVE/LIVE", null);
+        if ("MICRO_LIVE".equals(realMode(request.identity().executionMode()))
+                && (request.walletId() == null || request.walletId().isBlank())) {
+            throw new SkipExecutionException("COPY_WALLET_REQUIRED_FOR_MICRO_LIVE_BUDGET",
+                    "Wallet durable requerida para reservar el presupuesto MICRO_LIVE", null);
+        }
+        String normalizedWallet = normalizedWalletId(request.walletId());
+        if (normalizedWallet != null && normalizedWallet.length() > 180) {
+            throw new SkipExecutionException("COPY_WALLET_ID_TOO_LONG",
+                    "Wallet excede el largo durable maximo de 180 caracteres", null);
+        }
         if (request.operation() == null || request.operation().getClientOrderId() == null || request.operation().getClientOrderId().isBlank()) throw new IllegalArgumentException("clientOrderId is required");
+    }
+
+    private String normalizedWalletId(String walletId) {
+        return walletId == null ? null : walletId.trim().toLowerCase(Locale.ROOT);
     }
 
     private String snapshot(BinanceFuturesOrderClientResponse response) {

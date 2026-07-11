@@ -4,6 +4,8 @@ import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.Arrays;
 import java.util.LinkedHashSet;
@@ -12,6 +14,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 @Component
+@Slf4j
 public class CopyRealExecutionGate {
 
     @Value("${copy.new-dispatch.enabled:false}")
@@ -34,6 +37,15 @@ public class CopyRealExecutionGate {
     private String liveWhitelistAllocationIds;
     @Value("${copy.live.whitelist.strategy-codes:}")
     private String liveWhitelistStrategyCodes;
+
+    @PostConstruct
+    void logEffectiveConfiguration() {
+        log.info("event=copy.real_execution_gate.config newDispatchEnabled={} microLiveEnabled={} liveEnabled={} liveDryRun={} liveCanaryEnabled={} whitelistUsers={} whitelistWallets={} whitelistSymbols={} whitelistAllocations={} whitelistStrategies={} reasonCode=EFFECTIVE_COPY_SWITCHES",
+                newDispatchEnabled, microLiveEnabled, liveEnabled, liveDryRun, liveCanaryEnabled,
+                parseWhitelist(liveWhitelistUserIds).size(), parseWhitelist(liveWhitelistWalletIds).size(),
+                parseWhitelist(liveWhitelistSymbols).size(), parseWhitelist(liveWhitelistAllocationIds).size(),
+                parseWhitelist(liveWhitelistStrategyCodes).size());
+    }
 
     public Decision evaluate(OperationDto operation, UserCopyAllocationEntity allocation) {
         String mode = executionMode(allocation);

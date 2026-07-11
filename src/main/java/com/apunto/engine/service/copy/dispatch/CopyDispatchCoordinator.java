@@ -53,16 +53,19 @@ public class CopyDispatchCoordinator {
         CopyDispatchPermit permit = intentStore.acquire(request);
 
         if (permit.decision() == CopyDispatchPermit.Decision.REUSE_ACKNOWLEDGED) {
+            recordDispatch(request, "reused");
             log.info("event=copy.dispatch.intent.duplicate idempotencyKey={} existingIntentId={} existingStatus={} decision=NOOP_REUSE_ACK",
                     request.idempotencyKey(), permit.intentId(), permit.existingStatus());
             return permit.knownResponse();
         }
         if (permit.decision() == CopyDispatchPermit.Decision.RECONCILE_EXISTING) {
+            recordDispatch(request, "reconcile");
             log.warn("event=copy.dispatch.intent.duplicate idempotencyKey={} existingIntentId={} existingStatus={} decision=RECONCILE_EXISTING",
                     request.idempotencyKey(), permit.intentId(), permit.existingStatus());
             throw reconciliationPending(permit.intentId(), request, "existing_intent_not_terminal", null);
         }
         if (permit.decision() == CopyDispatchPermit.Decision.CONFLICT) {
+            recordDispatch(request, "conflict");
             log.error("event=copy.dispatch.intent.conflict idempotencyKey={} existingIntentId={} existingStatus={} decision=BLOCK_PAYLOAD_MISMATCH",
                     request.idempotencyKey(), permit.intentId(), permit.existingStatus());
             throw new SkipExecutionException("COPY_IDEMPOTENCY_PAYLOAD_MISMATCH",
@@ -70,6 +73,7 @@ public class CopyDispatchCoordinator {
                     LogFmt.kv("dispatchIntentId", permit.intentId(), "status", permit.existingStatus()));
         }
         if (permit.decision() == CopyDispatchPermit.Decision.NOOP_PERSISTED) {
+            recordDispatch(request, "noop");
             log.info("event=copy.dispatch.intent.duplicate idempotencyKey={} existingIntentId={} existingStatus={} decision=NOOP_ALREADY_APPLIED",
                     request.idempotencyKey(), permit.intentId(), permit.existingStatus());
             throw new SkipExecutionException("COPY_DISPATCH_ALREADY_APPLIED_NOOP",
@@ -77,7 +81,9 @@ public class CopyDispatchCoordinator {
                     LogFmt.kv("dispatchIntentId", permit.intentId(), "status", permit.existingStatus()));
         }
         if (permit.decision() == CopyDispatchPermit.Decision.REJECTED) {
-            throw new SkipExecutionException("COPY_DISPATCH_ALREADY_REJECTED",
+            recordDispatch(request, "rejected");
+            String reasonCode = durableRejectionReason(permit.existingStatus());
+            throw new SkipExecutionException(reasonCode,
                     "La intencion ya fue rechazada y no puede reenviarse",
                     LogFmt.kv("dispatchIntentId", permit.intentId(), "status", permit.existingStatus()));
         }
@@ -90,6 +96,11 @@ public class CopyDispatchCoordinator {
                             "operation_type", metricTag(request.identity().copyIntent()),
                             "result", "authorized")
                     .record(System.nanoTime() - dispatchStartedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+            meterRegistry.timer("copy.hot.path.duration",
+                            "stage", "pre_network",
+                            "mode", metricTag(request.identity().executionMode()),
+                            "result", "authorized")
+                    .record(System.nanoTime() - dispatchStartedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
             long engineStartedNs = System.nanoTime();
             BinanceFuturesOrderClientResponse response;
             String engineResult = "completed";
@@ -99,11 +110,17 @@ public class CopyDispatchCoordinator {
                 engineResult = "error";
                 throw ex;
             } finally {
+                long engineElapsedNs = System.nanoTime() - engineStartedNs;
                 meterRegistry.timer("copy_binance_engine_duration",
                                 "execution_mode", metricTag(request.identity().executionMode()),
                                 "operation_type", metricTag(request.identity().copyIntent()),
                                 "result", engineResult)
-                        .record(System.nanoTime() - engineStartedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+                        .record(engineElapsedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+                meterRegistry.timer("copy.hot.path.duration",
+                                "stage", "binance_adapter",
+                                "mode", metricTag(request.identity().executionMode()),
+                                "result", engineResult)
+                        .record(engineElapsedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
             }
             NormalizedBinanceExecution execution = normalizer.normalize(response);
             log.info("event=copy.dispatch.response.normalized dispatchIntentId={} orderId={} clientOrderId={} status={} executedQty={} avgPrice={} avgPriceStatus={} accepted={} requiresReconciliation={} safeToRetrySend={}",
@@ -119,21 +136,26 @@ public class CopyDispatchCoordinator {
             }
             if (!execution.accepted()) {
                 intentStore.markAmbiguous(permit.intentId(), "BINANCE_RESPONSE_AMBIGUOUS", execution.executionState().name());
+                recordDispatch(request, "ambiguous");
                 throw reconciliationPending(permit.intentId(), request, "binance_response_ambiguous", null);
             }
             annotateResponse(response, execution, permit.intentId(), request);
 
             intentStore.acknowledge(permit.intentId(), execution, response);
             if (execution.executionState() == CopyExecutionState.NEW) {
+                recordDispatch(request, "reconcile");
                 throw reconciliationPending(permit.intentId(), request, "binance_order_acknowledged_not_filled", null);
             }
+            recordDispatch(request, "accepted");
             return response;
         } catch (CopyDispatchReconciliationPendingException pending) {
             throw pending;
         } catch (CopyOrderRejectedException | BinanceApiReadinessException rejected) {
+            recordDispatch(request, "rejected");
             intentStore.markRejected(permit.intentId(), rejected.getClass().getSimpleName(), safe(rejected.getMessage()));
             throw rejected;
         } catch (SkipExecutionException rejectedBeforeSend) {
+            recordDispatch(request, "rejected");
             intentStore.markRejected(permit.intentId(), rejectedBeforeSend.getReasonCode(), safe(rejectedBeforeSend.getMessage()));
             throw rejectedBeforeSend;
         } catch (RuntimeException ambiguous) {
@@ -142,6 +164,7 @@ public class CopyDispatchCoordinator {
             // The order may already exist at Binance. Move the intent to RECONCILING and
             // query by orderId/clientOrderId. Never resend until non-existence is confirmed.
             intentStore.markAmbiguous(permit.intentId(), "BINANCE_OUTCOME_AMBIGUOUS", safe(ambiguous.getMessage()));
+            recordDispatch(request, "ambiguous");
             log.warn("event=copy.dispatch.ambiguous dispatchIntentId={} reasonCode=BINANCE_OUTCOME_AMBIGUOUS decision=RECONCILE_NOT_RESEND errClass={} errMsg=\"{}\"",
                     permit.intentId(), ambiguous.getClass().getSimpleName(), safe(ambiguous.getMessage()));
             throw reconciliationPending(permit.intentId(), request, "binance_outcome_ambiguous", ambiguous);
@@ -337,6 +360,21 @@ public class CopyDispatchCoordinator {
         if (value == null) return "";
         String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').replace('"', '\'');
         return clean.length() > 500 ? clean.substring(0, 500) : clean;
+    }
+
+    private String durableRejectionReason(String status) {
+        String prefix = "REJECTED:";
+        if (status != null && status.startsWith(prefix) && status.length() > prefix.length()) {
+            return status.substring(prefix.length());
+        }
+        return "COPY_DISPATCH_ALREADY_REJECTED";
+    }
+
+    private void recordDispatch(CopyDispatchRequest request, String result) {
+        String mode = request == null || request.identity() == null
+                ? "unknown"
+                : metricTag(request.identity().executionMode());
+        meterRegistry.counter("copy.dispatch.total", "mode", mode, "result", metricTag(result)).increment();
     }
 
     private String metricTag(String value) {

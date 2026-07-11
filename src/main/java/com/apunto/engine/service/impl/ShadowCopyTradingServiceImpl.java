@@ -232,6 +232,10 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                         .reversed())
                 .toList();
 
+        lockShadowProfileMutations(relevant.stream()
+                .map(dto -> strategyKey(walletId(dto), strategyCode(dto), scopeType(dto), scopeValue(dto, strategyCode(dto))))
+                .toList());
+
         Set<String> activeKeys = new HashSet<>();
         int created = 0;
         int updated = 0;
@@ -365,6 +369,10 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             return;
         }
         OffsetDateTime now = OffsetDateTime.now();
+        lockShadowProfileMutations(liveAllocations.stream()
+                .filter(Objects::nonNull)
+                .map(live -> strategyKey(live.getWalletId(), live.getCopyStrategyCode(), live.getScopeType(), live.getScopeValue()))
+                .toList());
         for (UserCopyAllocationEntity live : liveAllocations) {
             if (live == null || live.getId() == null || live.getWalletId() == null) {
                 continue;
@@ -564,6 +572,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                     originId, walletId, operation.getParSymbol(), side, action, deltaType);
             return 0;
         }
+        lockShadowProfileMutations(allocations.stream().map(this::shadowMutationKey).toList());
 
         int recorded = 0;
         int filtered = 0;
@@ -625,6 +634,26 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 allocation.getScopeType(),
                 allocation.getScopeValue()
         );
+    }
+
+    private String shadowMutationKey(ShadowCopyAllocationEntity allocation) {
+        if (allocation == null) return null;
+        if (allocation.getStrategyKey() != null && !allocation.getStrategyKey().isBlank()) {
+            return allocation.getStrategyKey();
+        }
+        return strategyKey(allocation.getWalletId(), allocation.getCopyStrategyCode(),
+                allocation.getScopeType(), allocation.getScopeValue());
+    }
+
+    private void lockShadowProfileMutations(List<String> rawKeys) {
+        if (rawKeys == null || rawKeys.isEmpty()) return;
+        rawKeys.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(key -> !key.isBlank())
+                .distinct()
+                .sorted()
+                .forEach(key -> shadowEventRepository.lockShadowProfileMutation("shadow-profile:" + key));
     }
 
     private String profileFilterReason(String strategyCode, String scopeValue, CopyJobAction action, HyperliquidDeltaType deltaType, String side, String symbol) {
