@@ -24,24 +24,29 @@ public class CopyRuntimeGuardPolicy {
         if (metricGuard == null) {
             return Decision.allow("RUNTIME_GUARD_NOT_AVAILABLE", "runtime_allocation");
         }
+        if (isRealRisk(metricGuard, executionMode)) {
+            return Decision.fromGuard(false, reasonCode(metricGuard, "RUNTIME_GUARD_BLOCKED"), metricGuard);
+        }
         if (isShadowOnlyGuard(metricGuard)) {
             if ("MICRO_LIVE".equals(executionMode) && isPromotedFromShadow(allocation)) {
-                return Decision.allow("MICRO_LIVE_PROMOTED_ALLOCATION_SHOULD_NOT_BE_BLOCKED_BY_SHADOW_ONLY", "runtime_allocation");
+                return Decision.promoted(
+                        "MICRO_LIVE_PROMOTED_ALLOCATION_SHOULD_NOT_BE_BLOCKED_BY_SHADOW_ONLY",
+                        allocation
+                );
             }
             if ("LIVE".equals(executionMode) && isPromotedFromRealFlow(allocation)) {
-                return Decision.allow("LIVE_PROMOTED_ALLOCATION_SHOULD_NOT_BE_BLOCKED_BY_SHADOW_ONLY", "runtime_allocation");
+                return Decision.promoted(
+                        "LIVE_PROMOTED_ALLOCATION_SHOULD_NOT_BE_BLOCKED_BY_SHADOW_ONLY",
+                        allocation
+                );
             }
-            return Decision.block(reasonCode(metricGuard, "SUMMARY_NOT_FINAL_LIVE_BLOCKED"), "metric_guard");
-        }
-
-        if (isRealRisk(metricGuard, executionMode)) {
-            return Decision.block(reasonCode(metricGuard, "RUNTIME_GUARD_BLOCKED"), "metric_guard");
+            return Decision.fromGuard(false, reasonCode(metricGuard, "SUMMARY_NOT_FINAL_LIVE_BLOCKED"), metricGuard);
         }
 
         if (!metricGuard.allowed()) {
-            return Decision.block(reasonCode(metricGuard, "RUNTIME_GUARD_BLOCKED"), "metric_guard");
+            return Decision.fromGuard(false, reasonCode(metricGuard, "RUNTIME_GUARD_BLOCKED"), metricGuard);
         }
-        return Decision.allow(reasonCode(metricGuard, "OK"), "metric_guard");
+        return Decision.fromGuard(true, reasonCode(metricGuard, "OK"), metricGuard);
     }
 
     private static boolean isPromotedFromShadow(UserCopyAllocationEntity allocation) {
@@ -63,14 +68,15 @@ public class CopyRuntimeGuardPolicy {
     private static boolean isRealRisk(CopyStrategyGuardDecision guard, String executionMode) {
         String token = normalizedTokens(guard);
         if (token.contains("DATA_RISK_CRITICAL")
+                || token.contains("NEGATIVE_REQUIRED_WINDOW")
+                || token.contains("SHADOW_REVALIDATION")
                 || token.contains("MANUAL_PAUSE")
                 || token.contains("USER_DISABLED")
                 || token.contains("CAPITAL_MISSING")
                 || token.contains("SYMBOL_UNAVAILABLE")
                 || token.contains("MICRO_LIVE_REQUIRED_REENTRY")
                 || token.contains("MANUAL_REVIEW")
-                || token.contains("DISABLED")
-                || token.contains("BLOCKED")) {
+                || token.contains("DISABLED")) {
             return true;
         }
         return "LIVE".equals(executionMode) && token.contains("SOURCE_EXPOSURE_DATA_MISSING");
@@ -117,13 +123,57 @@ public class CopyRuntimeGuardPolicy {
         return value.trim().toUpperCase(Locale.ROOT).replace('-', '_');
     }
 
-    public record Decision(boolean allowed, String reasonCode, String guardSource) {
+    public record Decision(
+            boolean allowed,
+            String reasonCode,
+            String guardSource,
+            String decisionVersion,
+            OffsetDateTime computedAt,
+            OffsetDateTime expiresAt,
+            boolean decisionFinal,
+            String materializationStatus,
+            String inputFingerprint
+    ) {
+        public Decision(boolean allowed, String reasonCode, String guardSource) {
+            this(allowed, reasonCode, guardSource, null, null, null, false, "NOT_MATERIALIZED", null);
+        }
+
         private static Decision allow(String reasonCode, String guardSource) {
             return new Decision(true, reasonCode, guardSource);
         }
 
         private static Decision block(String reasonCode, String guardSource) {
             return new Decision(false, reasonCode, guardSource);
+        }
+
+        private static Decision fromGuard(boolean allowed, String reasonCode, CopyStrategyGuardDecision guard) {
+            String source = firstNonBlank(guard == null ? null : guard.decisionSource(), "METRIC_GUARD");
+            return new Decision(
+                    allowed,
+                    reasonCode,
+                    source,
+                    guard == null ? null : guard.decisionVersion(),
+                    guard == null ? null : guard.computedAt(),
+                    guard == null ? null : guard.expiresAt(),
+                    guard != null && guard.decisionFinal(),
+                    firstNonBlank(guard == null ? null : guard.materializationStatus(), "NOT_MATERIALIZED"),
+                    guard == null ? null : guard.inputFingerprint()
+            );
+        }
+
+        private static Decision promoted(String reasonCode, UserCopyAllocationEntity allocation) {
+            OffsetDateTime promotedAt = allocation == null ? null : allocation.getPromotedFromShadowAt();
+            String version = allocation == null ? null : firstNonBlank(
+                    allocation.getSourceRankingVersion(),
+                    allocation.getLinkedShadowAllocationId() == null ? null : "shadow-allocation:" + allocation.getLinkedShadowAllocationId()
+            );
+            String fingerprint = allocation == null ? null : String.join("|",
+                    String.valueOf(allocation.getLinkedShadowAllocationId()),
+                    String.valueOf(promotedAt),
+                    nullToEmpty(allocation.getStrategyKey())
+            );
+            return new Decision(true, reasonCode, "PROMOTED_FULL_DECISION", version, promotedAt, null,
+                    true, "FULL_MATERIALIZED_AT_PROMOTION", fingerprint);
         }
     }
 }

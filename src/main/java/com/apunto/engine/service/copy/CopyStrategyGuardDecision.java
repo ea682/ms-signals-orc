@@ -1,5 +1,7 @@
 package com.apunto.engine.service.copy;
 
+import java.time.OffsetDateTime;
+
 public record CopyStrategyGuardDecision(
         boolean allowed,
         String reason,
@@ -7,8 +9,40 @@ public record CopyStrategyGuardDecision(
         String statusWhenBlocked,
         String action,
         double capitalMultiplier,
-        String targetExecutionMode
+        String targetExecutionMode,
+        String decisionSource,
+        String decisionVersion,
+        OffsetDateTime computedAt,
+        OffsetDateTime expiresAt,
+        boolean decisionFinal,
+        String materializationStatus,
+        String inputFingerprint
 ) {
+    public CopyStrategyGuardDecision(boolean allowed,
+                                     String reason,
+                                     String detail,
+                                     String statusWhenBlocked,
+                                     String action,
+                                     double capitalMultiplier,
+                                     String targetExecutionMode) {
+        this(allowed, reason, detail, statusWhenBlocked, action, capitalMultiplier, targetExecutionMode,
+                "UNSPECIFIED", null, null, null, false, "NOT_MATERIALIZED", null);
+    }
+
+    public CopyStrategyGuardDecision withMetadata(String decisionSource,
+                                                  String decisionVersion,
+                                                  OffsetDateTime computedAt,
+                                                  OffsetDateTime expiresAt,
+                                                  boolean decisionFinal,
+                                                  String materializationStatus,
+                                                  String inputFingerprint) {
+        return new CopyStrategyGuardDecision(
+                allowed, reason, detail, statusWhenBlocked, action, capitalMultiplier, targetExecutionMode,
+                decisionSource, decisionVersion, computedAt, expiresAt, decisionFinal,
+                materializationStatus, inputFingerprint
+        );
+    }
+
     public static CopyStrategyGuardDecision allow() {
         return new CopyStrategyGuardDecision(true, "OK", "", null, "ALLOW", 1.0, "KEEP");
     }

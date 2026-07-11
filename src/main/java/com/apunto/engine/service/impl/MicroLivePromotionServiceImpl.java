@@ -3,7 +3,8 @@ package com.apunto.engine.service.impl;
 import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.entity.CopyPromotionAuditEntity;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
-import com.apunto.engine.repository.CopyOperationEventRepository;
+import com.apunto.engine.repository.CopyDispatchIntentRepository;
+import com.apunto.engine.repository.MicroLiveExecutionEvidenceProjection;
 import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.MicroLivePromotionService;
@@ -13,11 +14,16 @@ import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver.CopyModeResolution;
-import lombok.RequiredArgsConstructor;
+import com.apunto.engine.service.copy.readiness.MicroLiveExecutionEvidence;
+import com.apunto.engine.service.copy.readiness.MicroLiveExecutionEvidencePolicy;
+import com.apunto.engine.service.copy.readiness.MicroLiveReadinessDecision;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionOperations;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -28,23 +34,53 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class MicroLivePromotionServiceImpl implements MicroLivePromotionService {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal HUNDRED = new BigDecimal("100");
 
     private final UserCopyAllocationRepository allocationRepository;
-    private final CopyOperationEventRepository eventRepository;
+    private final CopyDispatchIntentRepository dispatchIntentRepository;
     private final CopyPromotionAuditRepository auditRepository;
     private final LivePromotionProperties properties;
     private final CopyDecisionGateway copyDecisionGateway;
+    private final MicroLiveExecutionEvidencePolicy executionEvidencePolicy;
+    private final TransactionOperations transactionOperations;
+
+    @Autowired
+    public MicroLivePromotionServiceImpl(UserCopyAllocationRepository allocationRepository,
+                                         CopyDispatchIntentRepository dispatchIntentRepository,
+                                         CopyPromotionAuditRepository auditRepository,
+                                         LivePromotionProperties properties,
+                                         CopyDecisionGateway copyDecisionGateway,
+                                         MicroLiveExecutionEvidencePolicy executionEvidencePolicy,
+                                         PlatformTransactionManager transactionManager) {
+        this(allocationRepository, dispatchIntentRepository, auditRepository, properties, copyDecisionGateway,
+                executionEvidencePolicy, new TransactionTemplate(transactionManager));
+    }
+
+    MicroLivePromotionServiceImpl(UserCopyAllocationRepository allocationRepository,
+                                  CopyDispatchIntentRepository dispatchIntentRepository,
+                                  CopyPromotionAuditRepository auditRepository,
+                                  LivePromotionProperties properties,
+                                  CopyDecisionGateway copyDecisionGateway,
+                                  MicroLiveExecutionEvidencePolicy executionEvidencePolicy,
+                                  TransactionOperations transactionOperations) {
+        this.allocationRepository = allocationRepository;
+        this.dispatchIntentRepository = dispatchIntentRepository;
+        this.auditRepository = auditRepository;
+        this.properties = properties;
+        this.copyDecisionGateway = copyDecisionGateway;
+        this.executionEvidencePolicy = executionEvidencePolicy;
+        this.transactionOperations = transactionOperations;
+    }
 
     @Override
-    @Transactional
     public LivePromotionResult promoteMicroLiveToLive() {
         if (properties == null || !properties.isEnabled()) {
             log.info("event=copy.promotion.micro_to_live.skipped reason=PROMOTION_DISABLED");
@@ -65,6 +101,7 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
         int rejected = 0;
         int skipped = 0;
         OffsetDateTime now = OffsetDateTime.now();
+        Map<Long, MicroLiveExecutionEvidence> executionEvidence = loadExecutionEvidence(candidates, now);
         log.info("event=copy.promotion.micro_to_live.started candidates={}", candidates.size());
 
         for (UserCopyAllocationEntity allocation : candidates) {
@@ -74,11 +111,13 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             }
             evaluated++;
             try {
-                LiveDecision decision = evaluate(allocation, now);
-                audit(allocation, decision, "MICRO_LIVE_EVALUATED");
+                LiveDecision decision = evaluate(allocation, now, executionEvidence.get(allocation.getId()));
                 if (!decision.allowed() && "LIVE_ALLOCATION_ALREADY_EXISTS".equals(decision.reasonCode())) {
                     skipped++;
-                    audit(allocation, decision, "MICRO_LIVE_PROMOTION_NOOP");
+                    inTransaction(() -> {
+                        audit(allocation, decision, "MICRO_LIVE_EVALUATED");
+                        audit(allocation, decision, "MICRO_LIVE_PROMOTION_NOOP");
+                    });
                     log.info(
                             "event=copy.promotion.micro_to_live.noop userId={} walletId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=LIVE decision=NOOP reasonCode={}",
                             allocation.getIdUser(),
@@ -95,11 +134,14 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 }
                 if (!decision.allowed()) {
                     rejected++;
-                    allocation.setStatusReason(decision.reasonCode());
-                    allocation.setStatusUpdatedAt(now);
-                    allocation.setUpdatedAt(now);
-                    allocationRepository.save(allocation);
-                    audit(allocation, decision, "MICRO_LIVE_PROMOTION_REJECTED");
+                    inTransaction(() -> {
+                        allocation.setStatusReason(decision.reasonCode());
+                        allocation.setStatusUpdatedAt(now);
+                        allocation.setUpdatedAt(now);
+                        allocationRepository.save(allocation);
+                        audit(allocation, decision, "MICRO_LIVE_EVALUATED");
+                        audit(allocation, decision, "MICRO_LIVE_PROMOTION_REJECTED");
+                    });
                     log.info(
                             "event=copy.promotion.micro_to_live.rejected userId={} walletId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=MICRO_LIVE decision=REJECT reasonCode={} details={}",
                             allocation.getIdUser(),
@@ -117,17 +159,22 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 }
 
                 ready++;
-                allocation.setStatus(UserCopyAllocationEntity.Status.CLOSED);
-                allocation.setActive(false);
-                allocation.setStatusReason("PROMOTED_MICRO_TO_LIVE_CLOSED");
-                allocation.setStatusUpdatedAt(now);
-                allocation.setUpdatedAt(now);
-                UserCopyAllocationEntity closedMicro = allocationRepository.saveAndFlush(allocation);
-
-                UserCopyAllocationEntity liveAllocation = allocationRepository.saveAndFlush(liveFromMicro(closedMicro, now, decision.resolvedCopyMode()));
+                PromotionMutation promotion = inTransaction(() -> {
+                    allocation.setStatus(UserCopyAllocationEntity.Status.CLOSED);
+                    allocation.setActive(false);
+                    allocation.setStatusReason("PROMOTED_MICRO_TO_LIVE_CLOSED");
+                    allocation.setStatusUpdatedAt(now);
+                    allocation.setUpdatedAt(now);
+                    UserCopyAllocationEntity closed = allocationRepository.saveAndFlush(allocation);
+                    UserCopyAllocationEntity live = allocationRepository.saveAndFlush(liveFromMicro(closed, now, decision.resolvedCopyMode()));
+                    audit(closed, decision, "MICRO_LIVE_EVALUATED");
+                    auditMicroClosed(closed, decision);
+                    auditLiveCreated(closed, live, decision);
+                    return new PromotionMutation(closed, live);
+                });
+                UserCopyAllocationEntity closedMicro = promotion.closedMicro();
+                UserCopyAllocationEntity liveAllocation = promotion.liveAllocation();
                 promoted++;
-                auditMicroClosed(closedMicro, decision);
-                auditLiveCreated(closedMicro, liveAllocation, decision);
                 log.info(
                         "event=copy.promotion.micro_to_live.created userId={} walletId={} microLiveAllocationId={} liveAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=LIVE decision=CREATED reasonCode={} events={} errorRatePct={} netPnlUsd={}",
                         closedMicro.getIdUser(),
@@ -149,7 +196,7 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 if (existing.isPresent()) {
                     skipped++;
                     LiveDecision noop = rejected("LIVE_ALLOCATION_ALREADY_EXISTS", allocation, 0, 0, ZERO, ZERO, 0, safe(existing.get().getCopyMode()));
-                    audit(allocation, noop, "MICRO_LIVE_PROMOTION_NOOP");
+                    inTransaction(() -> audit(allocation, noop, "MICRO_LIVE_PROMOTION_NOOP"));
                     log.info(
                             "event=copy.promotion.micro_to_live.noop userId={} walletId={} microLiveAllocationId={} liveAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=LIVE decision=NOOP reasonCode=LIVE_ALLOCATION_ALREADY_EXISTS errorClass={}",
                             allocation.getIdUser(),
@@ -167,7 +214,7 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 }
                 rejected++;
                 LiveDecision failed = rejected("PROMOTION_FAILED_DUPLICATE_CONSTRAINT", allocation, 0, 0, ZERO, ZERO, 0, null);
-                audit(allocation, failed, "MICRO_LIVE_PROMOTION_REJECTED");
+                inTransaction(() -> audit(allocation, failed, "MICRO_LIVE_PROMOTION_REJECTED"));
                 log.warn(
                         "event=copy.promotion.micro_to_live.rejected userId={} walletId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=MICRO_LIVE decision=REJECT reasonCode={} errorClass={} errorMessage=\"{}\"",
                         allocation.getIdUser(),
@@ -185,7 +232,7 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             } catch (RuntimeException ex) {
                 rejected++;
                 LiveDecision failed = rejected("PROMOTION_FAILED", allocation, 0, 0, ZERO, ZERO, 0, null);
-                audit(allocation, failed, "MICRO_LIVE_PROMOTION_REJECTED");
+                inTransaction(() -> audit(allocation, failed, "MICRO_LIVE_PROMOTION_REJECTED"));
                 log.warn(
                         "event=copy.promotion.micro_to_live.rejected userId={} walletId={} microLiveAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=MICRO_LIVE decision=REJECT reasonCode={} errorClass={} errorMessage=\"{}\"",
                         allocation.getIdUser(),
@@ -252,7 +299,117 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 .build();
     }
 
-    private LiveDecision evaluate(UserCopyAllocationEntity allocation, OffsetDateTime now) {
+    private Map<Long, MicroLiveExecutionEvidence> loadExecutionEvidence(List<UserCopyAllocationEntity> candidates,
+                                                                        OffsetDateTime now) {
+        Map<Long, UserCopyAllocationEntity> allocationsById = candidates.stream()
+                .filter(java.util.Objects::nonNull)
+                .filter(candidate -> candidate.getId() != null)
+                .collect(Collectors.toMap(UserCopyAllocationEntity::getId, candidate -> candidate, (left, right) -> left));
+        if (allocationsById.isEmpty()) return Map.of();
+
+        Map<Long, MicroLiveExecutionEvidenceProjection> projections;
+        try {
+            List<MicroLiveExecutionEvidenceProjection> values = dispatchIntentRepository
+                    .findMicroLiveExecutionEvidence(List.copyOf(allocationsById.keySet()));
+            projections = values == null ? Map.of() : values.stream()
+                    .filter(java.util.Objects::nonNull)
+                    .filter(value -> value.getAllocationId() != null)
+                    .collect(Collectors.toMap(MicroLiveExecutionEvidenceProjection::getAllocationId,
+                            value -> value, (left, right) -> left));
+        } catch (RuntimeException failure) {
+            log.error("event=copy.promotion.micro_to_live.evidence_failed candidates={} reasonCode=MICRO_LIVE_EVIDENCE_QUERY_FAILED errorClass={} errorMessage=\"{}\" decision=FAIL_CLOSED",
+                    allocationsById.size(), failure.getClass().getSimpleName(), safe(failure.getMessage()));
+            projections = Map.of();
+        }
+
+        Map<Long, MicroLiveExecutionEvidence> result = new LinkedHashMap<>();
+        for (Map.Entry<Long, UserCopyAllocationEntity> entry : allocationsById.entrySet()) {
+            MicroLiveExecutionEvidenceProjection projection = projections.get(entry.getKey());
+            result.put(entry.getKey(), projection == null
+                    ? zeroEvidence(entry.getValue(), now)
+                    : evidence(entry.getValue(), projection, now));
+        }
+        return Map.copyOf(result);
+    }
+
+    private MicroLiveExecutionEvidence evidence(UserCopyAllocationEntity allocation,
+                                                MicroLiveExecutionEvidenceProjection projection,
+                                                OffsetDateTime now) {
+        OffsetDateTime since = firstNonNull(projection.getFirstSubmittedAt(),
+                allocation.getPromotedFromShadowAt(), allocation.getUpdatedAt(), now);
+        return MicroLiveExecutionEvidence.builder()
+                .allocationId(allocation.getId())
+                .observedDays(Math.max(0L, Duration.between(since, now).toDays()))
+                .submittedOrders(longValue(projection.getSubmittedOrders()))
+                .acknowledgedOrders(longValue(projection.getAcknowledgedOrders()))
+                .filledOrders(longValue(projection.getFilledOrders()))
+                .closedOperations(longValue(projection.getClosedOperations()))
+                .dispatchErrors(longValue(projection.getDispatchErrors()))
+                .reconciliationPending(longValue(projection.getReconciliationPending()))
+                .duplicateCount(longValue(projection.getDuplicateCount()))
+                .unresolvedAmbiguousTimeouts(longValue(projection.getUnresolvedAmbiguousTimeouts()))
+                .slippageSamples(longValue(projection.getSlippageSamples()))
+                .realizedPnlUsd(nullToZero(projection.getRealizedPnlUsd()))
+                .maxDrawdownUsd(nullToZero(projection.getMaxDrawdownUsd()))
+                .adverseSlippageP95Bps(nullToZero(projection.getAdverseSlippageP95Bps()))
+                .firstSubmittedAt(projection.getFirstSubmittedAt())
+                .build();
+    }
+
+    private MicroLiveExecutionEvidence zeroEvidence(UserCopyAllocationEntity allocation, OffsetDateTime now) {
+        OffsetDateTime since = firstNonNull(allocation == null ? null : allocation.getPromotedFromShadowAt(),
+                allocation == null ? null : allocation.getUpdatedAt(), now);
+        return MicroLiveExecutionEvidence.builder()
+                .allocationId(allocation == null ? null : allocation.getId())
+                .observedDays(Math.max(0L, Duration.between(since, now).toDays()))
+                .realizedPnlUsd(ZERO)
+                .maxDrawdownUsd(ZERO)
+                .adverseSlippageP95Bps(ZERO)
+                .build();
+    }
+
+    private LiveDecision rejectedWithReadiness(String reasonCode,
+                                               UserCopyAllocationEntity allocation,
+                                               MicroLiveExecutionEvidence evidence,
+                                               BigDecimal errorRate,
+                                               MicroLiveReadinessDecision readiness) {
+        LiveDecision base = rejected(reasonCode, allocation, evidence.submittedOrders(), evidence.dispatchErrors(),
+                errorRate, nullToZero(evidence.realizedPnlUsd()), evidence.observedDays());
+        Map<String, Object> enriched = new LinkedHashMap<>(base.details());
+        appendExecutionEvidence(enriched, evidence, readiness);
+        return new LiveDecision(base.allowed(), base.reasonCode(), enriched, base.events(), base.errors(),
+                base.errorRatePct(), base.netPnlUsd(), base.days(), base.resolvedCopyMode());
+    }
+
+    private void appendExecutionEvidence(Map<String, Object> details,
+                                         MicroLiveExecutionEvidence evidence,
+                                         MicroLiveReadinessDecision readiness) {
+        details.put("submittedOrders", evidence.submittedOrders());
+        details.put("acknowledgedOrders", evidence.acknowledgedOrders());
+        details.put("filledOrders", evidence.filledOrders());
+        details.put("closedOperations", evidence.closedOperations());
+        details.put("dispatchErrors", evidence.dispatchErrors());
+        details.put("reconciliationPending", evidence.reconciliationPending());
+        details.put("duplicateCount", evidence.duplicateCount());
+        details.put("unresolvedAmbiguousTimeouts", evidence.unresolvedAmbiguousTimeouts());
+        details.put("slippageSamples", evidence.slippageSamples());
+        details.put("adverseSlippageP95Bps", evidence.adverseSlippageP95Bps());
+        details.put("maxDrawdownUsd", evidence.maxDrawdownUsd());
+        details.put("firstSubmittedAt", evidence.firstSubmittedAt());
+        details.put("calendarProgressPct", readiness.calendarProgressPct());
+        details.put("executionEvidencePct", readiness.executionEvidencePct());
+        details.put("reconciliationPct", readiness.reconciliationPct());
+        details.put("finalReadinessPct", readiness.finalReadinessPct());
+        details.put("readinessReasons", readiness.reasons());
+    }
+
+    private static long longValue(Long value) {
+        return value == null ? 0L : Math.max(0L, value);
+    }
+
+    private LiveDecision evaluate(UserCopyAllocationEntity allocation,
+                                  OffsetDateTime now,
+                                  MicroLiveExecutionEvidence rawEvidence) {
         if (!"MICRO_LIVE".equals(UserCopyAllocationEntity.normalizeExecutionMode(allocation.getExecutionMode()))) {
             return rejected("MICRO_LIVE_NOT_READY_WRONG_MODE", allocation, 0, 0, ZERO, ZERO, 0);
         }
@@ -286,27 +443,18 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             return rejected(UserCopyAllocationCopyModeResolver.INVALID_COPY_MODE_MAPPING, allocation, 0, 0, ZERO, ZERO, 0, null);
         }
 
-        long events = eventRepository.countRuntimeEventsForAllocation(allocation.getId(), "MICRO_LIVE");
-        long errors = eventRepository.countRuntimeErrorEventsForAllocation(allocation.getId(), "MICRO_LIVE");
-        BigDecimal pnl = nullToZero(eventRepository.sumRuntimeRealizedPnlUsdForAllocation(allocation.getId(), "MICRO_LIVE"));
+        MicroLiveExecutionEvidence evidence = rawEvidence == null
+                ? zeroEvidence(allocation, now)
+                : rawEvidence;
+        long events = evidence.submittedOrders();
+        long errors = evidence.dispatchErrors();
+        BigDecimal pnl = nullToZero(evidence.realizedPnlUsd());
         BigDecimal errorRate = errorRatePct(events, errors);
-        OffsetDateTime firstEventAt = eventRepository.findFirstRuntimeEventTimeForAllocation(allocation.getId(), "MICRO_LIVE");
-        OffsetDateTime since = firstNonNull(firstEventAt, allocation.getPromotedFromShadowAt(), allocation.getUpdatedAt(), now);
-        long days = Math.max(0L, Duration.between(since, now).toDays());
+        long days = evidence.observedDays();
 
-        if (days < Math.max(0, properties.getMinMicroDays())) {
-            return rejected("MICRO_LIVE_NOT_READY_MIN_DAYS", allocation, events, errors, errorRate, pnl, days);
-        }
-        if (events < Math.max(0, properties.getMinMicroOrders())) {
-            return rejected("MICRO_LIVE_NOT_READY_MIN_ORDERS", allocation, events, errors, errorRate, pnl, days);
-        }
-        BigDecimal maxErrorRate = nullToZero(properties.getMaxErrorRatePct());
-        if (maxErrorRate.compareTo(ZERO) >= 0 && errorRate.compareTo(maxErrorRate) > 0) {
-            return rejected("MICRO_LIVE_NOT_READY_ERROR_RATE", allocation, events, errors, errorRate, pnl, days);
-        }
-        if (properties.isRequirePositiveNetPnl()
-                && pnl.compareTo(nullToZero(properties.getMinNetPnlUsd())) < 0) {
-            return rejected("MICRO_LIVE_NOT_READY_NEGATIVE_PNL", allocation, events, errors, errorRate, pnl, days);
+        MicroLiveReadinessDecision readiness = executionEvidencePolicy.evaluate(evidence);
+        if (!readiness.allowed()) {
+            return rejectedWithReadiness(readiness.primaryReason(), allocation, evidence, errorRate, readiness);
         }
 
         LiveDecision fullDecision = evaluateFullDecisionForLive(allocation, events, errors, errorRate, pnl, days, copyModeResolution);
@@ -315,6 +463,7 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
         }
 
         Map<String, Object> finalDetails = details(allocation, events, errors, errorRate, pnl, days, copyModeResolution.copyMode(), copyModeResolution.reasonCode(), copyModeResolution.constraintReasonCode());
+        appendExecutionEvidence(finalDetails, evidence, readiness);
         finalDetails.putAll(fullDecision.details());
         return new LiveDecision(
                 true,
@@ -651,6 +800,14 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
         return clean.length() > 300 ? clean.substring(0, 300) : clean;
     }
 
+    private void inTransaction(Runnable work) {
+        transactionOperations.executeWithoutResult(status -> work.run());
+    }
+
+    private <T> T inTransaction(Supplier<T> work) {
+        return transactionOperations.execute(status -> work.get());
+    }
+
     @SafeVarargs
     private static <T> T firstNonNull(T... values) {
         if (values == null) return null;
@@ -676,6 +833,12 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             errorRatePct = nullToZero(errorRatePct);
             netPnlUsd = nullToZero(netPnlUsd);
         }
+    }
+
+    private record PromotionMutation(
+            UserCopyAllocationEntity closedMicro,
+            UserCopyAllocationEntity liveAllocation
+    ) {
     }
 
     private record FullDecisionGate(

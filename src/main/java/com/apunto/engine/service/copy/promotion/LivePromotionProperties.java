@@ -11,6 +11,17 @@ public class LivePromotionProperties {
     private int candidateLimit = 100;
     private long minMicroDays = 7;
     private long minMicroOrders = 10;
+    private long minSubmittedOrders = 10;
+    private long minAcknowledgedOrders = 10;
+    private long minFilledOrders = 10;
+    private long minClosedOperations = 3;
+    private long maxDispatchErrors = 0;
+    private long maxReconciliationPending = 0;
+    private long maxDuplicateCount = 0;
+    private long maxUnresolvedAmbiguousTimeouts = 0;
+    private long minSlippageSamples = 3;
+    private BigDecimal maxAdverseSlippageP95Bps = new BigDecimal("10");
+    private BigDecimal maxDrawdownUsd = new BigDecimal("20");
     private BigDecimal maxErrorRatePct = new BigDecimal("5");
     private boolean requirePositiveNetPnl = false;
     private BigDecimal minNetPnlUsd = BigDecimal.ZERO;
@@ -51,6 +62,29 @@ public class LivePromotionProperties {
     public void setMinMicroOrders(long minMicroOrders) {
         this.minMicroOrders = minMicroOrders;
     }
+
+    public long getMinSubmittedOrders() { return minSubmittedOrders; }
+    public void setMinSubmittedOrders(long value) { this.minSubmittedOrders = value; }
+    public long getMinAcknowledgedOrders() { return minAcknowledgedOrders; }
+    public void setMinAcknowledgedOrders(long value) { this.minAcknowledgedOrders = value; }
+    public long getMinFilledOrders() { return minFilledOrders; }
+    public void setMinFilledOrders(long value) { this.minFilledOrders = value; }
+    public long getMinClosedOperations() { return minClosedOperations; }
+    public void setMinClosedOperations(long value) { this.minClosedOperations = value; }
+    public long getMaxDispatchErrors() { return maxDispatchErrors; }
+    public void setMaxDispatchErrors(long value) { this.maxDispatchErrors = value; }
+    public long getMaxReconciliationPending() { return maxReconciliationPending; }
+    public void setMaxReconciliationPending(long value) { this.maxReconciliationPending = value; }
+    public long getMaxDuplicateCount() { return maxDuplicateCount; }
+    public void setMaxDuplicateCount(long value) { this.maxDuplicateCount = value; }
+    public long getMaxUnresolvedAmbiguousTimeouts() { return maxUnresolvedAmbiguousTimeouts; }
+    public void setMaxUnresolvedAmbiguousTimeouts(long value) { this.maxUnresolvedAmbiguousTimeouts = value; }
+    public long getMinSlippageSamples() { return minSlippageSamples; }
+    public void setMinSlippageSamples(long value) { this.minSlippageSamples = value; }
+    public BigDecimal getMaxAdverseSlippageP95Bps() { return maxAdverseSlippageP95Bps; }
+    public void setMaxAdverseSlippageP95Bps(BigDecimal value) { this.maxAdverseSlippageP95Bps = value; }
+    public BigDecimal getMaxDrawdownUsd() { return maxDrawdownUsd; }
+    public void setMaxDrawdownUsd(BigDecimal value) { this.maxDrawdownUsd = value; }
 
     public BigDecimal getMaxErrorRatePct() {
         return maxErrorRatePct;

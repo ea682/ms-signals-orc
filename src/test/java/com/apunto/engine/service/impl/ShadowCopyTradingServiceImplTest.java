@@ -1572,6 +1572,9 @@ class ShadowCopyTradingServiceImplTest {
                     default -> null;
                 };
             }
+            if ("lockShadowProfileMutation".equals(method.getName())) {
+                return 1;
+            }
             return invocation.invoke(method, args == null ? new Object[0] : args);
         };
         return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, handler);

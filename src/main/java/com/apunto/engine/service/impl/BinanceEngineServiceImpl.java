@@ -4507,13 +4507,27 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return prepareOpenOperation(event, userDetail, walletMetric, allocation);
         } catch (RuntimeException ex) {
             result = "blocked";
+            if (ex instanceof SkipExecutionException skip) {
+                String sourceSymbol = event == null || event.getOperacion() == null
+                        ? null
+                        : event.getOperacion().getParSymbol();
+                meterRegistry.counter("copy.sizing.reject.total",
+                        "reason", metricTag(skip.getReasonCode()),
+                        "symbol", metricTag(sourceSymbol)).increment();
+            }
             throw ex;
         } finally {
+            long elapsedNs = System.nanoTime() - startedNs;
             meterRegistry.timer("copy_sizing_duration",
                             "execution_mode", metricTag(executionModeOf(allocation)),
                             "operation_type", "open",
                             "result", result)
-                    .record(System.nanoTime() - startedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+                    .record(elapsedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
+            meterRegistry.timer("copy.hot.path.duration",
+                            "stage", "sizing",
+                            "mode", metricTag(executionModeOf(allocation)),
+                            "result", result)
+                    .record(elapsedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
         }
     }
 
@@ -6020,7 +6034,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (forbidDbInLiveHotPath && ("LIVE".equals(executionMode) || "MICRO_LIVE".equals(executionMode))) {
             return activeCopyOperationCache.activeOperationsByUserAndWallet(userId, walletId)
                     .stream()
-                    .filter(op -> allocationMatches(op, allocation))
+                    .filter(op -> budgetScopeMatches(op, allocation, executionMode))
                     .map(this::copyMargin)
                     .reduce(ZERO, BigDecimal::add)
                     .multiply(ONE.add(safePct(safety, MAX_MARGIN_SAFETY_PCT)))
@@ -6052,8 +6066,21 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
         return (int) activeCopyOperationCache.activeOperationsByUserAndWallet(userId, walletId)
                 .stream()
-                .filter(op -> allocationMatches(op, allocation))
+                .filter(op -> budgetScopeMatches(op, allocation, executionMode))
                 .count();
+    }
+
+    private boolean budgetScopeMatches(CopyOperationDto op,
+                                       UserCopyAllocationEntity allocation,
+                                       String executionMode) {
+        if (op == null || !op.isActive()
+                || !Objects.equals(UserCopyAllocationEntity.normalizeExecutionMode(op.getExecutionMode()), executionMode)) {
+            return false;
+        }
+        if ("MICRO_LIVE".equals(executionMode)) {
+            return true;
+        }
+        return allocationMatches(op, allocation);
     }
 
     private boolean allocationMatches(CopyOperationDto op, UserCopyAllocationEntity allocation) {

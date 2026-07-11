@@ -6,6 +6,7 @@ import java.util.List;
 public record CopyExecutionAccountsDiagnostics(
         boolean hasActiveUsers,
         boolean hasActiveBinanceKeys,
+        boolean hasNewDispatchEnabled,
         boolean hasMicroLiveEnabled,
         boolean hasLiveEnabled,
         boolean liveDryRun,
@@ -37,6 +38,7 @@ public record CopyExecutionAccountsDiagnostics(
     }
 
     public static CopyExecutionAccountsDiagnostics fromCounts(
+            boolean newDispatchEnabled,
             boolean microLiveEnabled,
             boolean liveEnabled,
             boolean liveDryRun,
@@ -53,13 +55,15 @@ public record CopyExecutionAccountsDiagnostics(
             long eligibleMicroLiveUsers,
             long eligibleLiveUsers
     ) {
-        long eligibleExecutionUsers = Math.max(0L, eligibleMicroLiveUsers) + Math.max(0L, eligibleLiveUsers);
+        long configuredEligibleUsers = Math.max(0L, eligibleMicroLiveUsers) + Math.max(0L, eligibleLiveUsers);
+        long eligibleExecutionUsers = newDispatchEnabled ? configuredEligibleUsers : 0L;
         List<String> reasons = new ArrayList<>();
         if (activeUsers <= 0) reasons.add("NO_ACTIVE_USERS");
         if (activeDetailUsers <= 0) reasons.add("NO_ACTIVE_USER_DETAIL");
         if (activeBinanceFlagUsers <= 0 || usableApiKeyUsers <= 0) reasons.add("NO_ACTIVE_BINANCE_API_KEY");
         if (activeCapitalUsers <= 0) reasons.add("NO_CAPITAL_CONFIG");
         if (activeMaxWalletUsers <= 0) reasons.add("NO_MAX_WALLET_CONFIG");
+        if (!newDispatchEnabled) reasons.add("COPY_NEW_DISPATCH_DISABLED");
         if (!microLiveEnabled) reasons.add("MICRO_LIVE_DISABLED");
         if (!liveEnabled) reasons.add("LIVE_DISABLED");
         if (liveDryRun) reasons.add("LIVE_DRY_RUN");
@@ -70,6 +74,7 @@ public record CopyExecutionAccountsDiagnostics(
         return new CopyExecutionAccountsDiagnostics(
                 activeUsers > 0,
                 activeBinanceFlagUsers > 0 && usableApiKeyUsers > 0,
+                newDispatchEnabled,
                 microLiveEnabled,
                 liveEnabled,
                 liveDryRun,

@@ -23,6 +23,7 @@ class CopyRuntimeGuardPolicyTest {
 
         assertTrue(decision.allowed());
         assertEquals("MICRO_LIVE_PROMOTED_ALLOCATION_SHOULD_NOT_BE_BLOCKED_BY_SHADOW_ONLY", decision.reasonCode());
+        assertEquals("PROMOTED_FULL_DECISION", decision.guardSource());
     }
 
     @Test
@@ -34,6 +35,7 @@ class CopyRuntimeGuardPolicyTest {
 
         assertTrue(decision.allowed());
         assertEquals("LIVE_PROMOTED_ALLOCATION_SHOULD_NOT_BE_BLOCKED_BY_SHADOW_ONLY", decision.reasonCode());
+        assertEquals("PROMOTED_FULL_DECISION", decision.guardSource());
     }
 
     @Test
@@ -69,6 +71,18 @@ class CopyRuntimeGuardPolicyTest {
 
         assertFalse(decision.allowed());
         assertEquals("NEGATIVE_REQUIRED_WINDOW_2W", decision.reasonCode());
+    }
+
+    @Test
+    void negativeRequiredWindowShadowOnlyStillBlocksPromotedLive() {
+        CopyRuntimeGuardPolicy.Decision decision = policy.decide(
+                promoted("LIVE"),
+                CopyStrategyGuardDecision.shadowOnly(
+                        "NEGATIVE_REQUIRED_WINDOW_1MO", "window=1mo pnl=-1.45", 0.0)
+        );
+
+        assertFalse(decision.allowed());
+        assertEquals("NEGATIVE_REQUIRED_WINDOW_1MO", decision.reasonCode());
     }
 
     @Test
