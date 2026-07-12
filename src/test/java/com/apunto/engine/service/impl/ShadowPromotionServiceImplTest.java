@@ -27,6 +27,8 @@ import com.apunto.engine.service.copy.coverage.ShadowCoverageCounts;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageMode;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageQueryService;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageWindowProperties;
+import com.apunto.engine.service.copy.allocation.LiveAllocationPercentageResolution;
+import com.apunto.engine.service.copy.allocation.LiveAllocationPercentageResolver;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
@@ -128,7 +130,7 @@ class ShadowPromotionServiceImplTest {
     }
 
     @Test
-    void emptyCopyPlanAndZeroShadowAllocationPctUsesUserDetailCapitalForFirstMicroLivePromotion() {
+    void emptyCopyPlanAndZeroShadowAllocationPctCreatesFixedBudgetMicroWithoutEconomicPercentage() {
         UUID userId = UUID.randomUUID();
         ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
         shadow.setAllocationPct(BigDecimal.ZERO);
@@ -154,7 +156,12 @@ class ShadowPromotionServiceImplTest {
         assertNotNull(savedPlan.get());
         assertNotNull(savedAllocation.get());
         assertEquals("MICRO_LIVE", savedAllocation.get().getExecutionMode());
-        assertEquals(new BigDecimal("0.000001"), savedAllocation.get().getAllocationPct());
+        assertNull(savedAllocation.get().getAllocationPct());
+        assertEquals("FIXED_CAPITAL", savedAllocation.get().getSizingMode());
+        assertEquals("FIXED_MICRO_BUDGET", savedAllocation.get().getAllocationPctSource());
+        assertNull(savedPlan.get().getAllocationPct());
+        assertEquals("FIXED_CAPITAL", savedPlan.get().getSizingMode());
+        assertEquals("FIXED_MICRO_BUDGET", savedPlan.get().getAllocationPctSource());
         assertEquals(new BigDecimal("100.00000000"), savedPlan.get().getAllocatedCapitalUsd());
         assertTrue(audits.stream().anyMatch(a -> "CAPITAL_CONFIG_FOUND_FROM_USER_DETAIL".equals(a.getReasonDetails().get("capitalConfigReasonCode"))));
         assertTrue(audits.stream().anyMatch(a -> "COPY_PLAN_CREATED".equals(a.getReasonDetails().get("copyPlanReasonCode"))));
@@ -357,6 +364,12 @@ class ShadowPromotionServiceImplTest {
         assertNotNull(savedPlan.get());
         assertNotNull(savedAllocation.get());
         assertEquals("LIVE", savedAllocation.get().getExecutionMode());
+        assertEquals(new BigDecimal("0.120000"), savedAllocation.get().getAllocationPct());
+        assertEquals("PERCENTAGE", savedAllocation.get().getSizingMode());
+        assertEquals("SIGNALS_CURRENT_LIVE_DISTRIBUTION", savedAllocation.get().getAllocationPctSource());
+        assertNotNull(savedAllocation.get().getAllocationPctSourceId());
+        assertEquals(new BigDecimal("0.120000"), savedPlan.get().getAllocationPct());
+        assertEquals(new BigDecimal("23.04000000"), savedPlan.get().getAllocatedCapitalUsd());
         assertEquals("copy_all_metric_movements", savedAllocation.get().getCopyMode());
         assertEquals("PROMOTED_DIRECT_FROM_SHADOW", savedAllocation.get().getStatusReason());
         assertEquals("PROMOTED_TO_LIVE", shadow.getStatus());
@@ -1001,7 +1014,7 @@ class ShadowPromotionServiceImplTest {
     }
 
     @Test
-    void duplicateConstraintWhenCreatingCopyPlanIsRetriedAsPlanReuse() {
+    void conflictingCopyPlanUpsertIsReusedWithoutAbortingTheTransaction() {
         UUID userId = UUID.randomUUID();
         ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
         UserWalletCopyPlanEntity existingPlan = UserWalletCopyPlanEntity.builder()
@@ -1016,7 +1029,6 @@ class ShadowPromotionServiceImplTest {
                 .build();
         AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
         List<CopyPromotionAuditEntity> audits = new ArrayList<>();
-        AtomicBoolean firstFind = new AtomicBoolean(true);
 
         ShadowPromotionServiceImpl service = new ShadowPromotionServiceImpl(
                 shadowRepository(List.of(shadow)),
@@ -1027,14 +1039,14 @@ class ShadowPromotionServiceImplTest {
                 detailRepository(activeUser(userId, true, 192, 5, "USDC").detail()),
                 apiKeyRepository(apiKey(userId, true)),
                 proxy(UserWalletCopyPlanRepository.class, (method, args) -> {
-                    if ("findByIdUserAndWalletLc".equals(method.getName())) {
-                        return firstFind.getAndSet(false) ? Optional.empty() : Optional.of(existingPlan);
+                    if ("ensureFixedBudgetPlan".equals(method.getName())) {
+                        return 0;
+                    }
+                    if ("findForUpdate".equals(method.getName())) {
+                        return Optional.of(existingPlan);
                     }
                     if ("saveAndFlush".equals(method.getName()) || "save".equals(method.getName())) {
-                        if (firstFind.get()) {
-                            throw new AssertionError("plan should be looked up before save");
-                        }
-                        throw new DataIntegrityViolationException("duplicate plan");
+                        return args[0];
                     }
                     return unexpected(method);
                 }),
@@ -1356,7 +1368,7 @@ class ShadowPromotionServiceImplTest {
             ShadowCoverageWindowProperties coverageProperties,
             ShadowCoverageBatch coverageBatch
     ) {
-        return new ShadowPromotionServiceImpl(
+        ShadowPromotionServiceImpl service = new ShadowPromotionServiceImpl(
                 shadowRepository(shadows),
                 validationRepository(validation),
                 eventRepository(),
@@ -1374,6 +1386,26 @@ class ShadowPromotionServiceImplTest {
                 new ShadowCoverageCalculator(),
                 coverageProperties
         );
+        OffsetDateTime calculatedAt = OffsetDateTime.now().minusMinutes(1);
+        setField(service, "liveAllocationPercentageResolver",
+                (LiveAllocationPercentageResolver) request -> LiveAllocationPercentageResolution.resolved(
+                        new BigDecimal("0.120000"),
+                        new BigDecimal("0.120000"),
+                        "SIGNALS_CURRENT_LIVE_DISTRIBUTION",
+                        UUID.randomUUID(),
+                        calculatedAt,
+                        calculatedAt.plusMinutes(5)));
+        return service;
+    }
+
+    private static void setField(Object target, String fieldName, Object value) {
+        try {
+            java.lang.reflect.Field field = target.getClass().getDeclaredField(fieldName);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError("missing test injection field " + fieldName, failure);
+        }
     }
 
     private static ShadowPromotionProperties promotionProperties() {
@@ -1665,7 +1697,25 @@ class ShadowPromotionServiceImplTest {
 
     private static UserWalletCopyPlanRepository planRepository(AtomicReference<UserWalletCopyPlanEntity> savedPlan) {
         return proxy(UserWalletCopyPlanRepository.class, (method, args) -> {
-            if ("findByIdUserAndWalletLc".equals(method.getName())) return Optional.ofNullable(savedPlan.get());
+            if ("ensureFixedBudgetPlan".equals(method.getName())) {
+                if (savedPlan.get() != null) return 0;
+                savedPlan.set(UserWalletCopyPlanEntity.builder()
+                        .id(300L)
+                        .idUser((UUID) args[0])
+                        .walletLc((String) args[1])
+                        .allocationPct(null)
+                        .allocatedCapitalUsd(new BigDecimal("100.00000000"))
+                        .sizingMode("FIXED_CAPITAL")
+                        .allocationPctSource("FIXED_MICRO_BUDGET")
+                        .createdAt((OffsetDateTime) args[2])
+                        .updatedAt((OffsetDateTime) args[2])
+                        .build());
+                return 1;
+            }
+            if ("findByIdUserAndWalletLc".equals(method.getName())
+                    || "findForUpdate".equals(method.getName())) {
+                return Optional.ofNullable(savedPlan.get());
+            }
             if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
                 UserWalletCopyPlanEntity entity = (UserWalletCopyPlanEntity) args[0];
                 if (entity.getId() == null) {

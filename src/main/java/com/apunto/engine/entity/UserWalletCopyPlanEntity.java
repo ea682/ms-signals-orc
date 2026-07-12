@@ -41,8 +41,26 @@ public class UserWalletCopyPlanEntity {
     @Column(name = "wallet_lc", nullable = false)
     private String walletLc;
 
-    @Column(name = "allocation_pct", nullable = false, precision = 9, scale = 6)
+    @Column(name = "allocation_pct", precision = 9, scale = 6)
     private BigDecimal allocationPct;
+
+    @Column(name = "sizing_mode", length = 32)
+    private String sizingMode;
+
+    @Column(name = "allocation_pct_source", length = 80)
+    private String allocationPctSource;
+
+    @Column(name = "allocation_pct_source_id")
+    private UUID allocationPctSourceId;
+
+    @Column(name = "allocation_pct_calculated_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime allocationPctCalculatedAt;
+
+    @Column(name = "allocation_pct_valid_until", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime allocationPctValidUntil;
+
+    @Column(name = "wallet_total_allocation_pct", precision = 9, scale = 6)
+    private BigDecimal walletTotalAllocationPct;
 
     @Column(name = "score")
     private Integer score;
@@ -118,13 +136,24 @@ public class UserWalletCopyPlanEntity {
 
     private void normalize() {
         walletLc = walletLc == null ? null : walletLc.trim().toLowerCase(Locale.ROOT);
-        if (allocationPct == null) allocationPct = BigDecimal.ZERO;
-        allocationPct = allocationPct.setScale(6, RoundingMode.HALF_UP);
+        if (allocationPct != null) allocationPct = allocationPct.setScale(6, RoundingMode.HALF_UP);
+        if (walletTotalAllocationPct != null) {
+            walletTotalAllocationPct = walletTotalAllocationPct.setScale(6, RoundingMode.HALF_UP);
+        }
+        sizingMode = normalizeUpper(sizingMode);
+        allocationPctSource = normalizeUpper(allocationPctSource);
+        if (sizingMode == null) sizingMode = allocationPct == null ? "FIXED_CAPITAL" : "PERCENTAGE";
+        if (allocationPct == null && allocationPctSource == null) allocationPctSource = "FIXED_MICRO_BUDGET";
         if (status == null || status.isBlank()) status = "ACTIVE";
         status = status.trim().toUpperCase(Locale.ROOT);
         if (metricVersion == null || metricVersion < 1) metricVersion = 1;
         if (copyMinNotionalMode == null || copyMinNotionalMode.isBlank()) copyMinNotionalMode = "INHERIT";
         copyMinNotionalMode = copyMinNotionalMode.trim().toUpperCase(Locale.ROOT);
         if (reason == null) reason = new LinkedHashMap<>();
+    }
+
+    private static String normalizeUpper(String value) {
+        if (value == null || value.isBlank()) return null;
+        return value.trim().toUpperCase(Locale.ROOT).replace('-', '_');
     }
 }

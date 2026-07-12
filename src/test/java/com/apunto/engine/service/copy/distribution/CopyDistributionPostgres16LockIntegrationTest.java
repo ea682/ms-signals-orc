@@ -192,11 +192,11 @@ class CopyDistributionPostgres16LockIntegrationTest {
 
     private static String username() {
         String configured = System.getProperty("copy.postgres.test.username");
-        return configured == null ? postgres.getUsername() : configured;
+        return configured == null ? (postgres == null ? "postgres" : postgres.getUsername()) : configured;
     }
 
     private static String password() {
         String configured = System.getProperty("copy.postgres.test.password");
-        return configured == null ? postgres.getPassword() : configured;
+        return configured == null ? (postgres == null ? "" : postgres.getPassword()) : configured;
     }
 }

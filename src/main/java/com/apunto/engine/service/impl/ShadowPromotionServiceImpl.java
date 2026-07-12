@@ -27,6 +27,9 @@ import com.apunto.engine.service.copy.coverage.ShadowCoverageQueryService;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageSnapshot;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageSource;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageWindowProperties;
+import com.apunto.engine.service.copy.allocation.LiveAllocationPercentageRequest;
+import com.apunto.engine.service.copy.allocation.LiveAllocationPercentageResolution;
+import com.apunto.engine.service.copy.allocation.LiveAllocationPercentageResolver;
 import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
 import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
 import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor;
@@ -40,6 +43,7 @@ import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
 import com.apunto.engine.shared.enums.FuturesCapitalAsset;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -86,6 +90,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
 
     @Autowired(required = false)
     private CopyDistributionUnitExecutor copyDistributionUnitExecutor;
+
+    @Autowired(required = false)
+    private LiveAllocationPercentageResolver liveAllocationPercentageResolver;
+
+    @Autowired(required = false)
+    private MeterRegistry meterRegistry;
 
     @Override
     public ShadowPromotionResult promoteShadowToMicroLive() {
@@ -190,6 +200,13 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     rejected++;
                     audit(shadow, decision, null, "SHADOW_PROMOTION_REJECTED");
                     boolean directLiveRejected = isDirectLiveReason(decision.reasonCode());
+                    if (isLivePercentageReason(decision.reasonCode())) {
+                        recordLivePromotion("rejected", decision.reasonCode());
+                        log.info("event=copy.promotion.live.rejected executionMode=LIVE userId={} walletId={} strategyCode={} scopeType={} scopeValue={} previousExecutionMode=SHADOW previousAllocationPct={} resolvedLiveAllocationPct=null allocationPctSource=null decision=KEEP_SHADOW reasonCode={} retryable=true shouldAlert=false recommendedAction=WAIT_FOR_NEXT_VALID_DISTRIBUTION",
+                                shadow.getIdUser(), shadow.getWalletId(), shadow.getCopyStrategyCode(),
+                                shadow.getScopeType(), shadow.getScopeValue(), shadow.getAllocationPct(),
+                                decision.reasonCode());
+                    }
                     log.info(
                             "event={} userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=SHADOW decision=REJECT reasonCode={} elapsedMs={} details={}",
                             directLiveRejected ? "copy.promotion.shadow_to_live.rejected" : "copy.promotion.shadow_to_micro.rejected",
@@ -279,6 +296,17 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                             elapsedMs(candidateNs)
                     );
                 }
+            } catch (LiveAllocationPercentageRejectedException ex) {
+                rejected++;
+                PromotionDecision failed = PromotionDecision.rejected(ex.reasonCode(), details(shadow, null, extras(
+                        "liveAllocationReasonCode", ex.reasonCode(),
+                        "targetExecutionMode", "LIVE"
+                )));
+                markRejectedUnderProfileLock(shadow, failed, now);
+                recordLivePromotion("rejected", ex.reasonCode());
+                log.info("event=copy.promotion.live.rejected executionMode=LIVE userId={} walletId={} strategyCode={} scopeType={} scopeValue={} previousExecutionMode=SHADOW previousAllocationPct={} resolvedLiveAllocationPct=null allocationPctSource=null decision=KEEP_SHADOW reasonCode={} retryable=true shouldAlert=false recommendedAction=WAIT_FOR_NEXT_VALID_DISTRIBUTION",
+                        shadow.getIdUser(), shadow.getWalletId(), shadow.getCopyStrategyCode(), shadow.getScopeType(),
+                        shadow.getScopeValue(), shadow.getAllocationPct(), ex.reasonCode());
             } catch (DataIntegrityViolationException ex) {
                 Optional<UserCopyAllocationEntity> existing = existingAllocation(shadow);
                 if (existing.isPresent()) {
@@ -534,8 +562,23 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     "copyModeConstraintReasonCode", copyModeResolution.constraintReasonCode()
             )));
         }
+        LiveAllocationPercentageResolution percentageResolution = null;
+        if ("LIVE".equals(targetDecision.targetExecutionMode())) {
+            percentageResolution = resolveLivePercentage(shadow, now);
+            String reasonCode = livePercentageFailureReason(percentageResolution, now);
+            if (reasonCode != null) {
+                return PromotionDecision.rejected(reasonCode, details(shadow, evidence, extras(
+                        "targetExecutionMode", "LIVE",
+                        "resolvedLiveAllocationPct", percentageResolution == null ? null : percentageResolution.percentage(),
+                        "allocationPctSource", percentageResolution == null ? null : percentageResolution.source(),
+                        "liveAllocationReasonCode", reasonCode
+                )));
+            }
+        }
         BigDecimal targetCapital = "LIVE".equals(targetDecision.targetExecutionMode())
-                ? BigDecimal.valueOf(capitalConfig.capital()).setScale(8, RoundingMode.HALF_UP)
+                ? BigDecimal.valueOf(capitalConfig.capital())
+                .multiply(percentageResolution.walletTotalPercentage())
+                .setScale(8, RoundingMode.HALF_UP)
                 : microCapital;
         Map<String, Object> finalDetails = extras(
                 "capital", capitalConfig.capital(),
@@ -554,8 +597,18 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 "sourceSymbol", symbolResolution == null ? null : symbolResolution.sourceSymbol(),
                 "targetSymbol", symbolResolution == null ? null : symbolResolution.targetSymbol()
         );
+        if (percentageResolution != null) {
+            finalDetails.put("resolvedLiveAllocationPct", percentageResolution.percentage());
+            finalDetails.put("walletTotalAllocationPct", percentageResolution.walletTotalPercentage());
+            finalDetails.put("allocationPctSource", percentageResolution.source());
+            finalDetails.put("distributionDecisionId", percentageResolution.sourceId());
+            finalDetails.put("distributionCalculatedAt", percentageResolution.calculatedAt());
+            finalDetails.put("distributionValidUntil", percentageResolution.validUntil());
+        }
         finalDetails.putAll(fullDecision.details());
-        return PromotionDecision.allowed(details(shadow, evidence, finalDetails), detail, evidence, symbolResolution, microCapital, copyModeResolution.copyMode(), targetDecision.targetExecutionMode(), targetCapital);
+        return PromotionDecision.allowed(details(shadow, evidence, finalDetails), detail, evidence,
+                symbolResolution, microCapital, copyModeResolution.copyMode(),
+                targetDecision.targetExecutionMode(), targetCapital, percentageResolution);
     }
 
     private PromotionDecision evaluateEvidence(ShadowCopyAllocationEntity shadow, Evidence evidence, OffsetDateTime now) {
@@ -821,11 +874,33 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
 
     private PromotionOutput promote(ShadowCopyAllocationEntity shadow, PromotionDecision decision, OffsetDateTime now) {
         DetailUserEntity detail = Objects.requireNonNull(decision.detail(), "detail");
-        BigDecimal allocationPct = firstPositive(shadow.getTargetLiveAllocationPct(), shadow.getAllocationPct(), new BigDecimal("0.000001"));
-        BigDecimal targetCapital = decision.targetCapital();
         String targetExecutionMode = decision.targetExecutionMode();
+        LiveAllocationPercentageResolution percentageResolution = decision.percentageResolution();
+        if ("LIVE".equals(targetExecutionMode)) {
+            OffsetDateTime recheckTime = OffsetDateTime.now();
+            percentageResolution = resolveLivePercentage(shadow, recheckTime);
+            String reasonCode = livePercentageFailureReason(percentageResolution, recheckTime);
+            if (reasonCode != null) {
+                throw new LiveAllocationPercentageRejectedException(reasonCode);
+            }
+            decision.details().put("resolvedLiveAllocationPct", percentageResolution.percentage());
+            decision.details().put("walletTotalAllocationPct", percentageResolution.walletTotalPercentage());
+            decision.details().put("allocationPctSource", percentageResolution.source());
+            decision.details().put("distributionDecisionId", percentageResolution.sourceId());
+            decision.details().put("distributionCalculatedAt", percentageResolution.calculatedAt());
+            decision.details().put("distributionValidUntil", percentageResolution.validUntil());
+        }
+        BigDecimal allocationPct = "LIVE".equals(targetExecutionMode)
+                ? percentageResolution.percentage()
+                : null;
+        BigDecimal targetCapital = "LIVE".equals(targetExecutionMode)
+                ? BigDecimal.valueOf(Math.max(0, detail.getCapital() == null ? 0 : detail.getCapital()))
+                .multiply(percentageResolution.walletTotalPercentage())
+                .setScale(8, RoundingMode.HALF_UP)
+                : decision.targetCapital();
 
-        PlanResolution planResolution = resolveCopyPlan(shadow, detail, decision, now, allocationPct, targetCapital);
+        PlanResolution planResolution = resolveCopyPlan(
+                shadow, detail, decision, now, targetCapital, percentageResolution);
         UserWalletCopyPlanEntity plan = planResolution.plan();
         decision.details().put("copyPlanReasonCode", planResolution.reasonCode());
         String resolvedCopyMode = Objects.requireNonNull(decision.resolvedCopyMode(), "resolvedCopyMode");
@@ -843,6 +918,22 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 .globalRank(shadow.getGlobalRank())
                 .strategyScore(shadow.getStrategyScore())
                 .allocationPct(allocationPct)
+                .sizingMode("LIVE".equals(targetExecutionMode) ? "PERCENTAGE" : "FIXED_CAPITAL")
+                .allocationPctSource("LIVE".equals(targetExecutionMode)
+                        ? percentageResolution.source()
+                        : "FIXED_MICRO_BUDGET")
+                .allocationPctSourceId("LIVE".equals(targetExecutionMode)
+                        ? percentageResolution.sourceId()
+                        : null)
+                .allocationPctCalculatedAt("LIVE".equals(targetExecutionMode)
+                        ? percentageResolution.calculatedAt()
+                        : null)
+                .allocationPctValidUntil("LIVE".equals(targetExecutionMode)
+                        ? percentageResolution.validUntil()
+                        : null)
+                .walletTotalAllocationPct("LIVE".equals(targetExecutionMode)
+                        ? percentageResolution.walletTotalPercentage()
+                        : null)
                 .score(shadow.getDecisionScore())
                 .status(UserCopyAllocationEntity.Status.ACTIVE)
                 .isActive(true)
@@ -874,6 +965,18 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 "LIVE".equals(targetExecutionMode) ? "LIVE_ALLOCATION_CREATED" : "MICRO_LIVE_ALLOCATION_CREATED");
 
         recordShadowPostPromotion(shadow, allocation, targetExecutionMode, now, decision.details());
+        if ("LIVE".equals(targetExecutionMode)) {
+            recordLivePromotion("promoted", "LIVE_ALLOCATION_PCT_RESOLVED");
+            log.info("event=copy.promotion.live.percentage.resolved executionMode=LIVE userId={} walletId={} strategyCode={} scopeType={} scopeValue={} previousExecutionMode=SHADOW previousAllocationPct={} resolvedLiveAllocationPct={} walletTotalAllocationPct={} allocationPctSource={} distributionDecisionId={} distributionCalculatedAt={} usesAllocationPctForSizing=true decision=PROMOTE reasonCode=LIVE_ALLOCATION_PCT_RESOLVED",
+                    shadow.getIdUser(), shadow.getWalletId(), shadow.getCopyStrategyCode(), shadow.getScopeType(),
+                    shadow.getScopeValue(), shadow.getAllocationPct(), percentageResolution.percentage(),
+                    percentageResolution.walletTotalPercentage(), percentageResolution.source(),
+                    percentageResolution.sourceId(), percentageResolution.calculatedAt());
+        } else {
+            log.info("event=copy.allocation.percentage.resolved executionMode=MICRO_LIVE userId={} walletId={} strategyCode={} scopeType={} scopeValue={} allocationPct=null allocationPctSource=FIXED_MICRO_BUDGET allocatedCapitalUsd=100 usesAllocationPctForSizing=false decision=ALLOW reasonCode=MICRO_LIVE_FIXED_BUDGET_NO_PCT",
+                    shadow.getIdUser(), shadow.getWalletId(), shadow.getCopyStrategyCode(), shadow.getScopeType(),
+                    shadow.getScopeValue());
+        }
         return new PromotionOutput(plan, allocation);
     }
 
@@ -926,34 +1029,24 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             DetailUserEntity detail,
             PromotionDecision decision,
             OffsetDateTime now,
-            BigDecimal allocationPct,
-            BigDecimal microCapital
+            BigDecimal allocatedCapital,
+        LiveAllocationPercentageResolution percentageResolution
     ) {
         String walletLc = normalizeWallet(shadow.getWalletId());
-        Optional<UserWalletCopyPlanEntity> existing = planRepository.findByIdUserAndWalletLc(shadow.getIdUser(), walletLc);
-        boolean alreadyExists = existing.isPresent();
-        UserWalletCopyPlanEntity plan = existing.orElseGet(() -> UserWalletCopyPlanEntity.builder()
-                .idUser(shadow.getIdUser())
-                .walletLc(walletLc)
-                .createdAt(now)
-                .build());
-        applyPlanFields(plan, shadow, detail, decision, now, allocationPct, microCapital);
-        try {
-            plan = planRepository.saveAndFlush(plan);
-            String reasonCode = alreadyExists ? "COPY_PLAN_ALREADY_EXISTS" : "COPY_PLAN_CREATED";
-            logCopyPlanResolved(shadow, plan, reasonCode, alreadyExists ? "REUSED" : "CREATED");
-            return new PlanResolution(plan, reasonCode);
-        } catch (DataIntegrityViolationException ex) {
-            if (alreadyExists) {
-                throw ex;
-            }
-            Optional<UserWalletCopyPlanEntity> concurrent = planRepository.findByIdUserAndWalletLc(shadow.getIdUser(), walletLc);
-            if (concurrent.isEmpty()) {
-                throw ex;
-            }
-            logCopyPlanResolved(shadow, concurrent.get(), "COPY_PLAN_ALREADY_EXISTS", "REUSED");
-            return new PlanResolution(concurrent.get(), "COPY_PLAN_ALREADY_EXISTS");
-        }
+        boolean created = planRepository.ensureFixedBudgetPlan(shadow.getIdUser(), walletLc, now) > 0;
+        UserWalletCopyPlanEntity plan = planRepository.findForUpdate(shadow.getIdUser(), walletLc)
+                .orElseThrow(() -> new IllegalStateException("USER_WALLET_COPY_PLAN_MISSING_AFTER_UPSERT"));
+        applyPlanFields(plan, shadow, detail, decision, now, allocatedCapital,
+                percentageResolution);
+        plan = planRepository.saveAndFlush(plan);
+        String reasonCode = created ? "COPY_PLAN_CREATED" : "COPY_PLAN_ALREADY_EXISTS";
+        logCopyPlanResolved(
+                shadow,
+                plan,
+                reasonCode,
+                normalizeTargetMode(decision.targetExecutionMode()),
+                created ? "CREATED" : "REUSED");
+        return new PlanResolution(plan, reasonCode);
     }
 
     private void applyPlanFields(
@@ -962,17 +1055,40 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             DetailUserEntity detail,
             PromotionDecision decision,
             OffsetDateTime now,
-            BigDecimal allocationPct,
-            BigDecimal microCapital
+            BigDecimal allocatedCapital,
+            LiveAllocationPercentageResolution percentageResolution
     ) {
-        plan.setAllocationPct(allocationPct);
+        boolean liveTarget = "LIVE".equals(decision.targetExecutionMode());
+        boolean preserveExistingLivePlan = !liveTarget
+                && ("PERCENTAGE".equals(plan.getSizingMode())
+                || (plan.getAllocationPct() != null
+                && plan.getAllocationPct().signum() > 0
+                && !"FIXED_MICRO_BUDGET".equals(plan.getAllocationPctSource())));
+        if (liveTarget) {
+            plan.setAllocationPct(percentageResolution.walletTotalPercentage());
+            plan.setWalletTotalAllocationPct(percentageResolution.walletTotalPercentage());
+            plan.setSizingMode("PERCENTAGE");
+            plan.setAllocationPctSource(percentageResolution.source());
+            plan.setAllocationPctSourceId(percentageResolution.sourceId());
+            plan.setAllocationPctCalculatedAt(percentageResolution.calculatedAt());
+            plan.setAllocationPctValidUntil(percentageResolution.validUntil());
+            plan.setAllocatedCapitalUsd(allocatedCapital.setScale(8, RoundingMode.HALF_UP));
+        } else if (!preserveExistingLivePlan) {
+            plan.setAllocationPct(null);
+            plan.setWalletTotalAllocationPct(null);
+            plan.setSizingMode("FIXED_CAPITAL");
+            plan.setAllocationPctSource("FIXED_MICRO_BUDGET");
+            plan.setAllocationPctSourceId(null);
+            plan.setAllocationPctCalculatedAt(null);
+            plan.setAllocationPctValidUntil(null);
+            plan.setAllocatedCapitalUsd(allocatedCapital.setScale(8, RoundingMode.HALF_UP));
+        }
         plan.setScore(shadow.getDecisionScore());
         plan.setStatus("ACTIVE");
         plan.setActive(true);
         plan.setMetricVersion(1);
         plan.setMaxWallet(detail.getMaxWallet());
         plan.setUserCapitalUsd(BigDecimal.valueOf(Math.max(0, detail.getCapital() == null ? 0 : detail.getCapital())).setScale(8, RoundingMode.HALF_UP));
-        plan.setAllocatedCapitalUsd(microCapital.setScale(8, RoundingMode.HALF_UP));
         plan.setCopyMinNotionalMode(detail.getCopyMinNotionalMode() == null ? "INHERIT" : detail.getCopyMinNotionalMode().name());
         plan.setCopyMinNotionalMaxUsdt(detail.getCopyMinNotionalMaxUsdt());
         plan.setCopyMinNotionalMinScore(detail.getCopyMinNotionalMinScore());
@@ -984,12 +1100,18 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         plan.setUpdatedAt(now);
     }
 
-    private void logCopyPlanResolved(ShadowCopyAllocationEntity shadow, UserWalletCopyPlanEntity plan, String reasonCode, String decision) {
+    private void logCopyPlanResolved(
+            ShadowCopyAllocationEntity shadow,
+            UserWalletCopyPlanEntity plan,
+            String reasonCode,
+            String executionMode,
+            String decision
+    ) {
         String event = "COPY_PLAN_CREATED".equals(reasonCode)
                 ? "copy.promotion.copy_plan.created"
                 : "copy.promotion.copy_plan.reused";
         log.info(
-                "event={} userId={} walletId={} shadowAllocationId={} planId={} strategyCode={} scopeType={} scopeValue={} reasonCode={} executionMode=MICRO_LIVE decision={}",
+                "event={} userId={} walletId={} shadowAllocationId={} planId={} strategyCode={} scopeType={} scopeValue={} reasonCode={} executionMode={} decision={}",
                 event,
                 shadow.getIdUser(),
                 shadow.getWalletId(),
@@ -999,6 +1121,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 shadow.getScopeType(),
                 shadow.getScopeValue(),
                 reasonCode,
+                executionMode,
                 decision
         );
     }
@@ -1040,6 +1163,45 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             return new DirectLiveDecision(false, "LIVE", policy, "LIVE_NOT_READY_FROM_SHADOW");
         }
         return new DirectLiveDecision(true, "LIVE", policy, "DIRECT_LIVE_ALLOWED_BY_POLICY");
+    }
+
+    private LiveAllocationPercentageResolution resolveLivePercentage(
+            ShadowCopyAllocationEntity shadow,
+            OffsetDateTime promotionTime
+    ) {
+        if (liveAllocationPercentageResolver == null) {
+            return LiveAllocationPercentageResolution.rejected("LIVE_DISTRIBUTION_NOT_AVAILABLE");
+        }
+        try {
+            return liveAllocationPercentageResolver.resolve(new LiveAllocationPercentageRequest(
+                    shadow.getIdUser(),
+                    shadow.getWalletId(),
+                    shadow.getCopyStrategyCode(),
+                    normalizeScopeType(shadow.getScopeType()),
+                    normalizeScopeValue(shadow.getScopeValue(), shadow.getCopyStrategyCode()),
+                    promotionTime));
+        } catch (RuntimeException ex) {
+            log.warn("event=copy.promotion.live.rejected executionMode=LIVE userId={} walletId={} strategyCode={} scopeType={} scopeValue={} previousExecutionMode=SHADOW previousAllocationPct={} resolvedLiveAllocationPct=null allocationPctSource=null decision=KEEP_SHADOW reasonCode=LIVE_DISTRIBUTION_NOT_AVAILABLE retryable=true shouldAlert=false recommendedAction=WAIT_FOR_NEXT_VALID_DISTRIBUTION errorClass={} errorMessage=\"{}\"",
+                    shadow.getIdUser(), shadow.getWalletId(), shadow.getCopyStrategyCode(), shadow.getScopeType(),
+                    shadow.getScopeValue(), shadow.getAllocationPct(), ex.getClass().getSimpleName(), safe(ex.getMessage()));
+            return LiveAllocationPercentageResolution.rejected("LIVE_DISTRIBUTION_NOT_AVAILABLE");
+        }
+    }
+
+    private static String livePercentageFailureReason(
+            LiveAllocationPercentageResolution resolution,
+            OffsetDateTime promotionTime
+    ) {
+        if (resolution == null) return "LIVE_DISTRIBUTION_NOT_AVAILABLE";
+        if (!resolution.resolved()) return resolution.reasonCode();
+        if (resolution.percentage() == null) return "LIVE_ALLOCATION_PCT_MISSING";
+        if (!resolution.validForLive()) return "LIVE_ALLOCATION_PCT_INVALID";
+        OffsetDateTime effectiveTime = promotionTime == null ? OffsetDateTime.now() : promotionTime;
+        if (resolution.calculatedAt().isAfter(effectiveTime)
+                || !resolution.validUntil().isAfter(effectiveTime)) {
+            return "LIVE_ALLOCATION_PCT_STALE";
+        }
+        return null;
     }
 
     private void logDirectLivePolicyChecked(ShadowCopyAllocationEntity shadow, DirectLiveDecision decision) {
@@ -1395,17 +1557,6 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 + "|" + normalizeScopeValue(shadow.getScopeValue(), shadow.getCopyStrategyCode());
     }
 
-    private static BigDecimal firstPositive(BigDecimal... values) {
-        if (values != null) {
-            for (BigDecimal value : values) {
-                if (value != null && value.compareTo(ZERO) > 0) {
-                    return value.setScale(6, RoundingMode.HALF_UP);
-                }
-            }
-        }
-        return ZERO.setScale(6, RoundingMode.HALF_UP);
-    }
-
     private static BigDecimal positiveOrDefault(BigDecimal value, BigDecimal fallback) {
         return value == null || value.compareTo(ZERO) <= 0 ? fallback : value;
     }
@@ -1480,7 +1631,14 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 || "DIRECT_LIVE_ALLOWED_BY_POLICY".equals(normalized)
                 || "MICRO_LIVE_REQUIRED_BY_POLICY".equals(normalized)
                 || "LIVE_READY_FROM_SHADOW".equals(normalized)
-                || "LIVE_NOT_READY_FROM_SHADOW".equals(normalized);
+                || "LIVE_NOT_READY_FROM_SHADOW".equals(normalized)
+                || isLivePercentageReason(normalized);
+    }
+
+    private static boolean isLivePercentageReason(String reasonCode) {
+        String normalized = normalizeToken(reasonCode);
+        return normalized.startsWith("LIVE_ALLOCATION_PCT_")
+                || normalized.startsWith("LIVE_DISTRIBUTION_");
     }
 
     private static String normalizePolicy(String value) {
@@ -1502,6 +1660,18 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         if (value == null) return "";
         String clean = value.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').trim();
         return clean.length() > 300 ? clean.substring(0, 300) : clean;
+    }
+
+    private void recordLivePromotion(String result, String reason) {
+        if (meterRegistry == null) return;
+        meterRegistry.counter("copy_live_promotion_total",
+                "result", safeMetricTag(result), "reason", safeMetricTag(reason)).increment();
+    }
+
+    private static String safeMetricTag(String value) {
+        if (value == null || value.isBlank()) return "unknown";
+        String normalized = value.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]+", "_");
+        return normalized.length() > 80 ? normalized.substring(0, 80) : normalized;
     }
 
     private static int clampInt(int value, int min, int max) {
@@ -1602,6 +1772,21 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     ) {
     }
 
+    private static final class LiveAllocationPercentageRejectedException extends RuntimeException {
+        private final String reasonCode;
+
+        private LiveAllocationPercentageRejectedException(String reasonCode) {
+            super(reasonCode);
+            this.reasonCode = reasonCode == null || reasonCode.isBlank()
+                    ? "LIVE_DISTRIBUTION_NOT_AVAILABLE"
+                    : reasonCode.trim().toUpperCase(Locale.ROOT).replace('-', '_');
+        }
+
+        private String reasonCode() {
+            return reasonCode;
+        }
+    }
+
     private record CapitalConfig(
             boolean valid,
             String reasonCode,
@@ -1651,7 +1836,8 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             BigDecimal microLiveCapital,
             String resolvedCopyMode,
             String targetExecutionMode,
-            BigDecimal targetCapital
+            BigDecimal targetCapital,
+            LiveAllocationPercentageResolution percentageResolution
     ) {
         private static PromotionDecision allowed(
                 Map<String, Object> details,
@@ -1684,6 +1870,21 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 String targetExecutionMode,
                 BigDecimal targetCapital
         ) {
+            return allowed(details, detail, evidence, symbolResolution, microLiveCapital, resolvedCopyMode,
+                    targetExecutionMode, targetCapital, null);
+        }
+
+        private static PromotionDecision allowed(
+                Map<String, Object> details,
+                DetailUserEntity detail,
+                Evidence evidence,
+                CopySymbolResolution symbolResolution,
+                BigDecimal microLiveCapital,
+                String resolvedCopyMode,
+                String targetExecutionMode,
+                BigDecimal targetCapital,
+                LiveAllocationPercentageResolution percentageResolution
+        ) {
             return new PromotionDecision(
                     true,
                     "SHADOW_VALIDATED_READY_FOR_MICRO",
@@ -1694,12 +1895,14 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     nullToZero(microLiveCapital),
                     resolvedCopyMode,
                     targetExecutionMode == null || targetExecutionMode.isBlank() ? "MICRO_LIVE" : targetExecutionMode,
-                    nullToZero(targetCapital)
+                    nullToZero(targetCapital),
+                    percentageResolution
             );
         }
 
         private static PromotionDecision rejected(String reasonCode, Map<String, Object> details) {
-            return new PromotionDecision(false, reasonCode, details, null, null, null, ZERO, null, "SHADOW", ZERO);
+            return new PromotionDecision(false, reasonCode, details, null, null, null, ZERO, null,
+                    "SHADOW", ZERO, null);
         }
     }
 }

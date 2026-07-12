@@ -9,6 +9,10 @@ import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
 import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
+import com.apunto.engine.service.copy.allocation.LiveAllocationPercentageResolution;
+import com.apunto.engine.service.copy.allocation.LiveAllocationPercentageResolver;
+import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor;
+import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor.UnitMutationResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
@@ -32,8 +36,18 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -56,7 +70,6 @@ class MicroLivePromotionServiceImplTest {
                 new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
                 transactionOperations()
         );
-
         LivePromotionResult result = service.promoteMicroLiveToLive();
 
         assertEquals(1, result.rejected());
@@ -84,11 +97,167 @@ class MicroLivePromotionServiceImplTest {
         assertEquals("PROMOTED_MICRO_TO_LIVE", saved.get().getStatusReason());
         assertEquals(UserCopyAllocationEntity.Status.ACTIVE, saved.get().getStatus());
         assertEquals("copy_all_metric_movements", saved.get().getCopyMode());
+        assertEquals(new BigDecimal("0.120000"), saved.get().getAllocationPct());
+        assertEquals("PERCENTAGE", saved.get().getSizingMode());
+        assertEquals("SIGNALS_CURRENT_LIVE_DISTRIBUTION", saved.get().getAllocationPctSource());
+        assertTrue(saved.get().getAllocationPctSourceId() != null);
+        assertEquals(new BigDecimal("0.120000"), saved.get().getWalletTotalAllocationPct());
         assertTrue(audits.stream().anyMatch(a -> "LIVE_CREATED".equals(a.getDecision())));
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_CLOSED_FOR_LIVE".equals(a.getDecision())
                 && allocation.getId().equals(a.getMicroLiveAllocationId())));
         assertTrue(audits.stream().anyMatch(a -> allocation.getId().equals(a.getMicroLiveAllocationId())
                 && Long.valueOf(401L).equals(a.getLiveAllocationId())));
+    }
+
+    @Test
+    void failedLiveInsertRollsBackMicroCloseAndLeavesNoLiveAllocation() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        AtomicInteger liveInsertAttempts = new AtomicInteger();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        UserCopyAllocationRepository repository = proxy(UserCopyAllocationRepository.class, (method, args) -> {
+            if ("findMicroLivePromotionCandidates".equals(method.getName())) return List.of(allocation);
+            if ("findOpenLiveAllocationForUserWalletStrategyScope".equals(method.getName())) return Optional.empty();
+            if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
+                UserCopyAllocationEntity entity = (UserCopyAllocationEntity) args[0];
+                if ("LIVE".equals(entity.getExecutionMode())) {
+                    liveInsertAttempts.incrementAndGet();
+                    throw new IllegalStateException("simulated live insert failure");
+                }
+                return entity;
+            }
+            return unexpected(method);
+        });
+        LivePromotionProperties properties = properties();
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                repository,
+                evidenceRepository(12L, 12L, 12L, 3L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits),
+                properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                rollbackRestoringTransactionOperations(allocation)
+        );
+        setField(service, "liveAllocationPercentageResolver",
+                (LiveAllocationPercentageResolver) request -> resolvedPercentage("0.120000", "0.120000"));
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.rejected());
+        assertEquals(0, result.promoted());
+        assertEquals(1, liveInsertAttempts.get());
+        assertEquals("MICRO_LIVE", allocation.getExecutionMode());
+        assertEquals(UserCopyAllocationEntity.Status.ACTIVE, allocation.getStatus());
+        assertTrue(allocation.isActive());
+        assertEquals(null, allocation.getEndsAt());
+        assertTrue(audits.stream().anyMatch(a -> "PROMOTION_FAILED".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void legacyMicroPercentageCannotBeCopiedToLiveWithoutCurrentDistribution() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        allocation.setAllocationPct(new BigDecimal("0.000001"));
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        MicroLivePromotionServiceImpl service = service(
+                allocation,
+                12L,
+                0L,
+                "7.5",
+                8,
+                saved,
+                audits,
+                LiveAllocationPercentageResolution.rejected("LIVE_DISTRIBUTION_NOT_AVAILABLE")
+        );
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(0, result.promoted());
+        assertEquals(1, result.rejected());
+        assertEquals("MICRO_LIVE", allocation.getExecutionMode());
+        assertTrue(allocation.isActive());
+        assertEquals(UserCopyAllocationEntity.Status.ACTIVE, allocation.getStatus());
+        assertEquals("LIVE_DISTRIBUTION_NOT_AVAILABLE", saved.get().getStatusReason());
+    }
+
+    @Test
+    void currentDistributionAtPromotionReplacesHistoricalMicroPercentage() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        allocation.setAllocationPct(new BigDecimal("0.150000"));
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+
+        MicroLivePromotionServiceImpl service = service(
+                allocation,
+                12L,
+                0L,
+                "7.5",
+                8,
+                saved,
+                new ArrayList<>(),
+                resolvedPercentage("0.070000", "0.100000")
+        );
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.promoted());
+        assertEquals(new BigDecimal("0.070000"), saved.get().getAllocationPct());
+        assertEquals("LIVE", saved.get().getExecutionMode());
+    }
+
+    @Test
+    void invalidMissingPlaceholderAndStaleLivePercentagesAllKeepMicroLiveActive() {
+        OffsetDateTime calculatedAt = OffsetDateTime.now().minusMinutes(1);
+        UUID sourceId = UUID.randomUUID();
+        List<InvalidPercentageCase> cases = List.of(
+                new InvalidPercentageCase(
+                        LiveAllocationPercentageResolution.rejected("LIVE_ALLOCATION_PCT_MISSING"),
+                        "LIVE_ALLOCATION_PCT_MISSING"),
+                new InvalidPercentageCase(
+                        LiveAllocationPercentageResolution.resolved(
+                                BigDecimal.ZERO, new BigDecimal("0.100000"),
+                                "SIGNALS_CURRENT_LIVE_DISTRIBUTION", sourceId,
+                                calculatedAt, calculatedAt.plusMinutes(5)),
+                        "LIVE_ALLOCATION_PCT_INVALID"),
+                new InvalidPercentageCase(
+                        LiveAllocationPercentageResolution.resolved(
+                                new BigDecimal("-0.010000"), new BigDecimal("0.100000"),
+                                "SIGNALS_CURRENT_LIVE_DISTRIBUTION", sourceId,
+                                calculatedAt, calculatedAt.plusMinutes(5)),
+                        "LIVE_ALLOCATION_PCT_INVALID"),
+                new InvalidPercentageCase(
+                        LiveAllocationPercentageResolution.resolved(
+                                new BigDecimal("1.010000"), new BigDecimal("1.010000"),
+                                "SIGNALS_CURRENT_LIVE_DISTRIBUTION", sourceId,
+                                calculatedAt, calculatedAt.plusMinutes(5)),
+                        "LIVE_ALLOCATION_PCT_INVALID"),
+                new InvalidPercentageCase(
+                        LiveAllocationPercentageResolution.resolved(
+                                new BigDecimal("0.000001"), new BigDecimal("0.100000"),
+                                "LEGACY_MICRO_LIVE_SENTINEL", sourceId,
+                                calculatedAt, calculatedAt.plusMinutes(5)),
+                        "LIVE_ALLOCATION_PCT_INVALID"),
+                new InvalidPercentageCase(
+                        LiveAllocationPercentageResolution.resolved(
+                                new BigDecimal("0.100000"), new BigDecimal("0.100000"),
+                                "SIGNALS_CURRENT_LIVE_DISTRIBUTION", sourceId,
+                                calculatedAt.minusMinutes(10), calculatedAt.minusMinutes(5)),
+                        "LIVE_ALLOCATION_PCT_STALE")
+        );
+
+        for (InvalidPercentageCase invalid : cases) {
+            UserCopyAllocationEntity allocation = microLiveAllocation();
+            AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+            MicroLivePromotionServiceImpl service = service(
+                    allocation, 12L, 0L, "7.5", 8, saved, new ArrayList<>(), invalid.resolution());
+
+            LivePromotionResult result = service.promoteMicroLiveToLive();
+
+            assertEquals(0, result.promoted(), invalid.expectedReason());
+            assertEquals(1, result.rejected(), invalid.expectedReason());
+            assertTrue(allocation.isActive(), invalid.expectedReason());
+            assertEquals("MICRO_LIVE", allocation.getExecutionMode(), invalid.expectedReason());
+            assertEquals(invalid.expectedReason(), saved.get().getStatusReason());
+        }
     }
 
     @Test
@@ -215,11 +384,65 @@ class MicroLivePromotionServiceImplTest {
                 new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
                 transactionOperations()
         );
+        setField(service, "liveAllocationPercentageResolver",
+                (LiveAllocationPercentageResolver) request -> resolvedPercentage("0.120000", "0.120000"));
 
         LivePromotionResult result = service.promoteMicroLiveToLive();
 
         assertEquals(1, result.skipped());
         assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_PROMOTION_NOOP".equals(a.getDecision())));
+    }
+
+    @Test
+    void simultaneousPromotionsCreateExactlyOneLiveAllocation() throws Exception {
+        UserCopyAllocationEntity micro = microLiveAllocation();
+        AtomicReference<UserCopyAllocationEntity> microState = new AtomicReference<>(micro);
+        AtomicReference<UserCopyAllocationEntity> liveState = new AtomicReference<>();
+        AtomicInteger liveInserts = new AtomicInteger();
+        CyclicBarrier evaluationBarrier = new CyclicBarrier(2);
+        List<CopyPromotionAuditEntity> audits = new CopyOnWriteArrayList<>();
+        UserCopyAllocationRepository repository = concurrentAllocationRepository(
+                microState, liveState, liveInserts, evaluationBarrier);
+        LivePromotionProperties properties = properties();
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                repository,
+                evidenceRepository(12L, 12L, 12L, 3L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits),
+                properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations()
+        );
+        setField(service, "liveAllocationPercentageResolver",
+                (LiveAllocationPercentageResolver) request -> resolvedPercentage("0.120000", "0.120000"));
+        setField(service, "copyDistributionUnitExecutor", new SynchronizedProfileExecutor());
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<LivePromotionResult> first = pool.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                return service.promoteMicroLiveToLive();
+            });
+            Future<LivePromotionResult> second = pool.submit(() -> {
+                start.await(5, TimeUnit.SECONDS);
+                return service.promoteMicroLiveToLive();
+            });
+            start.countDown();
+
+            LivePromotionResult firstResult = first.get(10, TimeUnit.SECONDS);
+            LivePromotionResult secondResult = second.get(10, TimeUnit.SECONDS);
+
+            assertEquals(1, firstResult.promoted() + secondResult.promoted());
+            assertEquals(1, firstResult.skipped() + secondResult.skipped());
+            assertEquals(1, liveInserts.get());
+            assertTrue(liveState.get() != null);
+            assertEquals(new BigDecimal("0.120000"), liveState.get().getAllocationPct());
+            assertEquals(UserCopyAllocationEntity.Status.CLOSED, microState.get().getStatus());
+            assertTrue(!microState.get().isActive());
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -282,8 +505,22 @@ class MicroLivePromotionServiceImplTest {
             AtomicReference<UserCopyAllocationEntity> saved,
             List<CopyPromotionAuditEntity> audits
     ) {
+        return service(allocation, events, errors, pnl, days, saved, audits,
+                resolvedPercentage("0.120000", "0.120000"));
+    }
+
+    private static MicroLivePromotionServiceImpl service(
+            UserCopyAllocationEntity allocation,
+            long events,
+            long errors,
+            String pnl,
+            long days,
+            AtomicReference<UserCopyAllocationEntity> saved,
+            List<CopyPromotionAuditEntity> audits,
+            LiveAllocationPercentageResolution percentageResolution
+    ) {
         LivePromotionProperties properties = properties();
-        return new MicroLivePromotionServiceImpl(
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
                 allocationRepository(allocation, saved),
                 evidenceRepository(events, events, events, Math.min(events, 3L), errors, pnl, OffsetDateTime.now().minusDays(days)),
                 auditRepository(audits),
@@ -292,6 +529,31 @@ class MicroLivePromotionServiceImplTest {
                 new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
                 transactionOperations()
         );
+        setField(service, "liveAllocationPercentageResolver",
+                (LiveAllocationPercentageResolver) request -> percentageResolution);
+        return service;
+    }
+
+    private static LiveAllocationPercentageResolution resolvedPercentage(String strategyPct, String walletPct) {
+        OffsetDateTime calculatedAt = OffsetDateTime.now().minusMinutes(1);
+        return LiveAllocationPercentageResolution.resolved(
+                new BigDecimal(strategyPct),
+                new BigDecimal(walletPct),
+                "SIGNALS_CURRENT_LIVE_DISTRIBUTION",
+                UUID.randomUUID(),
+                calculatedAt,
+                calculatedAt.plusMinutes(5)
+        );
+    }
+
+    private static void setField(Object target, String fieldName, Object value) {
+        try {
+            java.lang.reflect.Field field = target.getClass().getDeclaredField(fieldName);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError("missing test injection field " + fieldName, failure);
+        }
     }
 
     private static LivePromotionProperties properties() {
@@ -363,6 +625,12 @@ class MicroLivePromotionServiceImplTest {
             this.calls.incrementAndGet();
             return response;
         }
+    }
+
+    private record InvalidPercentageCase(
+            LiveAllocationPercentageResolution resolution,
+            String expectedReason
+    ) {
     }
 
     private static UserCopyAllocationEntity microLiveAllocation() {
@@ -456,6 +724,47 @@ class MicroLivePromotionServiceImplTest {
         });
     }
 
+    private static UserCopyAllocationRepository concurrentAllocationRepository(
+            AtomicReference<UserCopyAllocationEntity> microState,
+            AtomicReference<UserCopyAllocationEntity> liveState,
+            AtomicInteger liveInserts,
+            CyclicBarrier evaluationBarrier
+    ) {
+        AtomicInteger initialLiveLookups = new AtomicInteger();
+        return proxy(UserCopyAllocationRepository.class, (method, args) -> {
+            switch (method.getName()) {
+                case "findMicroLivePromotionCandidates":
+                    return List.of(microState.get());
+                case "findById":
+                    return Optional.ofNullable(microState.get());
+                case "findOpenLiveAllocationForUserWalletStrategyScope":
+                    if (initialLiveLookups.getAndIncrement() < 2) {
+                        try {
+                            evaluationBarrier.await(5, TimeUnit.SECONDS);
+                        } catch (Exception failure) {
+                            throw new AssertionError("concurrent evaluation barrier failed", failure);
+                        }
+                        return Optional.empty();
+                    }
+                    return Optional.ofNullable(liveState.get());
+                case "save", "saveAndFlush":
+                    UserCopyAllocationEntity entity = (UserCopyAllocationEntity) args[0];
+                    if ("LIVE".equals(entity.getExecutionMode())) {
+                        if (liveState.get() == null) {
+                            entity.setId(401L);
+                            liveState.set(entity);
+                            liveInserts.incrementAndGet();
+                        }
+                        return liveState.get();
+                    }
+                    microState.set(entity);
+                    return entity;
+                default:
+                    return unexpected(method);
+            }
+        });
+    }
+
     private static CopyDispatchIntentRepository evidenceRepository(
             long submitted,
             long acknowledged,
@@ -504,6 +813,67 @@ class MicroLivePromotionServiceImplTest {
         return new TransactionTemplate(manager);
     }
 
+    private static TransactionOperations rollbackRestoringTransactionOperations(
+            UserCopyAllocationEntity allocation
+    ) {
+        AtomicReference<AllocationMutationSnapshot> snapshot = new AtomicReference<>();
+        PlatformTransactionManager manager = new PlatformTransactionManager() {
+            @Override
+            public TransactionStatus getTransaction(TransactionDefinition definition) {
+                snapshot.set(AllocationMutationSnapshot.capture(allocation));
+                return new SimpleTransactionStatus();
+            }
+
+            @Override
+            public void commit(TransactionStatus status) {
+            }
+
+            @Override
+            public void rollback(TransactionStatus status) {
+                snapshot.get().restore(allocation);
+            }
+        };
+        return new TransactionTemplate(manager);
+    }
+
+    private static final class SynchronizedProfileExecutor extends CopyDistributionUnitExecutor {
+        private final Map<String, Object> locks = new ConcurrentHashMap<>();
+
+        private SynchronizedProfileExecutor() {
+            super(null, new SimpleMeterRegistry(), null, noOpTransactionManager(), 15);
+        }
+
+        @Override
+        public UnitMutationResult execute(
+                UUID userId,
+                String walletId,
+                String profileKey,
+                Long allocationId,
+                Supplier<UnitMutationResult> work
+        ) {
+            synchronized (locks.computeIfAbsent(profileKey, ignored -> new Object())) {
+                return work.get();
+            }
+        }
+    }
+
+    private static PlatformTransactionManager noOpTransactionManager() {
+        return new PlatformTransactionManager() {
+            @Override
+            public TransactionStatus getTransaction(TransactionDefinition definition) {
+                return new SimpleTransactionStatus();
+            }
+
+            @Override
+            public void commit(TransactionStatus status) {
+            }
+
+            @Override
+            public void rollback(TransactionStatus status) {
+            }
+        };
+    }
+
     private static CopyPromotionAuditRepository auditRepository(List<CopyPromotionAuditEntity> audits) {
         return proxy(CopyPromotionAuditRepository.class, (method, args) -> {
             if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
@@ -514,6 +884,37 @@ class MicroLivePromotionServiceImplTest {
             }
             return unexpected(method);
         });
+    }
+
+    private record AllocationMutationSnapshot(
+            UserCopyAllocationEntity.Status status,
+            boolean active,
+            String executionMode,
+            String statusReason,
+            OffsetDateTime statusUpdatedAt,
+            OffsetDateTime updatedAt,
+            OffsetDateTime endsAt
+    ) {
+        private static AllocationMutationSnapshot capture(UserCopyAllocationEntity allocation) {
+            return new AllocationMutationSnapshot(
+                    allocation.getStatus(),
+                    allocation.isActive(),
+                    allocation.getExecutionMode(),
+                    allocation.getStatusReason(),
+                    allocation.getStatusUpdatedAt(),
+                    allocation.getUpdatedAt(),
+                    allocation.getEndsAt());
+        }
+
+        private void restore(UserCopyAllocationEntity allocation) {
+            allocation.setStatus(status);
+            allocation.setActive(active);
+            allocation.setExecutionMode(executionMode);
+            allocation.setStatusReason(statusReason);
+            allocation.setStatusUpdatedAt(statusUpdatedAt);
+            allocation.setUpdatedAt(updatedAt);
+            allocation.setEndsAt(endsAt);
+        }
     }
 
     @SuppressWarnings("unchecked")

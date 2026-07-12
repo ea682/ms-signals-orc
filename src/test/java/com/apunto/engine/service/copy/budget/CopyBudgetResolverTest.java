@@ -113,6 +113,46 @@ class CopyBudgetResolverTest {
     }
 
     @Test
+    void microLiveStillUsesFixedBudgetWhenAllocationPctIsNull() {
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                .executionMode("MICRO_LIVE")
+                .accountCapitalUsd(new BigDecimal("1000"))
+                .allocationPct(null)
+                .microLiveFixedBudgetUsd(new BigDecimal("100"))
+                .maxMarginPerOperationUsd(new BigDecimal("20"))
+                .openMarginUsedUsd(BigDecimal.ZERO)
+                .maxConcurrentPositions(5)
+                .openPositionsCount(0)
+                .capitalAsset("USDC")
+                .build());
+
+        assertTrue(decision.allowed());
+        assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
+        assertEquals(new BigDecimal("20.000000000000"), decision.copyMarginUsd());
+        assertFalse(decision.usesAllocationPct());
+    }
+
+    @Test
+    void microLiveLegacyRealPercentageDoesNotChangeFixedBudget() {
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                .executionMode("MICRO_LIVE")
+                .accountCapitalUsd(new BigDecimal("1000"))
+                .allocationPct(new BigDecimal("0.25"))
+                .microLiveFixedBudgetUsd(new BigDecimal("100"))
+                .maxMarginPerOperationUsd(new BigDecimal("20"))
+                .openMarginUsedUsd(BigDecimal.ZERO)
+                .maxConcurrentPositions(5)
+                .openPositionsCount(0)
+                .capitalAsset("USDC")
+                .build());
+
+        assertTrue(decision.allowed());
+        assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
+        assertEquals(new BigDecimal("20.000000000000"), decision.copyMarginUsd());
+        assertFalse(decision.usesAllocationPct());
+    }
+
+    @Test
     void microLiveWithPartialCapitalRejectsExactTarget() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("MICRO_LIVE")
