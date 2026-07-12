@@ -9,6 +9,9 @@ import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserDetailService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.allocation.LiveAllocationDistributionEntry;
+import com.apunto.engine.service.copy.allocation.LiveAllocationDistributionPublication;
+import com.apunto.engine.service.copy.allocation.LiveAllocationDistributionPublisher;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
 import org.junit.jupiter.api.Test;
@@ -30,6 +33,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class UserCopyAllocationServiceImplTest {
 
@@ -98,6 +102,13 @@ class UserCopyAllocationServiceImplTest {
         assertEquals(0, saved.get().stream()
                 .filter(e -> "LIVE".equals(e.getExecutionMode()))
                 .count());
+        UserCopyAllocationEntity savedMicro = saved.get().stream()
+                .filter(e -> "MICRO_LIVE".equals(e.getExecutionMode()))
+                .findFirst()
+                .orElseThrow();
+        assertNull(savedMicro.getAllocationPct());
+        assertEquals("FIXED_CAPITAL", savedMicro.getSizingMode());
+        assertEquals("FIXED_MICRO_BUDGET", savedMicro.getAllocationPctSource());
         assertEquals("MICRO_LIVE", linked.get().get(0).getExecutionMode());
     }
 
@@ -321,6 +332,27 @@ class UserCopyAllocationServiceImplTest {
                 defaultSymbolResolver()
         );
         setField(service, "directLivePolicy", "ALLOW_DIRECT_LIVE_FOR_LIVE_READY");
+        UUID distributionId = UUID.randomUUID();
+        OffsetDateTime calculatedAt = OffsetDateTime.now().minusSeconds(1);
+        setField(service, "liveAllocationDistributionPublisher", new LiveAllocationDistributionPublisher() {
+            @Override
+            public UUID publish(UUID ignoredUserId, List<LiveAllocationDistributionEntry> entries, OffsetDateTime ignoredAt) {
+                return distributionId;
+            }
+
+            @Override
+            public LiveAllocationDistributionPublication stage(
+                    UUID ignoredUserId,
+                    List<LiveAllocationDistributionEntry> entries,
+                    OffsetDateTime ignoredAt
+            ) {
+                return new LiveAllocationDistributionPublication(
+                        distributionId,
+                        "SIGNALS_CURRENT_LIVE_DISTRIBUTION",
+                        calculatedAt,
+                        calculatedAt.plusMinutes(5));
+            }
+        });
 
         service.syncDistribution(List.of(liveCandidate), List.of(liveCandidate));
 
@@ -328,6 +360,9 @@ class UserCopyAllocationServiceImplTest {
                 .filter(e -> "LIVE".equals(e.getExecutionMode()))
                 .count());
         assertEquals("copy_all_metric_movements", saved.get().get(0).getCopyMode());
+        assertEquals("PERCENTAGE", saved.get().get(0).getSizingMode());
+        assertEquals(distributionId, saved.get().get(0).getAllocationPctSourceId());
+        assertEquals("SIGNALS_CURRENT_LIVE_DISTRIBUTION", saved.get().get(0).getAllocationPctSource());
     }
 
     @Test

@@ -249,6 +249,8 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
                     final double allocationPct = Optional.ofNullable(a.getAllocationPct())
                             .map(java.math.BigDecimal::doubleValue)
                             .orElse(0.0);
+                    final boolean microLive = "MICRO_LIVE".equals(
+                            UserCopyAllocationEntity.normalizeExecutionMode(a.getExecutionMode()));
 
                     final MetricaWalletDto cached = allocationKey == null
                             ? historyIndex.findByWallet(walletId)
@@ -265,8 +267,11 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
 
                         MetricaWalletDto out = new MetricaWalletDto();
                         BeanUtils.copyProperties(cached, out);
-                        final double effectiveAllocationPct = clamp01(allocationPct * guardDecision.capitalMultiplier());
-                        if (effectiveAllocationPct <= 0.0) {
+                        final double effectiveAllocationPct = microLive
+                                ? 0.0
+                                : clamp01(allocationPct * guardDecision.capitalMultiplier());
+                        if (guardDecision.capitalMultiplier() <= 0.0
+                                || (!microLive && effectiveAllocationPct <= 0.0)) {
                             log.warn(
                                     "event=metric_wallets.candidates.skip_allocation userId={} wallet={} strategy={} reason=guard_capital_zero action={} allocationPct={} multiplier={} historySource={}",
                                     idUser, walletId, strategyCode, guardDecision.action(), allocationPct, guardDecision.capitalMultiplier(), historySource
@@ -276,12 +281,14 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
                         out.setCapitalShare(effectiveAllocationPct);
 
                         log.debug(
-                                "event=metric_wallets.candidates.match userId={} wallet={} strategy={} allocationPct={} effectiveAllocationPct={} guardAction={} guardMultiplier={} guardTargetExecutionMode={} hasScoring={} decisionMetricConservative={} historySource={}",
+                                "event=metric_wallets.candidates.match userId={} wallet={} strategy={} executionMode={} allocationPct={} effectiveAllocationPct={} usesAllocationPctForSizing={} guardAction={} guardMultiplier={} guardTargetExecutionMode={} hasScoring={} decisionMetricConservative={} historySource={}",
                                 idUser,
                                 walletId,
                                 strategyCode,
+                                a.getExecutionMode(),
                                 allocationPct,
                                 effectiveAllocationPct,
+                                !microLive,
                                 guardDecision.action(),
                                 guardDecision.capitalMultiplier(),
                                 guardDecision.targetExecutionMode(),
@@ -326,7 +333,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
                                     .globalRank(a.getGlobalRank())
                                     .score(a.getStrategyScore() == null ? null : a.getStrategyScore().doubleValue())
                                     .build())
-                            .capitalShare(allocationPct)
+                            .capitalShare(microLive ? 0.0 : allocationPct)
                             .build();
                 })
                 .filter(Objects::nonNull)
@@ -421,8 +428,13 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         final double allocationPct = Optional.ofNullable(allocation.getAllocationPct())
                 .map(java.math.BigDecimal::doubleValue)
                 .orElse(0.0);
-        final double effectiveAllocationPct = clamp01(allocationPct * guardDecision.capitalMultiplier());
-        if (effectiveAllocationPct <= 0.0) {
+        final boolean microLive = "MICRO_LIVE".equals(
+                UserCopyAllocationEntity.normalizeExecutionMode(allocation.getExecutionMode()));
+        final double effectiveAllocationPct = microLive
+                ? 0.0
+                : clamp01(allocationPct * guardDecision.capitalMultiplier());
+        if (guardDecision.capitalMultiplier() <= 0.0
+                || (!microLive && effectiveAllocationPct <= 0.0)) {
             return null;
         }
 

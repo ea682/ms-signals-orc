@@ -23,7 +23,6 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and uca.is_active = true
               and lower(uca.status) = 'active'
               and coalesce(uca.execution_mode, 'LIVE') = 'MICRO_LIVE'
-              and coalesce(uca.allocation_pct, 0) > 0
             order by uca.promoted_from_shadow_at asc nulls last, uca.updated_at asc nulls last, uca.id asc
             limit :limit
             """, nativeQuery = true)
@@ -56,7 +55,10 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and uca.is_active = true
               and lower(uca.status) = lower(:status)
               and coalesce(uca.execution_mode, 'LIVE') = :executionMode
-              and coalesce(uca.allocation_pct, 0) > 0
+              and (
+                  :executionMode = 'MICRO_LIVE'
+                  or (:executionMode = 'LIVE' and coalesce(uca.allocation_pct, 0) > 0)
+              )
             """, nativeQuery = true)
     long countActiveExecutableAllocationsByMode(
             @Param("executionMode") String executionMode,
@@ -83,8 +85,11 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
             where uca.ends_at is null
               and uca.is_active = true
               and lower(uca.status) = 'active'
-              and coalesce(uca.allocation_pct, 0) > 0
               and coalesce(uca.execution_mode, 'LIVE') = :executionMode
+              and (
+                  :executionMode = 'MICRO_LIVE'
+                  or (:executionMode = 'LIVE' and coalesce(uca.allocation_pct, 0) > 0)
+              )
               and du.is_user_active = true
               and du.is_api_key_binance_active = true
               and coalesce(du.capital, 0) > 0
@@ -179,6 +184,10 @@ public interface UserCopyAllocationRepository extends JpaRepository<UserCopyAllo
               and uca.is_active = true
               and lower(uca.status) = 'active'
               and coalesce(uca.execution_mode, 'LIVE') in ('LIVE', 'MICRO_LIVE')
+              and (
+                  coalesce(uca.execution_mode, 'LIVE') = 'MICRO_LIVE'
+                  or coalesce(uca.allocation_pct, 0) > 0
+              )
             """, nativeQuery = true)
     List<UserCopyAllocationEntity> findAllActiveRuntimeAllocations();
 

@@ -69,8 +69,26 @@ public class UserCopyAllocationEntity {
     @Column(name = "strategy_score", precision = 18, scale = 6)
     private BigDecimal strategyScore;
 
-    @Column(name = "allocation_pct", precision = 9, scale = 6, nullable = false)
+    @Column(name = "allocation_pct", precision = 9, scale = 6)
     private BigDecimal allocationPct;
+
+    @Column(name = "sizing_mode", length = 32)
+    private String sizingMode;
+
+    @Column(name = "allocation_pct_source", length = 80)
+    private String allocationPctSource;
+
+    @Column(name = "allocation_pct_source_id")
+    private UUID allocationPctSourceId;
+
+    @Column(name = "allocation_pct_calculated_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime allocationPctCalculatedAt;
+
+    @Column(name = "allocation_pct_valid_until", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime allocationPctValidUntil;
+
+    @Column(name = "wallet_total_allocation_pct", precision = 9, scale = 6)
+    private BigDecimal walletTotalAllocationPct;
 
     @Column(name = "score")
     private Integer score;
@@ -199,6 +217,9 @@ public class UserCopyAllocationEntity {
         resolvedQuoteAsset = normalizeUpper(resolvedQuoteAsset);
         symbolResolutionStatus = normalizeUpper(symbolResolutionStatus);
         symbolResolutionReason = normalizeUpper(symbolResolutionReason);
+        sizingMode = normalizeUpper(sizingMode);
+        allocationPctSource = normalizeUpper(allocationPctSource);
+        applyAllocationContractDefaults();
 
         if (strategyScore != null) {
             strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
@@ -206,6 +227,9 @@ public class UserCopyAllocationEntity {
 
         if (allocationPct != null) {
             allocationPct = allocationPct.setScale(6, RoundingMode.HALF_UP);
+        }
+        if (walletTotalAllocationPct != null) {
+            walletTotalAllocationPct = walletTotalAllocationPct.setScale(6, RoundingMode.HALF_UP);
         }
         if (leverageOverride != null) {
             leverageOverride = leverageOverride.setScale(2, RoundingMode.HALF_UP);
@@ -238,6 +262,9 @@ public class UserCopyAllocationEntity {
         resolvedQuoteAsset = normalizeUpper(resolvedQuoteAsset);
         symbolResolutionStatus = normalizeUpper(symbolResolutionStatus);
         symbolResolutionReason = normalizeUpper(symbolResolutionReason);
+        sizingMode = normalizeUpper(sizingMode);
+        allocationPctSource = normalizeUpper(allocationPctSource);
+        applyAllocationContractDefaults();
 
         if (strategyScore != null) {
             strategyScore = strategyScore.setScale(6, RoundingMode.HALF_UP);
@@ -245,6 +272,9 @@ public class UserCopyAllocationEntity {
 
         if (allocationPct != null) {
             allocationPct = allocationPct.setScale(6, RoundingMode.HALF_UP);
+        }
+        if (walletTotalAllocationPct != null) {
+            walletTotalAllocationPct = walletTotalAllocationPct.setScale(6, RoundingMode.HALF_UP);
         }
         if (leverageOverride != null) {
             leverageOverride = leverageOverride.setScale(2, RoundingMode.HALF_UP);
@@ -258,6 +288,17 @@ public class UserCopyAllocationEntity {
             if (endsAt == null) endsAt = now;
         } else {
             endsAt = null;
+        }
+    }
+
+    private void applyAllocationContractDefaults() {
+        if ("MICRO_LIVE".equals(executionMode)) {
+            if (sizingMode == null) sizingMode = "FIXED_CAPITAL";
+            if (allocationPct == null && allocationPctSource == null) {
+                allocationPctSource = "FIXED_MICRO_BUDGET";
+            }
+        } else if ("LIVE".equals(executionMode) && allocationPct != null && allocationPct.signum() > 0) {
+            if (sizingMode == null) sizingMode = "PERCENTAGE";
         }
     }
 

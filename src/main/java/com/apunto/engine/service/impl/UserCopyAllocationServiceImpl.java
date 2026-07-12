@@ -8,6 +8,10 @@ import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.allocation.LiveAllocationDistributionEntry;
+import com.apunto.engine.service.copy.allocation.LiveAllocationDistributionPublication;
+import com.apunto.engine.service.copy.allocation.LiveAllocationDistributionPublisher;
+import com.apunto.engine.service.copy.allocation.PostgresLiveAllocationDistributionService;
 import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor;
 import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor.UnitMutationResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
@@ -60,6 +64,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
     @Autowired(required = false)
     private CopyDistributionUnitExecutor copyDistributionUnitExecutor;
+
+    @Autowired(required = false)
+    private LiveAllocationDistributionPublisher liveAllocationDistributionPublisher;
 
     @Value("${metric-wallet.allocation.default-execution-mode:LIVE}")
     private String defaultExecutionMode;
@@ -117,16 +124,22 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         final List<MetricaWalletDto> liveSource = candidates == null ? List.of() : candidates;
         final List<MetricaWalletDto> shadowSource = shadowCandidates == null ? liveSource : shadowCandidates;
 
-        if (liveSource.isEmpty() && shadowSource.isEmpty()) {
-            log.debug("event=user_copy_allocation.sync_skipped reason=empty_candidates");
-            return;
-        }
-
         final OffsetDateTime now = OffsetDateTime.now();
 
         final List<UserDetailDto> users = userDetailService.findAllActive();
         if (users == null || users.isEmpty()) {
             log.debug("event=user_copy_allocation.sync_skipped reason=no_active_users");
+            return;
+        }
+
+        if (liveSource.isEmpty() && shadowSource.isEmpty()) {
+            for (UserDetailDto user : users) {
+                UUID idUser = user == null || user.getUser() == null ? null : user.getUser().getId();
+                if (idUser == null) continue;
+                LiveAllocationDistributionPublication publication = stageDistribution(idUser, List.of(), now);
+                finishDistribution(publication, 0);
+            }
+            log.debug("event=user_copy_allocation.sync_skipped reason=empty_candidates distributionInvalidated=true");
             return;
         }
 
@@ -269,7 +282,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     toSave.add(e);
                 }
 
+                LiveAllocationDistributionPublication publication = stageDistribution(idUser, List.of(), now);
                 int failedUnits = persistDistributionUnits(idUser, toSave, false);
+                finishDistribution(publication, failedUnits);
                 if (failedUnits > 0) {
                     log.warn("event=user_copy_allocation.sync_partial reasonCode=COPY_DISTRIBUTION_UNIT_FAILED userId={} closed={} paused={} blocked={} failedUnits={} shadowSeparate={} result=PARTIAL",
                             idUser, closed, paused, blockedAllocationKeys.size(), failedUnits,
@@ -333,6 +348,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
 
             final List<UserCopyAllocationEntity> toSave =
                     new ArrayList<>(newDist.size() + existingActive.size());
+            final Map<String, UserCopyAllocationEntity> distributionEntities = new LinkedHashMap<>();
 
             for (Map.Entry<String, Dist> entry : newDist.entrySet()) {
                 final String allocationKey = entry.getKey();
@@ -392,7 +408,15 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                         copyModeResolution.constraintReasonCode(),
                         d.targetExecutionMode()
                 );
-                entity.setAllocationPct(reentry ? reentryPct(d.pct()) : d.pct());
+                final String targetMode = executionModeForTarget(d.targetExecutionMode());
+                if ("MICRO_LIVE".equals(targetMode)) {
+                    applyMicroLivePercentageContract(entity);
+                } else {
+                    entity.setAllocationPct(reentry ? reentryPct(d.pct()) : d.pct());
+                    if ("LIVE".equals(targetMode)) {
+                        entity.setSizingMode("PERCENTAGE");
+                    }
+                }
                 entity.setScore(d.score());
                 entity.setCopyStrategyCode(d.strategyCode());
                 entity.setCopyStrategySlug(d.strategySlug());
@@ -423,7 +447,6 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                             allocationKey
                     );
                 }
-                final String targetMode = executionModeForTarget(d.targetExecutionMode());
                 if ("MICRO_LIVE".equals(targetMode) || "LIVE".equals(targetMode)) {
                     entity.setExecutionMode(targetMode);
                 } else if (!shadowCopyTradingService.isSeparateShadowEnabled() && "SHADOW".equals(targetMode)) {
@@ -445,6 +468,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 }
 
                 toSave.add(entity);
+                distributionEntities.put(allocationKey, entity);
             }
 
             final Set<String> newAllocationKeys = new HashSet<>(newDist.keySet());
@@ -478,7 +502,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 toSave.add(e);
             }
 
+            List<LiveAllocationDistributionEntry> distributionEntries = distributionEntries(newDist, distributionEntities);
+            LiveAllocationDistributionPublication publication = stageDistribution(idUser, distributionEntries, now);
+            applyDistributionMetadata(newDist, distributionEntities, distributionEntries, publication, now);
             int failedUnits = persistDistributionUnits(idUser, toSave, true);
+            finishDistribution(publication, failedUnits);
 
             final BigDecimal plannedTotalPct = newDist.values().stream()
                     .map(Dist::pct)
@@ -497,6 +525,105 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
         }
 
         invalidateRuntimeCaches("sync_distribution");
+    }
+
+    private List<LiveAllocationDistributionEntry> distributionEntries(
+            Map<String, Dist> distribution,
+            Map<String, UserCopyAllocationEntity> entities
+    ) {
+        List<LiveAllocationDistributionEntry> entries = new ArrayList<>();
+        for (Map.Entry<String, Dist> item : distribution.entrySet()) {
+            UserCopyAllocationEntity entity = entities.get(item.getKey());
+            if (entity == null || !isRealExecutionMode(entity.getExecutionMode())) continue;
+            BigDecimal economicPercentage = "MICRO_LIVE".equals(normalizeExecutionModeTarget(entity.getExecutionMode()))
+                    ? item.getValue().pct()
+                    : entity.getAllocationPct();
+            if (economicPercentage == null || economicPercentage.signum() <= 0) continue;
+            entries.add(new LiveAllocationDistributionEntry(
+                    item.getValue().walletId(),
+                    item.getValue().strategyCode(),
+                    item.getValue().scopeType(),
+                    item.getValue().scopeValue(),
+                    economicPercentage));
+        }
+        return List.copyOf(entries);
+    }
+
+    private LiveAllocationDistributionPublication stageDistribution(
+            UUID idUser,
+            List<LiveAllocationDistributionEntry> entries,
+            OffsetDateTime calculatedAt
+    ) {
+        if (liveAllocationDistributionPublisher == null) return null;
+        try {
+            return liveAllocationDistributionPublisher.stage(idUser, entries, calculatedAt);
+        } catch (RuntimeException ex) {
+            log.error("event=copy.live_distribution.stage_failed userId={} profiles={} decision=SKIP_RUNTIME_MUTATION reasonCode=LIVE_DISTRIBUTION_STAGE_FAILED errorClass={} errorMessage=\"{}\"",
+                    idUser, entries == null ? 0 : entries.size(), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            throw ex;
+        }
+    }
+
+    private void finishDistribution(LiveAllocationDistributionPublication publication, int failedUnits) {
+        if (publication == null || liveAllocationDistributionPublisher == null) return;
+        if (failedUnits > 0) {
+            liveAllocationDistributionPublisher.fail(
+                    publication.distributionId(), "COPY_DISTRIBUTION_UNIT_FAILED");
+            return;
+        }
+        try {
+            liveAllocationDistributionPublisher.complete(publication.distributionId());
+        } catch (RuntimeException ex) {
+            liveAllocationDistributionPublisher.fail(
+                    publication.distributionId(), "LIVE_DISTRIBUTION_COMPLETION_FAILED");
+            throw ex;
+        }
+    }
+
+    private void applyDistributionMetadata(
+            Map<String, Dist> distribution,
+            Map<String, UserCopyAllocationEntity> entities,
+            List<LiveAllocationDistributionEntry> entries,
+            LiveAllocationDistributionPublication publication,
+            OffsetDateTime calculatedAt
+    ) {
+        Map<String, BigDecimal> walletTotals = new HashMap<>();
+        for (LiveAllocationDistributionEntry entry : entries) {
+            walletTotals.merge(entry.walletId(), entry.strategyPercentage(), BigDecimal::add);
+        }
+        walletTotals.replaceAll((wallet, total) -> total.setScale(6, RoundingMode.HALF_UP));
+
+        for (Map.Entry<String, UserCopyAllocationEntity> item : entities.entrySet()) {
+            UserCopyAllocationEntity entity = item.getValue();
+            String mode = normalizeExecutionModeTarget(entity.getExecutionMode());
+            if ("MICRO_LIVE".equals(mode)) {
+                applyMicroLivePercentageContract(entity);
+                log.info("event=copy.allocation.percentage.resolved executionMode=MICRO_LIVE userId={} walletId={} strategyCode={} scopeType={} scopeValue={} allocationPct=null allocationPctSource=FIXED_MICRO_BUDGET allocatedCapitalUsd=100 usesAllocationPctForSizing=false decision=ALLOW reasonCode=MICRO_LIVE_FIXED_BUDGET_NO_PCT",
+                        entity.getIdUser(), entity.getWalletId(), entity.getCopyStrategyCode(),
+                        entity.getScopeType(), entity.getScopeValue());
+                continue;
+            }
+            if (!"LIVE".equals(mode)) continue;
+            Dist dist = distribution.get(item.getKey());
+            entity.setSizingMode("PERCENTAGE");
+            entity.setAllocationPctSource(publication == null || publication.source() == null
+                    ? PostgresLiveAllocationDistributionService.SOURCE
+                    : publication.source());
+            entity.setAllocationPctSourceId(publication == null ? null : publication.distributionId());
+            entity.setAllocationPctCalculatedAt(publication == null ? calculatedAt : publication.calculatedAt());
+            entity.setAllocationPctValidUntil(publication == null ? null : publication.validUntil());
+            entity.setWalletTotalAllocationPct(walletTotals.get(normalize(dist == null ? entity.getWalletId() : dist.walletId())));
+        }
+    }
+
+    private static void applyMicroLivePercentageContract(UserCopyAllocationEntity entity) {
+        entity.setAllocationPct(null);
+        entity.setSizingMode("FIXED_CAPITAL");
+        entity.setAllocationPctSource("FIXED_MICRO_BUDGET");
+        entity.setAllocationPctSourceId(null);
+        entity.setAllocationPctCalculatedAt(null);
+        entity.setAllocationPctValidUntil(null);
+        entity.setWalletTotalAllocationPct(null);
     }
 
     private int persistDistributionUnits(
