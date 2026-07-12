@@ -1,6 +1,6 @@
 package com.apunto.engine.repository;
 
-import java.time.OffsetDateTime;
+import java.time.Instant;
 
 public interface ShadowCoverageCountsProjection {
 
@@ -14,7 +14,7 @@ public interface ShadowCoverageCountsProjection {
 
     Long getErrorEvents();
 
-    OffsetDateTime getOldestEventTime();
+    Instant getOldestEventTime();
 
-    OffsetDateTime getNewestEventTime();
+    Instant getNewestEventTime();
 }

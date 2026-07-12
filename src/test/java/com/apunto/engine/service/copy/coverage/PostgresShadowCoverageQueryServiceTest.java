@@ -156,8 +156,8 @@ class PostgresShadowCoverageQueryServiceTest {
             case "getRecordedEvents" -> recorded;
             case "getSkippedEvents" -> skipped;
             case "getErrorEvents" -> errors;
-            case "getOldestEventTime" -> NOW.minusHours(3);
-            case "getNewestEventTime" -> NOW;
+            case "getOldestEventTime" -> NOW.minusHours(3).toInstant();
+            case "getNewestEventTime" -> NOW.toInstant();
             default -> unexpected(method);
         });
     }

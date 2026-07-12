@@ -29,6 +29,8 @@ import com.apunto.engine.service.copy.coverage.ShadowCoverageSource;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageWindowProperties;
 import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
 import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
+import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor;
+import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor.UnitMutationResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver.CopyModeResolution;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
@@ -38,6 +40,7 @@ import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
 import com.apunto.engine.shared.enums.FuturesCapitalAsset;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
@@ -80,6 +83,9 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     private final ShadowCoverageQueryService shadowCoverageQueryService;
     private final ShadowCoverageCalculator shadowCoverageCalculator;
     private final ShadowCoverageWindowProperties shadowCoverageProperties;
+
+    @Autowired(required = false)
+    private CopyDistributionUnitExecutor copyDistributionUnitExecutor;
 
     @Override
     public ShadowPromotionResult promoteShadowToMicroLive() {
@@ -132,7 +138,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 if (!decision.allowed() && "ALREADY_PROMOTED".equals(decision.reasonCode())) {
                     skipped++;
                     Optional<UserCopyAllocationEntity> existing = existingAllocation(shadow);
-                    existing.ifPresent(allocation -> linkShadowToExisting(shadow, allocation, now));
+                    existing.ifPresent(allocation -> linkShadowToExistingUnderProfileLock(shadow, allocation, now));
                     audit(shadow, decision, existing.orElse(null), "SHADOW_PROMOTION_NOOP");
                     log.info(
                             "event=copy.promotion.micro_live.noop userId={} walletId={} shadowAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=MICRO_LIVE decision=NOOP reasonCode={} elapsedMs={}",
@@ -175,8 +181,13 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     continue;
                 }
                 if (!decision.allowed()) {
+                    if (!markRejectedUnderProfileLock(shadow, decision, now)) {
+                        skipped++;
+                        log.info("event=copy.promotion.shadow_rejection.noop userId={} walletId={} shadowAllocationId={} strategyCode={} decision=NOOP reasonCode=ALREADY_PROMOTED profileLockResolvedRace=true elapsedMs={}",
+                                shadow.getIdUser(), shadow.getWalletId(), shadow.getId(), shadow.getCopyStrategyCode(), elapsedMs(candidateNs));
+                        continue;
+                    }
                     rejected++;
-                    markRejected(shadow, decision, now);
                     audit(shadow, decision, null, "SHADOW_PROMOTION_REJECTED");
                     boolean directLiveRejected = isDirectLiveReason(decision.reasonCode());
                     log.info(
@@ -196,8 +207,23 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     );
                     continue;
                 }
+                PromotionUnitOutcome promotion = promoteUnderProfileLock(shadow, decision, now);
+                if (!promotion.created()) {
+                    skipped++;
+                    UserCopyAllocationEntity existing = promotion.output().allocation();
+                    PromotionDecision noop = PromotionDecision.rejected("ALREADY_PROMOTED", details(shadow, null, extras(
+                            "existingAllocationId", existing == null ? null : existing.getId(),
+                            "raceResolvedByProfileLock", true
+                    )));
+                    audit(shadow, noop, existing, "SHADOW_PROMOTION_NOOP");
+                    log.info("event=copy.promotion.shadow_to_micro.noop userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategyCode={} scopeType={} scopeValue={} executionMode={} decision=NOOP reasonCode=ALREADY_PROMOTED profileLockResolvedRace=true elapsedMs={}",
+                            shadow.getIdUser(), shadow.getWalletId(), shadow.getId(), existing == null ? null : existing.getId(),
+                            shadow.getCopyStrategyCode(), shadow.getScopeType(), shadow.getScopeValue(),
+                            existing == null ? decision.targetExecutionMode() : existing.getExecutionMode(), elapsedMs(candidateNs));
+                    continue;
+                }
                 ready++;
-                PromotionOutput output = promote(shadow, decision, now);
+                PromotionOutput output = promotion.output();
                 created++;
                 boolean liveCreated = "LIVE".equals(output.allocation().getExecutionMode());
                 audit(shadow, decision, output.allocation(), liveCreated ? "LIVE_ALLOCATION_CREATED" : "MICRO_LIVE_CREATED");
@@ -261,7 +287,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                             "existingAllocationId", existing.get().getId(),
                             "errorClass", ex.getClass().getSimpleName()
                     )));
-                    linkShadowToExisting(shadow, existing.get(), now);
+                    linkShadowToExistingUnderProfileLock(shadow, existing.get(), now);
                     audit(shadow, noop, existing.get(), "SHADOW_PROMOTION_NOOP");
                     log.info(
                             "event=copy.promotion.micro_live.noop userId={} walletId={} shadowAllocationId={} userCopyAllocationId={} strategyCode={} scopeType={} scopeValue={} sourceCopyMode={} resolvedCopyMode={} executionMode=MICRO_LIVE decision=NOOP reasonCode=ALREADY_PROMOTED elapsedMs={}",
@@ -698,6 +724,99 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             return PromotionDecision.rejected(gate.reasonCode(), details(shadow, evidence, fullDecisionDetails(decision, gate)));
         }
         return PromotionDecision.allowed(details(shadow, evidence, fullDecisionDetails(decision, gate)), null, evidence, null, ZERO);
+    }
+
+    private PromotionUnitOutcome promoteUnderProfileLock(
+            ShadowCopyAllocationEntity shadow,
+            PromotionDecision decision,
+            OffsetDateTime now
+    ) {
+        if (copyDistributionUnitExecutor == null) {
+            return new PromotionUnitOutcome(promote(shadow, decision, now), true);
+        }
+        PromotionUnitOutcome[] outcome = new PromotionUnitOutcome[1];
+        copyDistributionUnitExecutor.execute(
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                strategyKey(shadow),
+                null,
+                () -> {
+                    ShadowCopyAllocationEntity current = shadowAllocationRepository.findById(shadow.getId())
+                            .orElseThrow(() -> new IllegalStateException("SHADOW_PROMOTION_ALLOCATION_MISSING"));
+                    Optional<UserCopyAllocationEntity> existing = existingAllocation(current);
+                    if (existing.isEmpty() && current.getLinkedLiveAllocationId() != null) {
+                        existing = allocationRepository.findById(current.getLinkedLiveAllocationId());
+                    }
+                    if (existing.isPresent()) {
+                        UserCopyAllocationEntity allocation = existing.get();
+                        linkShadowToExisting(current, allocation, now);
+                        outcome[0] = new PromotionUnitOutcome(new PromotionOutput(null, allocation), false);
+                        return UnitMutationResult.persisted(false, false);
+                    }
+                    if (current.getLinkedLiveAllocationId() != null) {
+                        throw new IllegalStateException("SHADOW_PROMOTION_LINKED_ALLOCATION_MISSING");
+                    }
+                    PromotionOutput created = promote(current, decision, now);
+                    outcome[0] = new PromotionUnitOutcome(created, true);
+                    return UnitMutationResult.persisted(true, false);
+                }
+        );
+        return Objects.requireNonNull(outcome[0], "promotion unit outcome");
+    }
+
+    private boolean markRejectedUnderProfileLock(
+            ShadowCopyAllocationEntity shadow,
+            PromotionDecision decision,
+            OffsetDateTime now
+    ) {
+        if (copyDistributionUnitExecutor == null) {
+            markRejected(shadow, decision, now);
+            return true;
+        }
+        boolean[] recorded = new boolean[1];
+        copyDistributionUnitExecutor.execute(
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                strategyKey(shadow),
+                shadow.getLinkedLiveAllocationId(),
+                () -> {
+                    ShadowCopyAllocationEntity current = shadowAllocationRepository.findById(shadow.getId())
+                            .orElseThrow(() -> new IllegalStateException("SHADOW_PROMOTION_ALLOCATION_MISSING"));
+                    if (current.getLinkedLiveAllocationId() != null) {
+                        return UnitMutationResult.none();
+                    }
+                    markRejected(current, decision, now);
+                    recorded[0] = true;
+                    return UnitMutationResult.persisted(false, false);
+                }
+        );
+        return recorded[0];
+    }
+
+    private void linkShadowToExistingUnderProfileLock(
+            ShadowCopyAllocationEntity shadow,
+            UserCopyAllocationEntity allocation,
+            OffsetDateTime now
+    ) {
+        if (copyDistributionUnitExecutor == null) {
+            linkShadowToExisting(shadow, allocation, now);
+            return;
+        }
+        copyDistributionUnitExecutor.execute(
+                shadow.getIdUser(),
+                shadow.getWalletId(),
+                strategyKey(shadow),
+                allocation.getId(),
+                () -> {
+                    ShadowCopyAllocationEntity current = shadowAllocationRepository.findById(shadow.getId())
+                            .orElseThrow(() -> new IllegalStateException("SHADOW_PROMOTION_ALLOCATION_MISSING"));
+                    UserCopyAllocationEntity currentAllocation = allocation.getId() == null
+                            ? allocation
+                            : allocationRepository.findById(allocation.getId()).orElse(allocation);
+                    linkShadowToExisting(current, currentAllocation, now);
+                    return UnitMutationResult.persisted(false, false);
+                }
+        );
     }
 
     private PromotionOutput promote(ShadowCopyAllocationEntity shadow, PromotionDecision decision, OffsetDateTime now) {
@@ -1468,6 +1587,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     private record PromotionOutput(
             UserWalletCopyPlanEntity plan,
             UserCopyAllocationEntity allocation
+    ) {
+    }
+
+    private record PromotionUnitOutcome(
+            PromotionOutput output,
+            boolean created
     ) {
     }
 

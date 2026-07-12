@@ -44,7 +44,7 @@ class CopyBudgetResolverTest {
                 .build());
 
         assertFalse(decision.allowed());
-        assertEquals("INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL", decision.reasonCode());
+        assertEquals("MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE", decision.reasonCode());
         assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
     }
 
@@ -129,7 +129,7 @@ class CopyBudgetResolverTest {
         assertFalse(decision.allowed());
         assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
         assertEquals(BigDecimal.ZERO.setScale(12), decision.copyMarginUsd());
-        assertEquals(CopyBudgetResolver.INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL, decision.reasonCode());
+        assertEquals("MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE", decision.reasonCode());
     }
 
     @Test
@@ -148,7 +148,7 @@ class CopyBudgetResolverTest {
 
         assertFalse(decision.allowed());
         assertEquals(new BigDecimal("100.000000000000"), decision.budgetUsd());
-        assertEquals(CopyBudgetResolver.INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL, decision.reasonCode());
+        assertEquals("MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE", decision.reasonCode());
     }
 
     @Test
@@ -213,8 +213,25 @@ class CopyBudgetResolverTest {
                 .build());
 
         assertFalse(decision.allowed());
-        assertEquals(CopyBudgetResolver.MICRO_LIVE_CAPACITY_EXCEEDED, decision.reasonCode());
+        assertEquals("MICRO_LIVE_TOTAL_MARGIN_EXCEEDED", decision.reasonCode());
         assertEquals(BigDecimal.ZERO.setScale(12), decision.copyMarginUsd());
+    }
+
+    @Test
+    void microLiveDistinguishesConcurrentPositionCapFromMarginCap() {
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                .executionMode("MICRO_LIVE")
+                .accountCapitalUsd(new BigDecimal("1000"))
+                .microLiveFixedBudgetUsd(new BigDecimal("100"))
+                .maxMarginPerOperationUsd(new BigDecimal("20"))
+                .openMarginUsedUsd(new BigDecimal("80"))
+                .maxConcurrentPositions(5)
+                .openPositionsCount(5)
+                .leverage(new BigDecimal("5"))
+                .build());
+
+        assertFalse(decision.allowed());
+        assertEquals("MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED", decision.reasonCode());
     }
 
     @Test

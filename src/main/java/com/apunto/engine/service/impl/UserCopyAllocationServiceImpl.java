@@ -8,6 +8,8 @@ import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor;
+import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor.UnitMutationResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver.CopyModeResolution;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
@@ -16,11 +18,10 @@ import com.apunto.engine.shared.enums.FuturesCapitalAsset;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.annotation.PostConstruct;
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceContext;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.transaction.annotation.Transactional;
@@ -42,6 +43,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Service
 @Slf4j
@@ -55,8 +57,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
     private final ShadowCopyTradingService shadowCopyTradingService;
     private final CopySymbolResolver copySymbolResolver;
-    @PersistenceContext
-    private EntityManager entityManager;
+
+    @Autowired(required = false)
+    private CopyDistributionUnitExecutor copyDistributionUnitExecutor;
 
     @Value("${metric-wallet.allocation.default-execution-mode:LIVE}")
     private String defaultExecutionMode;
@@ -104,13 +107,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     }
 
     @Override
-    @Transactional
     public void syncDistribution(List<MetricaWalletDto> candidates) {
         syncDistribution(candidates, candidates);
     }
 
     @Override
-    @Transactional
     public void syncDistribution(List<MetricaWalletDto> candidates, List<MetricaWalletDto> shadowCandidates) {
 
         final List<MetricaWalletDto> liveSource = candidates == null ? List.of() : candidates;
@@ -155,9 +156,6 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     : filterSymbolSpecialistByCapitalAsset(shadowSource, user, idUser, "SHADOW", null);
 
             shadowCopyTradingService.syncShadowAllocations(idUser, userShadowSource, maxWallet, now);
-
-            entityManager.flush();
-            entityManager.clear();
 
             final boolean separateShadowEnabled = shadowCopyTradingService.isSeparateShadowEnabled();
             final Map<String, CopyExecutionDecision> realExecutionByAllocationKey = new HashMap<>();
@@ -271,18 +269,16 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                     toSave.add(e);
                 }
 
-                if (!toSave.isEmpty()) {
-                    repository.saveAll(toSave);
+                int failedUnits = persistDistributionUnits(idUser, toSave, false);
+                if (failedUnits > 0) {
+                    log.warn("event=user_copy_allocation.sync_partial reasonCode=COPY_DISTRIBUTION_UNIT_FAILED userId={} closed={} paused={} blocked={} failedUnits={} shadowSeparate={} result=PARTIAL",
+                            idUser, closed, paused, blockedAllocationKeys.size(), failedUnits,
+                            shadowCopyTradingService.isSeparateShadowEnabled());
+                } else {
+                    log.debug("event=user_copy_allocation.sync_ok reasonCode=empty_distribution userId={} closed={} paused={} blocked={} failedUnits=0 shadowSeparate={}",
+                            idUser, closed, paused, blockedAllocationKeys.size(),
+                            shadowCopyTradingService.isSeparateShadowEnabled());
                 }
-
-                log.debug(
-                        "event=user_copy_allocation.sync_ok reasonCode=empty_distribution userId={} closed={} paused={} blocked={} shadowSeparate={}",
-                        idUser,
-                        closed,
-                        paused,
-                        blockedAllocationKeys.size(),
-                        shadowCopyTradingService.isSeparateShadowEnabled()
-                );
                 continue;
             }
 
@@ -482,38 +478,103 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 toSave.add(e);
             }
 
-            repository.saveAllAndFlush(toSave);
-            shadowCopyTradingService.linkLiveAllocations(
-                    idUser,
-                    toSave.stream()
-                            .filter(Objects::nonNull)
-                            .filter(UserCopyAllocationEntity::isActive)
-                            .filter(e -> e.getStatus() == UserCopyAllocationEntity.Status.ACTIVE)
-                            .filter(e -> isRealExecutionMode(e.getExecutionMode()))
-                            .toList()
-            );
-            repository.saveAllAndFlush(toSave);
+            int failedUnits = persistDistributionUnits(idUser, toSave, true);
 
-            final BigDecimal persistedTotal = newDist.values().stream()
+            final BigDecimal plannedTotalPct = newDist.values().stream()
                     .map(Dist::pct)
                     .reduce(ZERO, BigDecimal::add)
                     .setScale(6, RoundingMode.HALF_UP);
 
-            log.debug(
-                    "event=user_copy_allocation.sync_ok userId={} maxWallet={} candidates={} persisted={} closed={} paused={} blocked={} targetTotalPct={} persistedTotal={}",
-                    idUser,
-                    maxWallet,
-                    liveSource.size(),
-                    newDist.size(),
-                    closed,
-                    paused,
-                    blockedAllocationKeys.size(),
-                    targetTotalPct,
-                    persistedTotal
-            );
+            if (failedUnits > 0) {
+                log.warn("event=user_copy_allocation.sync_partial reasonCode=COPY_DISTRIBUTION_UNIT_FAILED userId={} maxWallet={} candidates={} planned={} closed={} paused={} blocked={} failedUnits={} targetTotalPct={} plannedTotalPct={} result=PARTIAL",
+                        idUser, maxWallet, liveSource.size(), newDist.size(), closed, paused,
+                        blockedAllocationKeys.size(), failedUnits, targetTotalPct, plannedTotalPct);
+            } else {
+                log.debug("event=user_copy_allocation.sync_ok userId={} maxWallet={} candidates={} persisted={} closed={} paused={} blocked={} failedUnits=0 targetTotalPct={} persistedTotalPct={}",
+                        idUser, maxWallet, liveSource.size(), newDist.size(), closed, paused,
+                        blockedAllocationKeys.size(), targetTotalPct, plannedTotalPct);
+            }
         }
 
         invalidateRuntimeCaches("sync_distribution");
+    }
+
+    private int persistDistributionUnits(
+            UUID idUser,
+            List<UserCopyAllocationEntity> entities,
+            boolean linkLive
+    ) {
+        if (entities == null || entities.isEmpty()) {
+            return 0;
+        }
+        if (copyDistributionUnitExecutor == null) {
+            if (linkLive) {
+                repository.saveAllAndFlush(entities);
+                shadowCopyTradingService.linkLiveAllocations(
+                        idUser,
+                        entities.stream().filter(this::isLinkableRealAllocation).toList()
+                );
+                repository.saveAllAndFlush(entities);
+            } else {
+                repository.saveAll(entities);
+            }
+            return 0;
+        }
+
+        Map<String, UserCopyAllocationEntity> uniqueByProfile = new LinkedHashMap<>();
+        for (UserCopyAllocationEntity entity : entities) {
+            if (entity == null) continue;
+            String profileKey = allocationKey(entity);
+            String fallbackKey = entity.getId() == null
+                    ? "new:" + System.identityHashCode(entity)
+                    : "id:" + entity.getId();
+            uniqueByProfile.put(profileKey == null ? fallbackKey : profileKey, entity);
+        }
+
+        AtomicInteger failures = new AtomicInteger();
+        uniqueByProfile.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey(String.CASE_INSENSITIVE_ORDER))
+                .forEach(entry -> {
+                    String profileKey = entry.getKey();
+                    UserCopyAllocationEntity entity = entry.getValue();
+                    boolean inserted = entity.getId() == null;
+                    boolean closed = entity.getStatus() == UserCopyAllocationEntity.Status.CLOSED;
+                    try {
+                        copyDistributionUnitExecutor.execute(
+                                idUser,
+                                entity.getWalletId(),
+                                profileKey,
+                                entity.getId(),
+                                () -> {
+                                    // An IDENTITY value survives on the detached object after a
+                                    // deadlock rollback. Reset it so the bounded retry inserts again.
+                                    if (inserted && entity.getId() != null) {
+                                        entity.setId(null);
+                                    }
+                                    repository.saveAndFlush(entity);
+                                    if (linkLive && isLinkableRealAllocation(entity)) {
+                                        shadowCopyTradingService.linkLiveAllocations(idUser, List.of(entity));
+                                        repository.saveAndFlush(entity);
+                                    }
+                                    return UnitMutationResult.persisted(inserted, closed);
+                                }
+                        );
+                    } catch (RuntimeException ex) {
+                        failures.incrementAndGet();
+                        log.warn("event=user_copy_allocation.sync.continuing_after_unit_failure reasonCode=COPY_DISTRIBUTION_UNIT_FAILED decision=CONTINUE_OTHER_UNITS userId={} walletId={} profileKey={} allocationId={} retryable={} errorClass={} errorMessage=\"{}\"",
+                                idUser, entity.getWalletId(), profileKey, entity.getId(),
+                                com.apunto.engine.service.copy.concurrency.PostgresDeadlockRetryExecutor.isDeadlock(ex),
+                                ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+                    }
+                });
+        return failures.get();
+    }
+
+    private boolean isLinkableRealAllocation(UserCopyAllocationEntity entity) {
+        return entity != null
+                && entity.isActive()
+                && entity.getStatus() == UserCopyAllocationEntity.Status.ACTIVE
+                && isRealExecutionMode(entity.getExecutionMode());
     }
 
     @Override

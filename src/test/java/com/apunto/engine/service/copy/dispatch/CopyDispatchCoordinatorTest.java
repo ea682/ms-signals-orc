@@ -670,6 +670,21 @@ class CopyDispatchCoordinatorTest {
     }
 
     @Test
+    void legacyRejectedIntentWithoutReasonFailsClosedWithExplicitDiagnostic() {
+        UUID intentId = UUID.randomUUID();
+        CopyDispatchIntentStore store = new RejectedAcquireStore(intentId, "REJECTED");
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+
+        SkipExecutionException rejected = assertThrows(SkipExecutionException.class,
+                () -> coordinator.dispatch(open("evt-budget-reject-legacy"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals("COPY_DISPATCH_REJECTION_REASON_MISSING", rejected.getReasonCode());
+        assertEquals(0, gateway.calls.get());
+    }
+
+    @Test
     void invalidClientOrderIdRejectsBeforeClaimAndGateway() {
         FakeStore store = new FakeStore();
         FakeGateway gateway = new FakeGateway(filled("100"));

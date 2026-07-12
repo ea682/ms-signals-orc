@@ -54,14 +54,18 @@ public class CopyDispatchCoordinator {
 
         if (permit.decision() == CopyDispatchPermit.Decision.REUSE_ACKNOWLEDGED) {
             recordDispatch(request, "reused");
-            log.info("event=copy.dispatch.intent.duplicate idempotencyKey={} existingIntentId={} existingStatus={} decision=NOOP_REUSE_ACK",
-                    request.idempotencyKey(), permit.intentId(), permit.existingStatus());
+            String reasonCode = duplicateIntentReason(request);
+            recordDuplicateDispatch(request, reasonCode, "reused");
+            log.info("event=copy.dispatch.intent.duplicate reasonCode={} idempotencyKey={} existingIntentId={} existingStatus={} decision=NOOP_REUSE_ACK copyImpact=NO_DUPLICATE_ORDER",
+                    reasonCode, request.idempotencyKey(), permit.intentId(), permit.existingStatus());
             return permit.knownResponse();
         }
         if (permit.decision() == CopyDispatchPermit.Decision.RECONCILE_EXISTING) {
             recordDispatch(request, "reconcile");
-            log.warn("event=copy.dispatch.intent.duplicate idempotencyKey={} existingIntentId={} existingStatus={} decision=RECONCILE_EXISTING",
-                    request.idempotencyKey(), permit.intentId(), permit.existingStatus());
+            String reasonCode = duplicateIntentReason(request);
+            recordDuplicateDispatch(request, reasonCode, "reconcile");
+            log.warn("event=copy.dispatch.intent.duplicate reasonCode={} idempotencyKey={} existingIntentId={} existingStatus={} decision=RECONCILE_EXISTING retryable=false copyImpact=NO_DUPLICATE_ORDER",
+                    reasonCode, request.idempotencyKey(), permit.intentId(), permit.existingStatus());
             throw reconciliationPending(permit.intentId(), request, "existing_intent_not_terminal", null);
         }
         if (permit.decision() == CopyDispatchPermit.Decision.CONFLICT) {
@@ -74,8 +78,10 @@ public class CopyDispatchCoordinator {
         }
         if (permit.decision() == CopyDispatchPermit.Decision.NOOP_PERSISTED) {
             recordDispatch(request, "noop");
-            log.info("event=copy.dispatch.intent.duplicate idempotencyKey={} existingIntentId={} existingStatus={} decision=NOOP_ALREADY_APPLIED",
-                    request.idempotencyKey(), permit.intentId(), permit.existingStatus());
+            String reasonCode = duplicateIntentReason(request);
+            recordDuplicateDispatch(request, reasonCode, "noop");
+            log.info("event=copy.dispatch.intent.duplicate reasonCode={} idempotencyKey={} existingIntentId={} existingStatus={} decision=NOOP_ALREADY_APPLIED copyImpact=NO_DUPLICATE_ORDER",
+                    reasonCode, request.idempotencyKey(), permit.intentId(), permit.existingStatus());
             throw new SkipExecutionException("COPY_DISPATCH_ALREADY_APPLIED_NOOP",
                     "La intencion y su estado local ya fueron persistidos; no se reaplica",
                     LogFmt.kv("dispatchIntentId", permit.intentId(), "status", permit.existingStatus()));
@@ -83,6 +89,9 @@ public class CopyDispatchCoordinator {
         if (permit.decision() == CopyDispatchPermit.Decision.REJECTED) {
             recordDispatch(request, "rejected");
             String reasonCode = durableRejectionReason(permit.existingStatus());
+            log.warn("event=copy.dispatch.intent.duplicate_rejected reasonCode={} decision=NOOP_NO_RESEND result=REJECTED idempotencyKey={} existingIntentId={} existingStatus={} executionMode={} retryable=false copyImpact=NO_DUPLICATE_ORDER",
+                    reasonCode, request.idempotencyKey(), permit.intentId(), permit.existingStatus(),
+                    request.identity().executionMode());
             throw new SkipExecutionException(reasonCode,
                     "La intencion ya fue rechazada y no puede reenviarse",
                     LogFmt.kv("dispatchIntentId", permit.intentId(), "status", permit.existingStatus()));
@@ -367,7 +376,25 @@ public class CopyDispatchCoordinator {
         if (status != null && status.startsWith(prefix) && status.length() > prefix.length()) {
             return status.substring(prefix.length());
         }
-        return "COPY_DISPATCH_ALREADY_REJECTED";
+        if ("FAILED_FINAL".equals(status)) return "COPY_DISPATCH_FAILED_FINAL";
+        if ("CANCELLED".equals(status)) return "COPY_DISPATCH_CANCELLED";
+        if ("MANUAL_REVIEW".equals(status)) return "COPY_DISPATCH_MANUAL_REVIEW_REQUIRED";
+        return "COPY_DISPATCH_REJECTION_REASON_MISSING";
+    }
+
+    private String duplicateIntentReason(CopyDispatchRequest request) {
+        return request != null && request.identity() != null
+                && "MICRO_LIVE".equalsIgnoreCase(request.identity().executionMode())
+                ? "MICRO_LIVE_DUPLICATE_INTENT"
+                : "COPY_DUPLICATE_INTENT";
+    }
+
+    private void recordDuplicateDispatch(CopyDispatchRequest request, String reasonCode, String result) {
+        String mode = request == null || request.identity() == null
+                ? "unknown"
+                : metricTag(request.identity().executionMode());
+        meterRegistry.counter("copy_dispatch_total", "mode", mode,
+                "result", metricTag(result), "reason", metricTag(reasonCode)).increment();
     }
 
     private void recordDispatch(CopyDispatchRequest request, String result) {

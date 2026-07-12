@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -64,6 +65,48 @@ class CopyDispatchArchitectureContractTest {
         assertTrue(store.contains("&& !request.reduceOnly()"));
         assertTrue(store.contains("requiresMicroLiveBudgetLock(request)"));
         assertTrue(store.contains("if (requiresMicroLiveBudget)"));
+    }
+
+    @Test
+    void microLiveBudgetDecisionLogContainsTheCompleteAuditContract() throws IOException {
+        String store = source("src/main/java/com/apunto/engine/service/copy/dispatch/PostgresCopyDispatchIntentStore.java");
+
+        assertTrue(store.contains("event=copy.budget.evaluated"));
+        for (String field : List.of(
+                "reasonCode={}", "decision={}", "result={}", "executionMode=MICRO_LIVE",
+                "userId={}", "walletId={}", "strategyCode={}", "allocationId={}",
+                "sourceEventId={}", "idempotencyKey={}", "clientOrderId={}",
+                "requestedMarginUsd={}", "reservedMarginUsd={}", "walletOpenMarginUsd={}",
+                "walletPendingMarginUsd={}", "walletRemainingMarginUsd={}",
+                "openPositionCount={}", "pendingPositionCount={}",
+                "maxWalletMarginUsd={}", "maxMarginPerOperationUsd={}",
+                "maxConcurrentPositions={}", "lockWaitMs={}",
+                "microLiveBudgetLockAcquired=true")) {
+            assertTrue(store.contains(field), "missing budget audit field: " + field);
+        }
+    }
+
+    @Test
+    void microLiveOpenBlocksExposeTheCompleteStableReasonCatalog() throws IOException {
+        String sources = String.join("\n",
+                source("src/main/java/com/apunto/engine/service/copy/budget/CopyBudgetResolver.java"),
+                source("src/main/java/com/apunto/engine/service/copy/dispatch/MicroLiveBudgetPolicy.java"),
+                source("src/main/java/com/apunto/engine/service/copy/dispatch/CopyDispatchCoordinator.java"),
+                source("src/main/java/com/apunto/engine/hyperliquid/service/impl/HyperliquidCopyCandidateResolver.java"),
+                source("src/main/java/com/apunto/engine/service/impl/BinanceEngineServiceImpl.java"));
+
+        for (String reasonCode : List.of(
+                "MICRO_LIVE_TOTAL_MARGIN_EXCEEDED",
+                "MICRO_LIVE_MAX_MARGIN_PER_OPERATION_EXCEEDED",
+                "MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED",
+                "MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE",
+                "MICRO_LIVE_DUPLICATE_INTENT",
+                "MICRO_LIVE_GUARD_BLOCKED",
+                "MICRO_LIVE_SYMBOL_NOT_ALLOWED",
+                "MICRO_LIVE_MIN_NOTIONAL_NOT_REACHED")) {
+            assertTrue(sources.contains(reasonCode), "missing MICRO_LIVE reason: " + reasonCode);
+        }
+        assertFalse(sources.contains("COPY_DISPATCH_ALREADY_REJECTED"));
     }
 
     @Test

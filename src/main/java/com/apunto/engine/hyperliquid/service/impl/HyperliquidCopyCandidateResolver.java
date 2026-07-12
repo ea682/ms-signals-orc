@@ -201,16 +201,18 @@ public class HyperliquidCopyCandidateResolver {
                     allocation.getEndsAt(),
                     safeLog(allocation.getCopyStrategyCode()));
             if (!copyStrategyRuntimeRouter.allocationAppliesToEvent(allocation, action, deltaType, side, symbol)) {
-                exclude(excluded, "STRATEGY_SCOPE_NOT_MATCHED", allocation.getExecutionMode());
-                log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode=STRATEGY_SCOPE_NOT_MATCHED",
-                        allocation.getId(), safeLog(allocation.getExecutionMode()));
+                String reasonCode = scopeBlockReason(allocation);
+                exclude(excluded, reasonCode, allocation.getExecutionMode());
+                log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode={} sourceReasonCode=STRATEGY_SCOPE_NOT_MATCHED",
+                        allocation.getId(), safeLog(allocation.getExecutionMode()), reasonCode);
                 continue;
             }
             CopyRuntimeGuardPolicy.Decision guardDecision = guardAllowsNewEntry(allocation, guardByProfile);
             if (!guardDecision.allowed()) {
-                exclude(excluded, guardDecision.reasonCode(), allocation.getExecutionMode());
-                log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode={}",
-                        allocation.getId(), safeLog(allocation.getExecutionMode()), safeLog(guardDecision.reasonCode()));
+                String reasonCode = guardBlockReason(allocation, guardDecision.reasonCode());
+                exclude(excluded, reasonCode, allocation.getExecutionMode());
+                log.info("event=copy.candidate.resolve.allocation_filtered userCopyAllocationId={} executionMode={} reasonCode={} guardReasonCode={}",
+                        allocation.getId(), safeLog(allocation.getExecutionMode()), reasonCode, safeLog(guardDecision.reasonCode()));
                 continue;
             }
             if (allocation.getIdUser() != null) {
@@ -291,7 +293,9 @@ public class HyperliquidCopyCandidateResolver {
         CopyStrategyGuardDecision decision = guardByProfile.computeIfAbsent(profileKey, ignored ->
                 copyStrategyGuardRuntimeCache.evaluateCached(
                         allocation.getWalletId(),
-                        allocation.getCopyStrategyCode()
+                        allocation.getCopyStrategyCode(),
+                        allocation.getScopeType(),
+                        allocation.getScopeValue()
                 )
         );
         CopyRuntimeGuardPolicy.Decision runtimeDecision = copyRuntimeGuardPolicy.decide(allocation, decision);
@@ -322,12 +326,30 @@ public class HyperliquidCopyCandidateResolver {
                 safeLog(runtimeDecision.inputFingerprint()),
                 elapsedMs(startedNs));
         if (!runtimeDecision.allowed()) {
-            log.warn("event=hyperliquid.direct_copy.guard_block allocationId={} userId={} wallet={} strategy={} status={} reason={} detail={} decision=BLOCK reasonCode={} mutation=none hotPathDbWrite=false",
+            String reasonCode = guardBlockReason(allocation, runtimeDecision.reasonCode());
+            log.warn("event=hyperliquid.direct_copy.guard_block allocationId={} userId={} wallet={} strategy={} status={} reason={} detail={} decision=BLOCK reasonCode={} guardReasonCode={} mutation=none hotPathDbWrite=false",
                     allocation.getId(), allocation.getIdUser(), safeLog(allocation.getWalletId()),
                     safeLog(allocation.getCopyStrategyCode()), safeLog(decision.statusWhenBlocked()),
-                    safeLog(decision.reason()), safeLog(decision.detail()), safeLog(runtimeDecision.reasonCode()));
+                    safeLog(decision.reason()), safeLog(decision.detail()), reasonCode, safeLog(runtimeDecision.reasonCode()));
         }
         return runtimeDecision;
+    }
+
+    private String guardBlockReason(UserCopyAllocationEntity allocation, String guardReasonCode) {
+        return isMicroLive(allocation) ? "MICRO_LIVE_GUARD_BLOCKED" : safeLog(guardReasonCode);
+    }
+
+    private String scopeBlockReason(UserCopyAllocationEntity allocation) {
+        boolean symbolScope = allocation != null && allocation.getScopeType() != null
+                && "SYMBOL".equalsIgnoreCase(allocation.getScopeType());
+        return isMicroLive(allocation) && symbolScope
+                ? "MICRO_LIVE_SYMBOL_NOT_ALLOWED"
+                : "STRATEGY_SCOPE_NOT_MATCHED";
+    }
+
+    private boolean isMicroLive(UserCopyAllocationEntity allocation) {
+        return allocation != null && "MICRO_LIVE".equals(
+                UserCopyAllocationEntity.normalizeExecutionMode(allocation.getExecutionMode()));
     }
 
     private List<UserDetailDto> filterUsersById(List<UserDetailDto> usersCached, Set<String> userIds) {
