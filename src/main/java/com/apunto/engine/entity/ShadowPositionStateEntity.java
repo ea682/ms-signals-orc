@@ -93,6 +93,9 @@ public class ShadowPositionStateEntity {
     @Column(name = "last_source_event_id", length = 120)
     private String lastSourceEventId;
 
+    @Column(name = "last_accepted_event_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime lastAcceptedEventAt;
+
     @Column(name = "opened_at", columnDefinition = "timestamp with time zone")
     private OffsetDateTime openedAt;
 

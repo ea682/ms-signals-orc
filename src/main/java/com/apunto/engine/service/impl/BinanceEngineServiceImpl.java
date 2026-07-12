@@ -170,8 +170,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private static final String LOG_PREP_SKIP_NO_ROOM = "event=operation.open.skip_no_room originId={} userId={} wallet={} symbol={} walletBudget={} usedMargin={} reserve={} hardCap={}";
     private static final String LOG_PREP_INVALID_ENTRY = "event=operation.open.invalid_entry_price originId={} userId={} wallet={} reason=entryPrice<=0";
     private static final String LOG_PREP_INVALID_SYMBOL = "event=operation.open.invalid_symbol originId={} userId={} wallet={} reason=symbol_blank";
-    private static final String LOG_PREP_SKIP_TOO_SMALL = "event=operation.open.skip_too_small originId={} userId={} wallet={} symbol={} notional={}";
-    private static final String LOG_PREP_SKIP_SYMBOL_RULES = "event=operation.open.skip_symbol_rules originId={} userId={} wallet={} symbol={} notionalMax={}";
+    private static final String LOG_PREP_SKIP_TOO_SMALL = "event=operation.open.skip_too_small originId={} userId={} wallet={} symbol={} notional={} executionMode={} reasonCode={} sourceReasonCode={}";
+    private static final String LOG_PREP_SKIP_SYMBOL_RULES = "event=operation.open.skip_symbol_rules originId={} userId={} wallet={} symbol={} notionalMax={} executionMode={} reasonCode={} sourceReasonCode={}";
+    private static final String MICRO_LIVE_SYMBOL_NOT_ALLOWED = "MICRO_LIVE_SYMBOL_NOT_ALLOWED";
+    private static final String MICRO_LIVE_MIN_NOTIONAL_NOT_REACHED = "MICRO_LIVE_MIN_NOTIONAL_NOT_REACHED";
     private static final String LOG_PREP_SKIP_NOTIONAL_ZERO = "event=operation.open.skip_notional_zero originId={} userId={} wallet={} symbol={}";
     private static final String LOG_PREP_PREPARED = "event=operation.open.prepared originId={} userId={} wallet={} symbol={} sourceMargin={} capitalReference={} fraction={} walletBudget={} usedMargin={} availableBufferedMargin={} marginThisTrade={} leverage={} notionalFinal={} marginRequired={} copyByMinNotional={}";
     private static final String LOG_PREP_COPY_BY_MIN_NOTIONAL = "event=operation.open.copy_by_min_notional originId={} userId={} wallet={} symbol={} candidateNotional={} forcedNotional={} minNotional={} policyMode={} allocationId={} score={} minScore={} historyDays={} minHistoryDays={} operationsCount={} minOperations={} maxForcedNotional={} notionalBudgetCeiling={}";
@@ -1537,10 +1539,19 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final long metricNs = System.nanoTime();
         final List<MetricaWalletDto> metrics = resolveWalletMetrics(event, originId, walletId, userDetail);
-        final Map<String, MetricaWalletDto> metricsByStrategy = new HashMap<>();
+        final Map<String, MetricaWalletDto> metricsByAllocationKey = new HashMap<>();
         for (MetricaWalletDto metric : metrics) {
             if (metric == null) continue;
-            metricsByStrategy.putIfAbsent(copyStrategyRuntimeRouter.strategyCodeOf(metric), metric);
+            String metricStrategy = copyStrategyRuntimeRouter.strategyCodeOf(metric);
+            String metricAllocationKey = copyStrategyRuntimeRouter.allocationKey(
+                    walletId,
+                    metricStrategy,
+                    metricScopeType(metric),
+                    metricScopeValue(metric, metricStrategy)
+            );
+            if (metricAllocationKey != null) {
+                metricsByAllocationKey.putIfAbsent(metricAllocationKey, metric);
+            }
         }
         final List<UserCopyAllocationEntity> allocations = userCopyAllocationService.getActiveAllocationsForUserWalletCachedOnly(userId, walletId);
         final List<AllocationCopyContext> contexts = new ArrayList<>();
@@ -1553,10 +1564,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         originId, userId, allocation.getId(), safeLog(walletId), strategyCode, side, action, deltaType);
                 continue;
             }
-            final MetricaWalletDto metric = metricsByStrategy.get(strategyCode);
+            final String allocationKey = copyStrategyRuntimeRouter.allocationKey(allocation);
+            final MetricaWalletDto metric = metricsByAllocationKey.get(allocationKey);
             if (metric == null) {
-                log.info("event=copy_open_skipped reasonCode=metric_missing_for_allocation originId={} userId={} allocationId={} wallet={} strategy={} matchedMetrics={}",
-                        originId, userId, allocation.getId(), safeLog(walletId), strategyCode, metricsByStrategy.size());
+                log.info("event=copy_open_skipped reasonCode=metric_missing_for_allocation originId={} userId={} allocationId={} wallet={} strategy={} scopeType={} scopeValue={} allocationKey={} matchedMetrics={}",
+                        originId, userId, allocation.getId(), safeLog(walletId), strategyCode, allocation.getScopeType(), allocation.getScopeValue(), allocationKey, metricsByAllocationKey.size());
                 continue;
             }
             contexts.add(new AllocationCopyContext(metric, allocation));
@@ -1860,6 +1872,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             return CopyStrategyRuntimeRouter.DEFAULT_STRATEGY_CODE;
         }
         return strategyCode.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+    }
+
+    private static String microLiveReason(String executionMode, String microLiveReason, String fallback) {
+        return "MICRO_LIVE".equalsIgnoreCase(executionMode) ? microLiveReason : fallback;
     }
 
     private String formatCapitalShare(MetricaWalletDto walletMetric) {
@@ -3983,7 +3999,16 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String rawSymbol = originOperation.getParSymbol();
         final long symbolMetadataNs = System.nanoTime();
-        final SymbolContractResolution symbolContract = resolveSymbolContract(rawSymbol, resolveCapitalAsset(userDetail));
+        final SymbolContractResolution symbolContract;
+        try {
+            symbolContract = resolveSymbolContract(rawSymbol, resolveCapitalAsset(userDetail));
+        } catch (SkipExecutionException ex) {
+            log.warn("event=operation.open.symbol_blocked originId={} userId={} wallet={} rawSymbol={} executionMode={} reasonCode={} sourceReasonCode={} decision=SKIP",
+                    originId, userId, walletId, safeLog(rawSymbol), executionMode,
+                    microLiveReason(executionMode, MICRO_LIVE_SYMBOL_NOT_ALLOWED, ex.getReasonCode()),
+                    safeLog(ex.getReasonCode()));
+            throw ex;
+        }
         final String symbol = symbolContract.canonicalSymbol();
         final BigDecimal entryPrice = symbolContract.executionPrice(originEntryPrice);
         if (entryPrice.compareTo(ZERO) <= 0) {
@@ -4150,7 +4175,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final BinanceFuturesSymbolInfoClientDto symbolInfo = symbolsBySymbol.get(symbol);
         if (symbolInfo == null) {
-            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
+            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString(),
+                    executionMode, microLiveReason(executionMode, MICRO_LIVE_SYMBOL_NOT_ALLOWED, "symbol_rules_missing"), "symbol_rules_missing");
             throw new SkipExecutionException(
                     "symbol_rules_missing",
                     "No existen reglas de Binance para el símbolo (cache/endpoint sin data)",
@@ -4169,7 +4195,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         CopyMinNotionalPolicy minNotionalPolicy = CopyMinNotionalPolicy.skip();
         BigDecimal copyByMinOriginalTargetNotional = null;
         if (rules == null || rules.effectiveMinNotional == null) {
-            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString());
+            log.warn(LOG_PREP_SKIP_SYMBOL_RULES, originId, userId, walletId, symbol, targetNotional.toPlainString(),
+                    executionMode, microLiveReason(executionMode, MICRO_LIVE_SYMBOL_NOT_ALLOWED, "symbol_rules_invalid"), "symbol_rules_invalid");
             throw new SkipExecutionException(
                     "symbol_rules_invalid",
                     "Reglas de Binance inválidas/incompletas (effectiveMinNotional null)",
@@ -4283,7 +4310,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
         if (quantity.compareTo(ZERO) <= 0) {
-            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString());
+            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, targetNotional.toPlainString(),
+                    executionMode, microLiveReason(executionMode, MICRO_LIVE_MIN_NOTIONAL_NOT_REACHED, "qty_adjusted_zero"), "qty_adjusted_zero");
             throw new SkipExecutionException(
                     "qty_adjusted_zero",
                     "Cantidad quedó en 0 tras aplicar reglas Binance (step/minQty/precision/budget)",
@@ -4373,7 +4401,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     minNotionalPolicy.maxNotionalUsdt());
         }
         if (notionalFinal.compareTo(rules.effectiveMinNotional) < 0) {
-            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, notionalFinal.toPlainString());
+            log.info(LOG_PREP_SKIP_TOO_SMALL, originId, userId, walletId, symbol, notionalFinal.toPlainString(),
+                    executionMode, microLiveReason(executionMode, MICRO_LIVE_MIN_NOTIONAL_NOT_REACHED, "notional_too_small"), "notional_too_small");
             final BigDecimal missing = rules.effectiveMinNotional.subtract(notionalFinal);
             throw new SkipExecutionException(
                     "notional_too_small",

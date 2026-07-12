@@ -52,7 +52,9 @@ Reglas:
 - `copyMarginUsd <= 20`.
 - `openMarginUsedUsd + copyMarginUsd <= 100`.
 - `openPositionsCount < 5`.
-- Si no hay capacidad: `MICRO_LIVE_CAPACITY_EXCEEDED`.
+- Sin margen restante: `MICRO_LIVE_TOTAL_MARGIN_EXCEEDED`.
+- Con cinco posiciones/reservas: `MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED`.
+- Con saldo disponible menor a 100 USDC: `MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE`.
 - Si falta exposure de origen, puede seguir con fixed-per-operation.
 
 ## LIVE Sizing

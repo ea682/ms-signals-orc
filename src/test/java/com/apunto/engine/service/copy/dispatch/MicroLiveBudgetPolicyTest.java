@@ -19,7 +19,7 @@ class MicroLiveBudgetPolicyTest {
     void microLiveOrderMarginMustNotExceedTwenty() {
         BudgetDecision decision = policy.evaluate(BudgetSnapshot.empty(), new BigDecimal("20.01"), true);
         assertFalse(decision.allowed());
-        assertEquals("MICRO_LIVE_ORDER_MARGIN_EXCEEDED", decision.reasonCode());
+        assertEquals("MICRO_LIVE_MAX_MARGIN_PER_OPERATION_EXCEEDED", decision.reasonCode());
     }
 
     @Test
@@ -62,7 +62,7 @@ class MicroLiveBudgetPolicyTest {
         BudgetSnapshot snapshot = new BudgetSnapshot(new BigDecimal("50"), BigDecimal.ZERO, 4, 1);
         BudgetDecision decision = policy.evaluate(snapshot, new BigDecimal("10"), true);
         assertFalse(decision.allowed());
-        assertEquals("MICRO_LIVE_POSITION_LIMIT_EXCEEDED", decision.reasonCode());
+        assertEquals("MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED", decision.reasonCode());
     }
 
     @Test

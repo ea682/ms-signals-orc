@@ -35,7 +35,20 @@ public interface ShadowCopyOperationEventRepository extends JpaRepository<Shadow
             OffsetDateTime eventTime
     );
 
-    long countByWalletProfileIdAndDecision(Long walletProfileId, String decision);
+    @Query(value = """
+            select
+                count(*) filter (where decision = 'SIMULATED') as "simulatedEvents",
+                count(*) filter (where decision = 'RECORDED') as "recordedEvents",
+                count(*) filter (where decision = 'SKIPPED') as "skippedEvents",
+                count(*) filter (where decision = 'DUPLICATE') as "duplicateEvents",
+                count(*) filter (where decision = 'ERROR') as "errorEvents"
+            from futuros_operaciones.shadow_copy_operation_event
+            where wallet_profile_id = :walletProfileId
+              and decision in ('SIMULATED', 'RECORDED', 'SKIPPED', 'DUPLICATE', 'ERROR')
+            """, nativeQuery = true)
+    ShadowDecisionSummaryProjection summarizeDecisionsByWalletProfileId(
+            @Param("walletProfileId") Long walletProfileId
+    );
 
     long countByShadowAllocationId(Long shadowAllocationId);
 
