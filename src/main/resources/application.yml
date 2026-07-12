@@ -413,6 +413,7 @@ metric-wallet:
     default-execution-mode: ${METRIC_WALLET_ALLOCATION_DEFAULT_EXECUTION_MODE:SHADOW}
     direct-live-policy: ${METRIC_WALLET_ALLOCATION_DIRECT_LIVE_POLICY:REQUIRE_MICRO_LIVE}
     max-profiles-per-wallet: ${COPY_USER_MAX_PROFILES_PER_WALLET:1}
+    live-distribution-validity: ${METRIC_WALLET_LIVE_DISTRIBUTION_VALIDITY:5m}
     runtime-cache-ttl: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_TTL:1500ms}
     runtime-cache-max-size: ${METRIC_WALLET_ALLOCATION_RUNTIME_CACHE_MAX_SIZE:20000}
   distribution:

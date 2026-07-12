@@ -53,6 +53,33 @@ class MetricWalletServiceImplTest {
     }
 
     @Test
+    void cachedMicroLiveCandidateRemainsExecutableWhenAllocationPctIsNull() throws Exception {
+        UUID userId = UUID.randomUUID();
+        CapturingMetricClient client = new CapturingMetricClient(List.of(metricForHistory("0xabc")));
+        CacheOnlyAllocationService allocations = new CacheOnlyAllocationService(UserCopyAllocationEntity.builder()
+                .id(9L)
+                .idUser(userId)
+                .walletId("0xabc")
+                .copyStrategyCode("MOVEMENT_ALL")
+                .scopeType("strategy")
+                .scopeValue("MOVEMENT_ALL")
+                .allocationPct(null)
+                .status(UserCopyAllocationEntity.Status.ACTIVE)
+                .isActive(true)
+                .executionMode("MICRO_LIVE")
+                .build());
+        MetricWalletServiceImpl service = service(client, allocations, 30, 45, "summary", false);
+        loadSnapshot(service, 300, 30);
+
+        List<MetricaWalletDto> result = service.getCandidatesForUserWalletCachedOnly(userId, "0xabc");
+
+        assertEquals(1, result.size());
+        assertEquals(0.0, result.getFirst().getCapitalShare());
+        assertEquals(1, client.joyasCalls);
+        assertEquals(0, allocations.databaseLoads);
+    }
+
+    @Test
     void cachedCandidatesFailClosedWithoutPrimedHistory() {
         UUID userId = UUID.randomUUID();
         CapturingMetricClient client = new CapturingMetricClient(List.of(metricForHistory("0xabc")));
