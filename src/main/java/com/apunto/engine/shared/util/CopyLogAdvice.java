@@ -78,6 +78,107 @@ public final class CopyLogAdvice {
         boolean noActiveWallet = noActiveWallet(ctx);
         boolean queueBacklog = number(ctx.queueDepth()) >= 100;
         return switch (code) {
+            case "distributed_duplicate_suppressed" -> new Advice(
+                    code,
+                    "INFO",
+                    "Otra instancia adquirio primero la clave de idempotencia.",
+                    "Otra instancia adquirio primero la clave de idempotencia para el mismo evento y payload.",
+                    "Este proceso no enviara una segunda orden.",
+                    "Ninguna accion, salvo que la tasa supere el umbral esperado.",
+                    true,
+                    false
+            );
+            case "dedupe_guard_unavailable" -> new Advice(
+                    code,
+                    "CRITICAL",
+                    "No se pudo validar la idempotencia distribuida del evento.",
+                    "El storage distribuido de deduplicacion no respondio o rechazo la operacion.",
+                    "Si la politica es fail-open, existe riesgo de una orden duplicada; fail-closed bloquea la copia.",
+                    "Revisar PostgreSQL y conectividad; confirmar la politica activa y reconciliar por clientOrderId.",
+                    false,
+                    true
+            );
+            case "summary_not_final_live_blocked" -> new Advice(
+                    code,
+                    "WARN",
+                    "La decision SUMMARY todavia no es final para habilitar LIVE.",
+                    "El resumen no materializo una decision equivalente a la simulacion FULL.",
+                    "SHADOW puede continuar, pero no se abre ni aumenta exposicion LIVE con evidencia incompleta.",
+                    "Esperar la simulacion FULL y revisar summaryConsistency si el bloqueo persiste.",
+                    true,
+                    false
+            );
+            case "negative_required_window_2w", "negative_required_window_1mo",
+                 "non_positive_required_window_2w", "non_positive_required_window_1mo" -> new Advice(
+                    code,
+                    "WARN",
+                    "Una ventana de rendimiento obligatoria no es positiva.",
+                    "El PnL de 2w o 1mo no cumple el gate de promocion de la estrategia.",
+                    "No se permite nueva exposicion real; SHADOW sigue reuniendo evidencia y los exits no se bloquean.",
+                    "Esperar una nueva ventana valida; investigar solo si el PnL publicado contradice la auditoria.",
+                    true,
+                    false
+            );
+            case "data_stale_blocks_live", "data_stale_blocks_real_open" -> new Advice(
+                    code,
+                    "WARN",
+                    "Los datos de la estrategia estan vencidos para autorizar una nueva entrada real.",
+                    "La antiguedad o cobertura de la evidencia supera el limite permitido por readiness.",
+                    "No se abre ni aumenta exposicion hasta refrescar la evidencia; reductions y closes siguen disponibles.",
+                    "Verificar el refresco de metricas y cobertura si el estado stale persiste.",
+                    true,
+                    false
+            );
+            case "simulation_audit_failed" -> new Advice(
+                    code,
+                    "ERROR",
+                    "La simulacion no supero su auditoria de consistencia.",
+                    "Uno o mas invariantes de PnL, ventanas, sizing o reconciliacion no coinciden.",
+                    "La promocion real queda bloqueada para evitar decidir con resultados inconsistentes.",
+                    "Revisar simulationAudit.errors y corregir el calculo antes de promover la estrategia.",
+                    false,
+                    true
+            );
+            case "strategy_scope_not_matched" -> new Advice(
+                    code,
+                    "INFO",
+                    "El evento no pertenece al scope configurado para esta estrategia.",
+                    "El simbolo, lado o tipo de movimiento no coincide con la allocation.",
+                    "Esta estrategia no enviara una orden para el evento; otras estrategias se evaluan por separado.",
+                    "Ninguna accion, salvo que el scope configurado no sea el esperado.",
+                    true,
+                    false
+            );
+            case "micro_live_symbol_not_allowed" -> new Advice(
+                    code,
+                    "INFO",
+                    "La allocation MICRO_LIVE no admite este simbolo.",
+                    "El simbolo esta fuera del scope o no tiene un contrato Binance valido para la moneda del usuario.",
+                    "No se enviara una nueva orden para este simbolo.",
+                    "Revisar el symbol resolver y la configuracion de la estrategia solo si el simbolo deberia copiarse.",
+                    true,
+                    false
+            );
+            case "micro_live_guard_blocked" -> new Advice(
+                    code,
+                    "WARN",
+                    "El guard de riesgo bloqueo una nueva entrada MICRO_LIVE.",
+                    "La evidencia materializada de la estrategia contiene una condicion de riesgo activa.",
+                    "No se abre ni aumenta exposicion; reductions y closes conservan su flujo independiente.",
+                    "Consultar guardReasonCode y esperar nueva evidencia o revision de riesgo.",
+                    true,
+                    false
+            );
+            case "micro_live_min_notional_not_reached" -> new Advice(
+                    code,
+                    "INFO",
+                    "La orden calculada no alcanza el minimo nocional permitido por Binance.",
+                    "El step size, minQty, precio o presupuesto impiden formar una cantidad valida.",
+                    "No se envia una orden que Binance rechazaria.",
+                    "Ninguna accion, salvo revisar sizing si ocurre con frecuencia.",
+                    true,
+                    false
+            );
             case "resize_without_open_copy", "update_without_open_copy", "adjustment_without_open_copy" -> adjustmentWithoutCopy(code, noActiveWallet, ctx);
             case "flip_without_open_copy" -> flipWithoutCopy(code, noActiveWallet);
             case "flip_without_open_copy_same_base_asset" -> flipWithoutCopySameBaseAsset(code, noActiveWallet, ctx);
@@ -615,6 +716,24 @@ public final class CopyLogAdvice {
 
     private static String diagnosticArea(String diagnosticCode) {
         String code = normalize(diagnosticCode);
+        if (code.contains("idempot") || code.contains("dedupe") || code.contains("distributed_duplicate")) {
+            return "idempotency";
+        }
+        if (code.contains("guard_blocked")) {
+            return "risk_guard";
+        }
+        if (code.contains("summary_not_final")
+                || code.contains("required_window")
+                || code.contains("data_stale_blocks")
+                || code.contains("simulation_audit")) {
+            return "promotion_readiness";
+        }
+        if (code.contains("scope_not_matched") || code.contains("symbol_not_allowed")) {
+            return "strategy_scope";
+        }
+        if (code.contains("min_notional")) {
+            return "sizing";
+        }
         if (code.contains("active_origin") || code.contains("origin") || code.startsWith("late_adjustment")) {
             return "origin_store_original_position";
         }

@@ -18,9 +18,9 @@ public class CopyBudgetResolver {
     public static final String MICRO_LIVE_FIXED_BUDGET_USD = "MICRO_LIVE_FIXED_BUDGET_USD";
     public static final String MICRO_LIVE_FIXED_PER_OPERATION = "MICRO_LIVE_FIXED_PER_OPERATION";
     public static final String MICRO_LIVE_FIXED_PER_OPERATION_USD = "MICRO_LIVE_FIXED_PER_OPERATION_USD";
-    public static final String MICRO_LIVE_CAPACITY_EXCEEDED = "MICRO_LIVE_CAPACITY_EXCEEDED";
-    public static final String INSUFFICIENT_BALANCE_FOR_MICRO_LIVE = "INSUFFICIENT_BALANCE_FOR_MICRO_LIVE";
-    public static final String INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL = "INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL";
+    public static final String MICRO_LIVE_TOTAL_MARGIN_EXCEEDED = "MICRO_LIVE_TOTAL_MARGIN_EXCEEDED";
+    public static final String MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED = "MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED";
+    public static final String MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE = "MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE";
     public static final String LIVE_WEIGHTED_ALLOCATION_PCT = "LIVE_WEIGHTED_ALLOCATION_PCT";
     public static final String LIVE_SOURCE_EXPOSURE_PERCENT = "LIVE_SOURCE_EXPOSURE_PERCENT";
     public static final String LIVE_SOURCE_EXPOSURE_PERCENT_OF_ALLOCATED_CAPITAL = "LIVE_SOURCE_EXPOSURE_PERCENT_OF_ALLOCATED_CAPITAL";
@@ -82,7 +82,7 @@ public class CopyBudgetResolver {
                                                        String capitalAsset) {
         if (accountCapital.compareTo(targetCapital) < 0) {
             return decision(false, executionMode, MICRO_LIVE_FIXED_PER_OPERATION, targetCapital, accountCapital, allocationPct,
-                    INSUFFICIENT_BALANCE_FOR_TARGET_CAPITAL, false, capitalAsset)
+                    MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE, false, capitalAsset)
                     .withMicroFields(ZERO, ZERO, targetCapital, perOperation(request), openMargin(request), ZERO,
                             maxConcurrent(request), openPositions(request), leverage(request));
         }
@@ -95,9 +95,15 @@ public class CopyBudgetResolver {
         int openPositions = openPositions(request);
         BigDecimal leverage = leverage(request);
 
-        if (remaining.compareTo(BigDecimal.ZERO) <= 0 || openPositions >= maxConcurrent) {
+        if (remaining.compareTo(BigDecimal.ZERO) <= 0) {
             return decision(false, executionMode, MICRO_LIVE_FIXED_PER_OPERATION, totalCapital, accountCapital, allocationPct,
-                    MICRO_LIVE_CAPACITY_EXCEEDED, false, capitalAsset)
+                    MICRO_LIVE_TOTAL_MARGIN_EXCEEDED, false, capitalAsset)
+                    .withMicroFields(ZERO, ZERO, totalCapital, perOperation, openMarginUsed, remaining,
+                            maxConcurrent, openPositions, leverage);
+        }
+        if (openPositions >= maxConcurrent) {
+            return decision(false, executionMode, MICRO_LIVE_FIXED_PER_OPERATION, totalCapital, accountCapital, allocationPct,
+                    MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED, false, capitalAsset)
                     .withMicroFields(ZERO, ZERO, totalCapital, perOperation, openMarginUsed, remaining,
                             maxConcurrent, openPositions, leverage);
         }

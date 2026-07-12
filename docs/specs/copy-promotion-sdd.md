@@ -60,18 +60,17 @@ MICRO_LIVE no usa `allocation_pct` para definir el tamano real de orden.
 
 El presupuesto real de MICRO_LIVE se resuelve con `budgetMode=FIXED_USD`:
 
-- `budgetUsd = min(copy.micro-live.max-capital-usd, accountCapitalUsd)`.
-- El default productivo es `copy.micro-live.max-capital-usd=100`.
+- `budgetUsd = 100 USDC`; no se reduce silenciosamente por saldo.
+- El limite productivo obligatorio es `copy.micro-live.max-capital-usd=100`.
 - `allocation_pct` puede seguir existiendo por compatibilidad/constraints, pero no define sizing real para MICRO_LIVE.
-- Si `accountCapitalUsd <= 0`, se bloquea con `INSUFFICIENT_BALANCE_FOR_MICRO_LIVE`.
-- Si `0 < accountCapitalUsd < 100`, se permite usar el disponible como limite maximo y se registra explicitamente como presupuesto fijo limitado por saldo.
+- Si `accountCapitalUsd < 100`, se bloquea con `MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE`.
 
 Reason codes:
 
 - `MICRO_LIVE_FIXED_BUDGET_USD`
 - `MICRO_LIVE_BUDGET_APPLIED`
 - `MICRO_LIVE_NOT_USING_ALLOCATION_PCT`
-- `INSUFFICIENT_BALANCE_FOR_MICRO_LIVE`
+- `MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE`
 
 La promocion es idempotente. Si una carrera de concurrencia crea primero la asignacion, el segundo intento no rompe el job: re-lee la asignacion existente, enlaza el SHADOW si hace falta y audita `SHADOW_PROMOTION_NOOP` con reason `ALREADY_PROMOTED`.
 
@@ -197,7 +196,7 @@ El scheduler de capital:
 - `MICRO_LIVE_FIXED_BUDGET_USD`
 - `MICRO_LIVE_BUDGET_APPLIED`
 - `MICRO_LIVE_NOT_USING_ALLOCATION_PCT`
-- `INSUFFICIENT_BALANCE_FOR_MICRO_LIVE`
+- `MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE`
 - `LIVE_WEIGHTED_ALLOCATION_PCT`
 - `SHADOW_PROMOTION_STATUS_RECORDED`
 - `SHADOW_PROMOTION_STATUS_SKIPPED_INVALID_DB_STATUS`

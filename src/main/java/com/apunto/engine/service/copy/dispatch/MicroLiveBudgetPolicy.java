@@ -24,13 +24,13 @@ public final class MicroLiveBudgetPolicy {
         int projectedPositions = current.openPositions() + current.reservedPositions() + (reservePosition ? 1 : 0);
 
         if (requested.compareTo(maxMarginPerOrderUsd) > 0) {
-            return new BudgetDecision(false, "MICRO_LIVE_ORDER_MARGIN_EXCEEDED", projected, projectedPositions);
+            return new BudgetDecision(false, "MICRO_LIVE_MAX_MARGIN_PER_OPERATION_EXCEEDED", projected, projectedPositions);
         }
         if (projected.compareTo(maxTotalMarginUsd) > 0) {
             return new BudgetDecision(false, "MICRO_LIVE_TOTAL_MARGIN_EXCEEDED", projected, projectedPositions);
         }
         if (projectedPositions > maxPositions) {
-            return new BudgetDecision(false, "MICRO_LIVE_POSITION_LIMIT_EXCEEDED", projected, projectedPositions);
+            return new BudgetDecision(false, "MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED", projected, projectedPositions);
         }
         return new BudgetDecision(true, "MICRO_LIVE_BUDGET_RESERVED", projected, projectedPositions);
     }

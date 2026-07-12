@@ -11,7 +11,6 @@ import com.apunto.engine.service.UserDetailService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolver;
-import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationHandler;
@@ -48,7 +47,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(shadowSyncCalls, syncedShadowCandidates),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(), List.of(shadowCandidate));
 
@@ -91,7 +89,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), false, true, linked),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(microCandidate), List.of(microCandidate));
 
@@ -117,7 +114,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(candidate), List.of(candidate));
 
@@ -138,7 +134,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(candidate), List.of(candidate));
 
@@ -175,7 +170,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), false, false, new AtomicReference<>()),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(blocked), List.of(blocked));
 
@@ -215,7 +209,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), false, true, new AtomicReference<>()),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(liveCandidate), List.of(liveCandidate));
 
@@ -240,7 +233,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(liveCandidate), List.of(liveCandidate));
 
@@ -303,7 +295,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), false, false, new AtomicReference<>()),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(shadowOnlyCandidate), List.of(shadowOnlyCandidate));
 
@@ -329,7 +320,6 @@ class UserCopyAllocationServiceImplTest {
                 shadowService(new AtomicInteger(), new AtomicReference<>(), true, true, new AtomicReference<>()),
                 defaultSymbolResolver()
         );
-        setField(service, "entityManager", entityManager());
         setField(service, "directLivePolicy", "ALLOW_DIRECT_LIVE_FOR_LIVE_READY");
 
         service.syncDistribution(List.of(liveCandidate), List.of(liveCandidate));
@@ -361,7 +351,6 @@ class UserCopyAllocationServiceImplTest {
                         false
                 )))
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(sourceSymbol, compatibleMovement), List.of(sourceSymbol, compatibleMovement));
 
@@ -410,7 +399,6 @@ class UserCopyAllocationServiceImplTest {
                         )
                 ))
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(missingTarget, availableTarget), List.of(missingTarget, availableTarget));
 
@@ -443,7 +431,6 @@ class UserCopyAllocationServiceImplTest {
                         false
                 )))
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(sourceSymbol), List.of(sourceSymbol));
 
@@ -475,7 +462,6 @@ class UserCopyAllocationServiceImplTest {
                         "SYMBOL_CAPITAL_ASSET_INVALID"
                 )))
         );
-        setField(service, "entityManager", entityManager());
 
         service.syncDistribution(List.of(sourceSymbol), List.of(sourceSymbol));
 
@@ -694,15 +680,6 @@ class UserCopyAllocationServiceImplTest {
                     "SYMBOL_TARGET_NOT_AVAILABLE"
             );
         };
-    }
-
-    private static EntityManager entityManager() {
-        return proxy(EntityManager.class, (method, args) -> {
-            if ("flush".equals(method.getName()) || "clear".equals(method.getName())) {
-                return null;
-            }
-            return unexpected(method);
-        });
     }
 
     @SuppressWarnings("unchecked")

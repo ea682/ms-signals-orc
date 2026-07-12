@@ -68,8 +68,22 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         validate(request);
         CopyDispatchIdentity identity = request.identity();
         boolean requiresMicroLiveBudget = requiresMicroLiveBudgetLock(request);
+        String executionMode = realMode(identity.executionMode());
+        if ("MICRO_LIVE".equals(executionMode) && request.reduceOnly()) {
+            log.info("event=copy.budget.bypassed executionMode=MICRO_LIVE userId={} walletId={} strategyCode={} allocationId={} sourceEventId={} budgetCheck=SKIPPED_FOR_REDUCE_OR_CLOSE decision=ALLOW reasonCode=MICRO_LIVE_EXIT_ALWAYS_ALLOWED microLiveBudgetLockAcquired=false lockWaitMs=0 copyImpact=EXIT_NOT_BLOCKED",
+                    identity.userId(), normalizedWalletId(request.walletId()), identity.strategyCode(), identity.userCopyAllocationId(), identity.sourceEventId());
+        } else if ("LIVE".equals(executionMode)) {
+            log.info("event=copy.budget.bypassed executionMode=LIVE userId={} walletId={} strategyCode={} allocationId={} sourceEventId={} budgetMode=LIVE_UNRESTRICTED_BY_MICRO_LIMITS microLiveBudgetLockAcquired=false lockWaitMs=0 decision=ALLOW reasonCode=LIVE_MICRO_BUDGET_NOT_APPLICABLE copyImpact=LIVE_SIZING_UNCHANGED",
+                    identity.userId(), normalizedWalletId(request.walletId()), identity.strategyCode(), identity.userCopyAllocationId(), identity.sourceEventId());
+        }
+        long budgetLockWaitMs = 0L;
         if (requiresMicroLiveBudget) {
+            long lockStartedNs = System.nanoTime();
             lockBudget(request);
+            long lockElapsedNs = Math.max(0L, System.nanoTime() - lockStartedNs);
+            budgetLockWaitMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(lockElapsedNs);
+            meterRegistry.timer("copy_budget_lock_wait_duration", "mode", "micro_live", "result", "acquired")
+                    .record(lockElapsedNs, java.util.concurrent.TimeUnit.NANOSECONDS);
         }
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         UUID candidateId = UUID.randomUUID();
@@ -98,11 +112,28 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
             BudgetSnapshot snapshot = budgetSnapshot(request);
             MicroLiveBudgetPolicy policy = new MicroLiveBudgetPolicy(maxMarginPerOrderUsd, maxTotalMarginUsd, maxConcurrentPositions);
             BudgetDecision decision = policy.evaluate(snapshot, request.requestedMarginUsd(), request.reservePosition());
-            log.info("event=copy.budget.reserved userId={} walletId={} userCopyAllocationId={} executionMode=MICRO_LIVE limitMarginUsd={} usedMarginUsd={} reservedMarginUsd={} requestedMarginUsd={} openPositions={} reservedPositions={} projectedMarginUsd={} projectedPositions={} allowed={}",
-                    identity.userId(), normalizedWalletId(request.walletId()), identity.userCopyAllocationId(),
-                    maxTotalMarginUsd, snapshot.usedMarginUsd(),
-                    snapshot.reservedPendingMarginUsd(), request.requestedMarginUsd(), snapshot.openPositions(),
-                    snapshot.reservedPositions(), decision.projectedMarginUsd(), decision.projectedPositions(), decision.allowed());
+            BigDecimal requestedMarginUsd = nonNegative(request.requestedMarginUsd());
+            BigDecimal committedMarginUsd = snapshot.usedMarginUsd().add(snapshot.reservedPendingMarginUsd());
+            BigDecimal reservedMarginUsd = decision.allowed() ? requestedMarginUsd : ZERO;
+            BigDecimal marginAfterDecisionUsd = decision.allowed() ? decision.projectedMarginUsd() : committedMarginUsd;
+            BigDecimal walletRemainingMarginUsd = maxTotalMarginUsd.subtract(marginAfterDecisionUsd).max(ZERO);
+            String budgetDecision = decision.allowed() ? "ALLOW" : "BLOCK";
+            String budgetResult = decision.allowed() ? "RESERVED" : "REJECTED";
+            log.info("event=copy.budget.evaluated reasonCode={} decision={} result={} executionMode=MICRO_LIVE stage=BUDGET_RESERVATION userId={} walletId={} strategyCode={} allocationId={} sourceEventId={} idempotencyKey={} clientOrderId={} requestedMarginUsd={} reservedMarginUsd={} walletOpenMarginUsd={} walletPendingMarginUsd={} walletRemainingMarginUsd={} openPositionCount={} pendingPositionCount={} maxWalletMarginUsd={} maxMarginPerOperationUsd={} maxConcurrentPositions={} lockWaitMs={} projectedMarginUsd={} projectedPositionCount={} microLiveBudgetLockAcquired=true",
+                    decision.reasonCode(), budgetDecision, budgetResult,
+                    identity.userId(), normalizedWalletId(request.walletId()), identity.strategyCode(),
+                    identity.userCopyAllocationId(), identity.sourceEventId(), request.idempotencyKey(),
+                    safe(request.operation().getClientOrderId()), requestedMarginUsd, reservedMarginUsd,
+                    snapshot.usedMarginUsd(), snapshot.reservedPendingMarginUsd(), walletRemainingMarginUsd,
+                    snapshot.openPositions(), snapshot.reservedPositions(), maxTotalMarginUsd,
+                    maxMarginPerOrderUsd, maxConcurrentPositions, budgetLockWaitMs, decision.projectedMarginUsd(),
+                    decision.projectedPositions());
+            if (decision.allowed()) {
+                log.info("event=copy.budget.reserved reasonCode={} decision=ALLOW result=RESERVED executionMode=MICRO_LIVE userId={} walletId={} strategyCode={} allocationId={} sourceEventId={} idempotencyKey={} requestedMarginUsd={} reservedMarginUsd={} walletRemainingMarginUsd={}",
+                        decision.reasonCode(), identity.userId(), normalizedWalletId(request.walletId()),
+                        identity.strategyCode(), identity.userCopyAllocationId(), identity.sourceEventId(),
+                        request.idempotencyKey(), requestedMarginUsd, reservedMarginUsd, walletRemainingMarginUsd);
+            }
             if (!decision.allowed()) {
                 CopyDispatchStatePolicy.requireTransition(intent.getStatus(), "REJECTED");
                 intent.setStatus("REJECTED");
@@ -116,6 +147,9 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
                         decision.projectedMarginUsd(), decision.projectedPositions());
                 meterRegistry.counter("copy_reservation_rejected", "execution_mode", "micro_live",
                         "result", "rejected").increment();
+                meterRegistry.counter("copy_budget_reject_total", "reason", safeTag(decision.reasonCode())).increment();
+                meterRegistry.counter("copy_dispatch_total", "mode", "micro_live", "result", "rejected",
+                        "reason", safeTag(decision.reasonCode())).increment();
                 recordClaim(started, intent.getExecutionMode(), "reservation_rejected");
                 return CopyDispatchPermit.rejected(intent.getId(), "REJECTED:" + decision.reasonCode());
             }
@@ -134,6 +168,8 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         recordClaim(started, intent.getExecutionMode(), "authorized");
         meterRegistry.counter("copy_dispatch_authorized", "execution_mode", safeTag(intent.getExecutionMode()),
                 "result", "authorized").increment();
+        meterRegistry.counter("copy_dispatch_total", "mode", safeTag(intent.getExecutionMode()),
+                "result", "authorized", "reason", "none").increment();
         log.info("event=copy.dispatch.intent.created idempotencyKey={} dispatchIntentId={} userId={} userCopyAllocationId={} executionMode={} walletId={} strategyCode={} sourceEventId={} originId={} copyIntent={} symbol={} reservedMarginUsd={}",
                 intent.getIdempotencyKey(), intent.getId(), intent.getIdUser(), intent.getUserCopyAllocationId(),
                 intent.getExecutionMode(), safe(intent.getWalletId()), safe(intent.getStrategyCode()),

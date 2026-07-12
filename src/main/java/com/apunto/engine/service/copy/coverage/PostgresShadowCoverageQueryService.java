@@ -2,11 +2,19 @@ package com.apunto.engine.service.copy.coverage;
 
 import com.apunto.engine.repository.ShadowCopyOperationEventRepository;
 import com.apunto.engine.repository.ShadowCoverageCountsProjection;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -21,6 +29,14 @@ public class PostgresShadowCoverageQueryService implements ShadowCoverageQuerySe
 
     private final ShadowCopyOperationEventRepository repository;
     private final ShadowCoverageWindowProperties properties;
+    private MeterRegistry meterRegistry = Metrics.globalRegistry;
+
+    @Autowired(required = false)
+    void setMeterRegistry(MeterRegistry meterRegistry) {
+        if (meterRegistry != null) {
+            this.meterRegistry = meterRegistry;
+        }
+    }
 
     @Override
     @Transactional(readOnly = true)
@@ -29,10 +45,18 @@ public class PostgresShadowCoverageQueryService implements ShadowCoverageQuerySe
         OffsetDateTime endUtc = utc(windowEnd);
         OffsetDateTime startUtc = endUtc.minusDays(properties.getWindowDays());
         List<Long> allocationIds = distinctIds(shadowAllocationIds);
-        if (allocationIds.isEmpty() || properties.effectiveMode() == ShadowCoverageMode.LEGACY) {
+        if (allocationIds.isEmpty()) {
+            return ShadowCoverageBatch.success(Map.of(), startUtc, endUtc);
+        }
+        if (properties.effectiveMode() == ShadowCoverageMode.LEGACY) {
+            meterRegistry.counter("shadow_coverage_fallback_total", "reason", "rolling_disabled").increment();
+            log.info("event=shadow.coverage.fallback.used reasonCode=SHADOW_COVERAGE_FALLBACK_USED primaryFailureReason=ROLLING_DISABLED fallbackSource=HISTORICAL rowsReturned=0 decisionImpact=LEGACY_POLICY promotionBlocked=false elapsedMs=0 traceId={}", traceId());
             return ShadowCoverageBatch.success(Map.of(), startUtc, endUtc);
         }
 
+        long startedNs = System.nanoTime();
+        log.info("event=shadow.coverage.query.started reasonCode=SHADOW_COVERAGE_QUERY_STARTED allocationCount={} windowStart={} windowEnd={} maxEvents={} projectionName=ShadowCoverageCountsProjection expectedTemporalType=Instant fallbackAllowed=false traceId={}",
+                allocationIds.size(), startUtc, endUtc, properties.getMaxEvents(), traceId());
         try {
             List<ShadowCoverageCountsProjection> rows = repository.findRollingCoverageBatch(
                     allocationIds,
@@ -57,16 +81,34 @@ public class PostgresShadowCoverageQueryService implements ShadowCoverageQuerySe
                     ));
                 }
             }
+            long elapsedMs = elapsedMs(startedNs);
+            meterRegistry.counter("shadow_coverage_query_total", "result", "success", "source", "rolling").increment();
+            Timer.builder("shadow_coverage_query_duration")
+                    .tag("result", "success")
+                    .register(meterRegistry)
+                    .record(Duration.ofNanos(Math.max(0L, System.nanoTime() - startedNs)));
+            log.info("event=shadow.coverage.query.succeeded reasonCode=SHADOW_COVERAGE_QUERY_OK allocationCount={} rowsReturned={} allocationsWithCoverage={} allocationsWithoutCoverage={} windowStart={} windowEnd={} source=ROLLING_QUERY fallbackUsed=false elapsedMs={} decisionImpact=ROLLING_RESULT_AVAILABLE traceId={}",
+                    allocationIds.size(), rows == null ? 0 : rows.size(), counts.size(), Math.max(0, allocationIds.size() - counts.size()),
+                    startUtc, endUtc, elapsedMs, traceId());
             return ShadowCoverageBatch.success(counts, startUtc, endUtc);
         } catch (RuntimeException ex) {
+            long elapsedMs = elapsedMs(startedNs);
+            boolean retryable = ex instanceof TransientDataAccessException;
+            meterRegistry.counter("shadow_coverage_query_total", "result", "failure", "source", "rolling").increment();
+            Timer.builder("shadow_coverage_query_duration")
+                    .tag("result", "failure")
+                    .register(meterRegistry)
+                    .record(Duration.ofNanos(Math.max(0L, System.nanoTime() - startedNs)));
             log.warn(
-                    "event=shadow.coverage.query_failed allocationCount={} windowStart={} windowEnd={} maxEvents={} reasonCode=SHADOW_COVERAGE_ROLLING_QUERY_FAILED errorClass={} errorMessage=\"{}\"",
+                    "event=shadow.coverage.query.failed reasonCode=SHADOW_COVERAGE_QUERY_FAILED projectionName=ShadowCoverageCountsProjection columnAlias=oldestEventTime,newestEventTime sourceTemporalType=Instant targetTemporalType=OffsetDateTime allocationCount={} windowStart={} windowEnd={} timezone=UTC fallbackUsed=false fallbackResult=FAIL_CLOSED decisionImpact=PROMOTION_BLOCKED retryable={} errorClass={} errorMessage=\"{}\" shouldAlert=true recommendedAction=CHECK_POSTGRES_QUERY_AND_PROJECTION elapsedMs={} traceId={}",
                     allocationIds.size(),
                     startUtc,
                     endUtc,
-                    properties.getMaxEvents(),
+                    retryable,
                     ex.getClass().getSimpleName(),
-                    safe(ex.getMessage())
+                    safe(ex.getMessage()),
+                    elapsedMs,
+                    traceId()
             );
             return ShadowCoverageBatch.failure(allocationIds, startUtc, endUtc, ex);
         }
@@ -86,8 +128,8 @@ public class PostgresShadowCoverageQueryService implements ShadowCoverageQuerySe
                 .withOffsetSameInstant(ZoneOffset.UTC);
     }
 
-    private static OffsetDateTime utcNullable(OffsetDateTime value) {
-        return value == null ? null : value.withOffsetSameInstant(ZoneOffset.UTC);
+    private static OffsetDateTime utcNullable(Instant value) {
+        return value == null ? null : OffsetDateTime.ofInstant(value, ZoneOffset.UTC);
     }
 
     private static long value(Long value) {
@@ -98,5 +140,14 @@ public class PostgresShadowCoverageQueryService implements ShadowCoverageQuerySe
         if (value == null) return "";
         String clean = value.replace('\n', ' ').replace('\r', ' ').replace('"', '\'');
         return clean.length() <= 300 ? clean : clean.substring(0, 300);
+    }
+
+    private static long elapsedMs(long startedNs) {
+        return Math.max(0L, (System.nanoTime() - startedNs) / 1_000_000L);
+    }
+
+    private static String traceId() {
+        String traceId = MDC.get("traceId");
+        return traceId == null || traceId.isBlank() ? "NA" : safe(traceId);
     }
 }

@@ -19,7 +19,6 @@ import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataAccessException;
@@ -92,9 +91,6 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
 
     private final LoadingCache<Integer, HistorySnapshot> allPositionHistoryCache;
     private final LoadingCache<Integer, CopyGuardWindowSnapshotIndex> copyGuardWindowSnapshotCache;
-
-    @Autowired(required = false)
-    private PostgresDeadlockRetryExecutor postgresDeadlockRetryExecutor;
 
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
@@ -498,7 +494,12 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
     }
 
     @Override
-    public CopyStrategyGuardDecision evaluateCached(String walletId, String strategyCode) {
+    public CopyStrategyGuardDecision evaluateCached(
+            String walletId,
+            String strategyCode,
+            String scopeType,
+            String scopeValue
+    ) {
         if (!copyGuardEnabled) {
             return CopyStrategyGuardDecision.allow();
         }
@@ -509,8 +510,10 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         if (walletKey == null) {
             return CopyStrategyGuardDecision.blocked("WALLET_MISSING", "walletId is blank");
         }
+        final String allocationKey = copyStrategyRuntimeRouter.allocationKey(
+                walletKey, strategyKey, scopeType, scopeValue);
 
-        CopyGuardWindowSnapshotDto guardSnapshot = findCopyGuardSnapshotFast(walletKey, strategyKey, null);
+        CopyGuardWindowSnapshotDto guardSnapshot = findCopyGuardSnapshotFast(walletKey, strategyKey, allocationKey);
         if (guardSnapshot != null) {
             return evaluateCopyGuardSnapshot(guardSnapshot, walletKey, strategyKey);
         }
@@ -524,18 +527,18 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             source = "last_known_good";
         }
         HistoryIndex index = history == null ? HistoryIndex.empty() : history.index();
-        MetricaWalletDto metric = index.find(walletKey, strategyKey);
+        MetricaWalletDto metric = index.findByAllocationKey(allocationKey);
         if (metric == null) {
             boolean allowed = copyGuardFailOpenOnMissingMetric;
-            log.warn("event=copy.guard.runtime_cache.miss walletId={} strategyCode={} cacheSource={} decision={} reasonCode=METRIC_CACHE_MISSING hotPathRemoteCall=false",
-                    walletKey, strategyKey, source, allowed ? "ALLOW" : "BLOCK");
+            log.warn("event=copy.guard.runtime_cache.miss walletId={} strategyCode={} scopeType={} scopeValue={} allocationKey={} cacheSource={} decision={} reasonCode=METRIC_CACHE_MISSING hotPathRemoteCall=false",
+                    walletKey, strategyKey, scopeType, scopeValue, allocationKey, source, allowed ? "ALLOW" : "BLOCK");
             return allowed
                     ? CopyStrategyGuardDecision.allow()
                     : CopyStrategyGuardDecision.blocked("METRIC_CACHE_MISSING", "runtime cache has no wallet+strategy snapshot");
         }
         CopyStrategyGuardDecision decision = evaluateCopyGuard(metric);
-        log.debug("event=copy.guard.runtime_cache.hit walletId={} strategyCode={} cacheSource={} decision={} reasonCode={} hotPathRemoteCall=false",
-                walletKey, strategyKey, source, decision.allowed() ? "ALLOW" : "BLOCK", decision.reason());
+        log.debug("event=copy.guard.runtime_cache.hit walletId={} strategyCode={} scopeType={} scopeValue={} allocationKey={} cacheSource={} decision={} reasonCode={} hotPathRemoteCall=false",
+                walletKey, strategyKey, scopeType, scopeValue, allocationKey, source, decision.allowed() ? "ALLOW" : "BLOCK", decision.reason());
         return decision;
     }
 
@@ -580,14 +583,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             return;
         }
         try {
-            if (postgresDeadlockRetryExecutor == null) {
-                userCopyAllocationService.syncDistribution(liveCandidates, shadowCandidates);
-            } else {
-                postgresDeadlockRetryExecutor.execute("allocation_sync", "copy_wallet_profile", () -> {
-                    userCopyAllocationService.syncDistribution(liveCandidates, shadowCandidates);
-                    return null;
-                });
-            }
+            userCopyAllocationService.syncDistribution(liveCandidates, shadowCandidates);
         } catch (EngineException | DataAccessException | IllegalStateException | IllegalArgumentException ex) {
             boolean deadlockExhausted = PostgresDeadlockRetryExecutor.isDeadlock(ex);
             log.warn("event=user_copy_allocation.sync_failed reasonCode={} result={} errClass={} errMsg=\"{}\"",

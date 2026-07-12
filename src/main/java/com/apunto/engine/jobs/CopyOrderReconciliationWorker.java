@@ -68,6 +68,7 @@ public class CopyOrderReconciliationWorker {
             } catch (RuntimeException ex) {
                 reconciliationService.markFailure(intent.getId(), maxAttempts, "RECONCILIATION_ITEM_FAILED", safe(ex.getMessage()));
                 meterRegistry.counter("signals.copy.reconciliation.total", "result", "failed").increment();
+                meterRegistry.counter("copy_reconciliation_total", "result", "failed").increment();
                 reconciliationFailure(intent, "item_failed");
                 if (exhausted(intent)) {
                     manualReview(intent, "item_failed_exhausted");
@@ -105,6 +106,7 @@ public class CopyOrderReconciliationWorker {
         if (found.isEmpty()) {
             reconciliationService.markLookupNotFound(intent.getId(), maxAttempts);
             meterRegistry.counter("signals.copy.reconciliation.total", "result", "not_found").increment();
+            meterRegistry.counter("copy_reconciliation_total", "result", "not_found").increment();
             reconciliationFailure(intent, exhausted(intent) ? "not_found_exhausted" : "not_found");
             if (exhausted(intent)) {
                 manualReview(intent, "not_found_exhausted");
@@ -119,6 +121,7 @@ public class CopyOrderReconciliationWorker {
         if (normalized.executionState() == CopyExecutionState.REJECTED) {
             intentStore.markRejected(intent.getId(), "BINANCE_ORDER_DEFINITIVELY_NOT_ACTIVE", normalized.status());
             meterRegistry.counter("signals.copy.reconciliation.total", "result", "rejected").increment();
+            meterRegistry.counter("copy_reconciliation_total", "result", "rejected").increment();
             reconciliationSuccess(intent, "rejected_confirmed");
             log.info("event=copy.reconciliation.rejected dispatchIntentId={} orderId={} status={} decision=RELEASE_NO_RESEND",
                     intent.getId(), normalized.orderId(), normalized.status());
@@ -167,6 +170,7 @@ public class CopyOrderReconciliationWorker {
                     intent.getId());
         }
         meterRegistry.counter("signals.copy.reconciliation.total", "result", "persisted").increment();
+        meterRegistry.counter("copy_reconciliation_total", "result", "persisted").increment();
         reconciliationSuccess(intent, "persisted");
     }
 

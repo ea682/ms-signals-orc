@@ -117,6 +117,40 @@ class HyperliquidCopyCandidateResolverTest {
         assertEquals(userId, result.eligibleUsers().get(0).getUser().getId());
     }
 
+    @Test
+    void microLiveRealRiskUsesStableGuardBlockReason() {
+        UUID userId = UUID.randomUUID();
+        UserCopyAllocationEntity allocation = allocation(507L, userId, "MICRO_LIVE", "MOVEMENT_ALL");
+        allocation.setLinkedShadowAllocationId(23L);
+        allocation.setPromotedFromShadowAt(OffsetDateTime.now().minusMinutes(5));
+
+        HyperliquidCopyCandidateResolver.CandidateUsers result = resolver(
+                List.of(user(userId)),
+                List.of(allocation),
+                CopyStrategyGuardDecision.blocked("NEGATIVE_REQUIRED_WINDOW_2W", "2w=-0.28")
+        ).resolve(mapped(PositionSide.LONG, "OPEN", "SOLUSDT"), CopyJobAction.OPEN);
+
+        assertTrue(result.eligibleUsers().isEmpty());
+        assertEquals("MICRO_LIVE_GUARD_BLOCKED", result.reasonCode());
+    }
+
+    @Test
+    void microLiveSymbolScopeMismatchUsesStableSymbolReason() {
+        UUID userId = UUID.randomUUID();
+        UserCopyAllocationEntity allocation = allocation(508L, userId, "MICRO_LIVE", "SYMBOL_SPECIALIST");
+        allocation.setScopeType("symbol");
+        allocation.setScopeValue("BTCUSDT");
+
+        HyperliquidCopyCandidateResolver.CandidateUsers result = resolver(
+                List.of(user(userId)),
+                List.of(allocation),
+                CopyStrategyGuardDecision.allow()
+        ).resolve(mapped(PositionSide.LONG, "OPEN", "SOLUSDT"), CopyJobAction.OPEN);
+
+        assertTrue(result.eligibleUsers().isEmpty());
+        assertEquals("MICRO_LIVE_SYMBOL_NOT_ALLOWED", result.reasonCode());
+    }
+
     private static HyperliquidCopyCandidateResolver resolver(
             List<UserDetailDto> users,
             List<UserCopyAllocationEntity> allocations,
@@ -206,7 +240,7 @@ class HyperliquidCopyCandidateResolverTest {
 
     private record FakeGuardRuntimeCache(CopyStrategyGuardDecision guardDecision) implements CopyStrategyGuardRuntimeCache {
         @Override
-        public CopyStrategyGuardDecision evaluateCached(String walletId, String strategyCode) {
+        public CopyStrategyGuardDecision evaluateCached(String walletId, String strategyCode, String scopeType, String scopeValue) {
             return guardDecision == null ? CopyStrategyGuardDecision.allow() : guardDecision;
         }
     }
