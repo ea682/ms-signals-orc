@@ -2,6 +2,7 @@ package com.apunto.engine.outbox.dto;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 
 public record MetricMovementPersistedEvent(
         String eventVersion,
@@ -44,6 +45,16 @@ public record MetricMovementPersistedEvent(
         Integer copySubmittedTasks,
         Integer copyBusinessSkipped,
         Integer copyFallbackJobs,
-        Boolean copyFallbackUsed
+        Boolean copyFallbackUsed,
+        String economicEventKind,
+        Integer economicEventVersion,
+        String sourceEventId,
+        Long sourceSequence,
+        BigDecimal sourceFeeUsd,
+        BigDecimal fundingPnlUsd,
+        String executionPriceBasis,
+        String notionalBasis,
+        List<String> lifecycleQualityFlags,
+        Boolean sourceEstimated
 ) {
 }

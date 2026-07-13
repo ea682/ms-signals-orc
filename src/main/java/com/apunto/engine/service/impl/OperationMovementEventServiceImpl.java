@@ -44,6 +44,8 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -314,6 +316,16 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .effectiveRealizedPnlUsd(req == null ? null : req.effectiveRealizedPnlUsd())
                 .normalizationStatus(req == null ? null : req.normalizationStatus())
                 .normalizationReason(req == null ? null : req.normalizationReason())
+                .economicEventKind(firstNonBlank(req == null ? null : req.economicEventKind(), "POSITION_DELTA"))
+                .economicEventVersion(firstNonNull(req == null ? null : req.economicEventVersion(), 2))
+                .sourceEventId(firstNonBlank(req == null ? null : req.sourceEventId(), mappedDelta.idempotencyKey()))
+                .sourceSequence(firstNonNull(req == null ? null : req.sourceSequence(), sourceSequence(req == null ? null : req.externalId())))
+                .sourceFeeUsd(req == null ? null : req.sourceFeeUsd())
+                .fundingPnlUsd(req == null ? null : req.fundingPnlUsd())
+                .executionPriceBasis(firstNonBlank(req == null ? null : req.executionPriceBasis(), "PUBLIC_TRIGGER_TRADE_PX"))
+                .notionalBasis(firstNonBlank(req == null ? null : req.notionalBasis(), "POSITION_SNAPSHOT"))
+                .lifecycleQualityFlags(economicQualityFlags(req))
+                .sourceEstimated(firstNonNull(req == null ? null : req.sourceEstimated(), req == null ? null : req.estimated(), true))
                 .walletVersion(req == null ? null : req.walletVersion())
                 .snapshotVersion(req == null ? null : req.snapshotVersion())
                 .sourceTs(sourceTs)
@@ -366,6 +378,11 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .eventTime(eventTime)
                 .traceId(effectiveTraceId)
                 .source(normalizedSource)
+                .economicEventKind("OPERATION_EVENT")
+                .economicEventVersion(2)
+                .sourceEventId(movementKey)
+                .lifecycleQualityFlags(List.of("AUDIT_ONLY_NON_ORIGINAL_SOURCE"))
+                .sourceEstimated(true)
                 .reasonCode(reasonCode)
                 .raw(rawFromOperacionEvent(event, normalizedSource, reasonCode))
                 .build();
@@ -380,7 +397,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
             deltaSize = resultingSize.subtract(previousSize);
         }
         String eventType = classifyEvent(command, previousSize, resultingSize, deltaSize);
-        BigDecimal realizedPnl = firstNonNull(command.getEffectiveRealizedPnlUsd(), command.getRealizedPnlUsd(), estimateRealizedPnl(command, previous, eventType, deltaSize));
+        BigDecimal realizedPnl = firstNonNull(command.getEffectiveRealizedPnlUsd(), command.getRealizedPnlUsd());
+        if (realizedPnl == null && !sourcePnlEstimationForbidden(command)) {
+            realizedPnl = estimateRealizedPnl(command, previous, eventType, deltaSize);
+        }
         NormalizedMovementValues normalized = normalizeMovementValues(command, previous, eventType, deltaSize, realizedPnl);
         return OperationMovementEventEntity.builder()
                 .idOrderOrigin(command.getIdOrderOrigin())
@@ -416,6 +436,16 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .effectiveRealizedPnlUsd(normalized.effectiveRealizedPnlUsd())
                 .normalizationStatus(normalized.normalizationStatus())
                 .normalizationReason(normalized.normalizationReason())
+                .economicEventKind(command.getEconomicEventKind())
+                .economicEventVersion(command.getEconomicEventVersion())
+                .sourceEventId(command.getSourceEventId())
+                .sourceSequence(command.getSourceSequence())
+                .sourceFeeUsd(command.getSourceFeeUsd())
+                .fundingPnlUsd(command.getFundingPnlUsd())
+                .executionPriceBasis(command.getExecutionPriceBasis())
+                .notionalBasis(command.getNotionalBasis())
+                .lifecycleQualityFlags(command.getLifecycleQualityFlags())
+                .sourceEstimated(command.getSourceEstimated())
                 .walletVersion(command.getWalletVersion())
                 .snapshotVersion(command.getSnapshotVersion())
                 .sourceTs(command.getSourceTs())
@@ -522,6 +552,21 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     ) {
         BigDecimal rawNotional = firstNonNull(command.getRawNotionalUsd(), command.getNotionalUsd());
         BigDecimal positionNotional = firstNonNull(command.getPositionNotionalUsd(), command.getNotionalUsd());
+        String sourceNormalizationStatus = normalizeUpper(command.getNormalizationStatus(), null);
+        if (isClosingEvent(eventType) && "NOT_CLOSING".equals(sourceNormalizationStatus)) {
+            return new NormalizedMovementValues(
+                    rawNotional,
+                    positionNotional,
+                    command.getClosedNotionalUsd(),
+                    command.getClosedMarginUsedUsd(),
+                    command.getEffectiveCloseQty(),
+                    command.getEffectiveEntryPrice(),
+                    command.getEffectiveExitPrice(),
+                    command.getEffectiveRealizedPnlUsd(),
+                    "SEMANTIC_CONFLICT",
+                    "source_not_closing_but_ledger_classified_" + eventType.toLowerCase(Locale.ROOT)
+            );
+        }
         BigDecimal closeQty = firstNonNull(command.getEffectiveCloseQty(), closedQuantity(command, previous, eventType, deltaSize));
         BigDecimal entry = firstNonNull(command.getEffectiveEntryPrice(), previous == null ? null : previous.getEntryPrice(), command.getEntryPrice());
         BigDecimal exit = firstNonNull(command.getEffectiveExitPrice(), command.getExitPrice(), command.getMarkPrice(), command.getEntryPrice());
@@ -556,6 +601,60 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 status,
                 reason
         );
+    }
+
+    private boolean sourcePnlEstimationForbidden(OperationMovementEventRecordCommand command) {
+        String status = normalizeUpper(command == null ? null : command.getNormalizationStatus(), null);
+        return "NOT_CLOSING".equals(status)
+                || "AGGREGATED_POSITION_DELTA".equals(status)
+                || "SEMANTIC_CONFLICT".equals(status);
+    }
+
+    private List<String> economicQualityFlags(HyperliquidDeltaRequest request) {
+        List<String> flags = new ArrayList<>();
+        if (request != null && request.lifecycleQualityFlags() != null) {
+            request.lifecycleQualityFlags().stream()
+                    .filter(StringUtils::hasText)
+                    .map(value -> value.trim().toUpperCase(Locale.ROOT))
+                    .forEach(flags::add);
+        }
+        String normalization = normalizeUpper(request == null ? null : request.normalizationStatus(), null);
+        if ("AGGREGATED_POSITION_DELTA".equals(normalization)) {
+            addIfMissing(flags, "AGGREGATED_POSITION_DELTA");
+            addIfMissing(flags, "FILL_HISTORY_INCOMPLETE");
+        }
+        if ("SEMANTIC_CONFLICT".equals(normalization) || "NOT_CLOSING".equals(normalization)) {
+            addIfMissing(flags, "SOURCE_LEDGER_CLASSIFICATION_CONFLICT");
+        }
+        if (Boolean.TRUE.equals(firstNonNull(
+                request == null ? null : request.sourceEstimated(),
+                request == null ? null : request.estimated()
+        ))) {
+            addIfMissing(flags, "SOURCE_ESTIMATED");
+        }
+        addIfMissing(flags, "POSITION_DELTA_NOT_FILL");
+        return List.copyOf(flags);
+    }
+
+    private void addIfMissing(List<String> values, String value) {
+        if (!values.contains(value)) {
+            values.add(value);
+        }
+    }
+
+    private Long sourceSequence(String externalId) {
+        if (!StringUtils.hasText(externalId)) {
+            return null;
+        }
+        String[] parts = externalId.split("\\|");
+        if (parts.length < 2) {
+            return null;
+        }
+        try {
+            return Long.parseLong(parts[parts.length - 2]);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private BigDecimal closedQuantity(OperationMovementEventRecordCommand command, OperationMovementEventEntity previous, String eventType, BigDecimal deltaSize) {
