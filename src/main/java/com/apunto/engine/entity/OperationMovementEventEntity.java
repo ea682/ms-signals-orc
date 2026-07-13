@@ -16,6 +16,7 @@ import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Entity
@@ -129,6 +130,37 @@ public class OperationMovementEventEntity {
 
     @Column(name = "normalization_reason", length = 180)
     private String normalizationReason;
+
+    @Column(name = "economic_event_kind", length = 40)
+    private String economicEventKind;
+
+    @Column(name = "economic_event_version")
+    private Integer economicEventVersion;
+
+    @Column(name = "source_event_id", length = 600)
+    private String sourceEventId;
+
+    @Column(name = "source_sequence")
+    private Long sourceSequence;
+
+    @Column(name = "source_fee_usd", precision = 38, scale = 18)
+    private BigDecimal sourceFeeUsd;
+
+    @Column(name = "funding_pnl_usd", precision = 38, scale = 18)
+    private BigDecimal fundingPnlUsd;
+
+    @Column(name = "execution_price_basis", length = 80)
+    private String executionPriceBasis;
+
+    @Column(name = "notional_basis", length = 80)
+    private String notionalBasis;
+
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    @Column(name = "lifecycle_quality_flags", columnDefinition = "text[]")
+    private List<String> lifecycleQualityFlags;
+
+    @Column(name = "source_estimated")
+    private Boolean sourceEstimated;
 
     @Column(name = "wallet_version")
     private Long walletVersion;
