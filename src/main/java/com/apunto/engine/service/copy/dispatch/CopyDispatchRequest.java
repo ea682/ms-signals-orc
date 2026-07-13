@@ -18,6 +18,7 @@ public record CopyDispatchRequest(
         BigDecimal requestedNotionalUsd,
         BigDecimal referencePrice,
         Integer requestedLeverage,
+        Integer userMaxConcurrentPositions,
         boolean reservePosition,
         String sourceEventType,
         String requestHash,

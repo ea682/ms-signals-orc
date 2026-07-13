@@ -59,6 +59,13 @@ public interface BinanceClient {
             @RequestParam("orderId") Long orderId
     );
 
+    @GetExchange("/positions")
+    ApiResponse<List<BinanceFuturesPositionClientDto>> positions(
+            @RequestHeader("X-BINANCE-APIKEY") String apiKey,
+            @RequestHeader("X-BINANCE-SECRET") String secret,
+            @RequestHeader(value = "X-COPY-TRACE-ID", required = false) String traceId
+    );
+
     @PostExchange("/settings/preconfigure")
     ApiResponse<TradingConfigPreconfigureClientResponse> preconfigureTradingSettings(
             @RequestHeader("X-BINANCE-APIKEY") String apiKey,
@@ -79,6 +86,12 @@ public interface BinanceClient {
             @RequestParam("symbol") String symbol,
             @RequestParam("usage") String usage,
             @RequestParam("allowStale") boolean allowStale
+    );
+
+    @GetExchange("/market/order-book")
+    ApiResponse<BinanceOrderBookSnapshotClientDto> orderBook(
+            @RequestParam("symbol") String symbol,
+            @RequestParam("limit") int limit
     );
 
     @GetExchange("/wallet/asset-balance")

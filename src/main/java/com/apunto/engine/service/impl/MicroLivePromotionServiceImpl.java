@@ -107,6 +107,10 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             log.info("event=copy.promotion.micro_to_live.skipped reason=PROMOTION_DISABLED");
             return LivePromotionResult.empty();
         }
+        if (properties.isManualCertificationRequired()) {
+            log.warn("event=copy.promotion.micro_to_live.skipped decision=BLOCK reasonCode=LIVE_MANUAL_CERTIFICATION_REQUIRED copyImpact=no_live_allocation_created");
+            return LivePromotionResult.empty();
+        }
 
         List<UserCopyAllocationEntity> candidates = allocationRepository.findMicroLivePromotionCandidates(
                 Math.max(1, properties.getCandidateLimit())

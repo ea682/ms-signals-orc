@@ -7,7 +7,7 @@ import java.math.BigDecimal;
 @ConfigurationProperties(prefix = "copy.promotion")
 public class ShadowPromotionProperties {
 
-    private boolean enabled = true;
+    private boolean enabled = false;
     private boolean fromShadowEnabled = true;
     private int candidateLimit = 100;
     private long minShadowDays = 3;

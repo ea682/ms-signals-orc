@@ -77,41 +77,73 @@ WHERE client_order_id IS NOT NULL
 GROUP BY client_order_id
 HAVING count(*) > 1;
 
--- 6. MICRO_LIVE budget snapshot. The 100/5 thresholds are current defaults;
--- compare against deployed environment values before declaring a violation.
+-- 6. MICRO_LIVE V3 budget snapshot. Capital is shared by user + wallet.
+-- There is no fixed per-order margin and no global position-count threshold.
 WITH active AS (
-    SELECT id_user, user_copy_allocation_id, execution_mode,
+    SELECT id_user, lower(id_wallet_origin) AS wallet_id, execution_mode,
            coalesce(sum(size_usd / nullif(leverage, 0)), 0) AS active_margin,
            count(*) AS open_positions
     FROM futuros_operaciones.copy_operation
     WHERE is_active = true
       AND coalesce(is_shadow, false) = false
       AND execution_mode = 'MICRO_LIVE'
-    GROUP BY id_user, user_copy_allocation_id, execution_mode
+    GROUP BY id_user, lower(id_wallet_origin), execution_mode
 ), pending AS (
-    SELECT id_user, user_copy_allocation_id, execution_mode,
+    SELECT id_user, lower(wallet_id) AS wallet_id, execution_mode,
            coalesce(sum(requested_margin_usd), 0) AS pending_margin,
            coalesce(sum(reserved_position_count), 0) AS reserved_positions
     FROM futuros_operaciones.copy_dispatch_intent
     WHERE execution_mode = 'MICRO_LIVE'
       AND reservation_status = 'PENDING'
-    GROUP BY id_user, user_copy_allocation_id, execution_mode
+    GROUP BY id_user, lower(wallet_id), execution_mode
 ), combined AS (
     SELECT coalesce(a.id_user, p.id_user) AS id_user,
-           coalesce(a.user_copy_allocation_id, p.user_copy_allocation_id) AS allocation_id,
+           coalesce(a.wallet_id, p.wallet_id) AS wallet_id,
            coalesce(a.active_margin, 0) AS active_margin,
            coalesce(p.pending_margin, 0) AS pending_margin,
            coalesce(a.open_positions, 0) AS open_positions,
            coalesce(p.reserved_positions, 0) AS reserved_positions
     FROM active a
-    FULL JOIN pending p USING (id_user, user_copy_allocation_id, execution_mode)
+    FULL JOIN pending p USING (id_user, wallet_id, execution_mode)
 )
 SELECT *, active_margin + pending_margin AS projected_margin,
           open_positions + reserved_positions AS projected_positions
 FROM combined
 WHERE active_margin + pending_margin > 100
-   OR open_positions + reserved_positions > 5
 ORDER BY projected_margin DESC;
+
+-- An optional user position limit is checked per allocation only when present.
+WITH active_positions AS (
+    SELECT user_copy_allocation_id, count(*) AS open_positions
+    FROM futuros_operaciones.copy_operation
+    WHERE execution_mode = 'MICRO_LIVE'
+      AND is_active = true
+      AND coalesce(is_shadow, false) = false
+      AND user_copy_allocation_id IS NOT NULL
+    GROUP BY user_copy_allocation_id
+), pending_positions AS (
+    SELECT user_copy_allocation_id,
+           coalesce(sum(reserved_position_count), 0) AS reserved_positions
+    FROM futuros_operaciones.copy_dispatch_intent
+    WHERE execution_mode = 'MICRO_LIVE'
+      AND reservation_status = 'PENDING'
+      AND user_copy_allocation_id IS NOT NULL
+    GROUP BY user_copy_allocation_id
+)
+SELECT allocation.id AS allocation_id,
+       allocation.id_user,
+       allocation.wallet_id,
+       allocation.user_max_concurrent_positions,
+       coalesce(active.open_positions, 0) AS open_positions,
+       coalesce(pending.reserved_positions, 0) AS reserved_positions
+FROM futuros_operaciones.user_copy_allocation allocation
+LEFT JOIN active_positions active ON active.user_copy_allocation_id = allocation.id
+LEFT JOIN pending_positions pending ON pending.user_copy_allocation_id = allocation.id
+WHERE allocation.execution_mode = 'MICRO_LIVE'
+  AND allocation.user_max_concurrent_positions IS NOT NULL
+  AND coalesce(active.open_positions, 0) + coalesce(pending.reserved_positions, 0)
+      > allocation.user_max_concurrent_positions
+ORDER BY allocation.id;
 
 -- 7. Ambiguous/manual states must retain a fail-closed reservation unless the
 -- economic effect is already confirmed and only price review remains.

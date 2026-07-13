@@ -5,17 +5,22 @@ import com.apunto.engine.entity.CopyOperationEntity;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 public interface CopyOperationService {
     void newOperation(CopyOperationDto operation);
     void closeOperation(CopyOperationDto operation);
 
     CopyOperationDto findOperation(String idOrden);
+    CopyOperationDto findOperationById(UUID idOperation);
+    CopyOperationDto updateExecutionPriceEvidence(UUID idOperation, java.math.BigDecimal price,
+                                                  String priceStatus, boolean closingPrice);
 
     List<CopyOperationDto> findOperationsByOrigin(String idOrderOrigin);
     Optional<CopyOperationEntity> findOperationByOrigin(String idOrderOrigin);
     CopyOperationDto findOperationForUser(String idOrderOrigin, String idUser);
     CopyOperationDto findOperationForAllocation(String idOrderOrigin, String idUser, Long allocationId, String strategyCode, String typeOperation);
+    CopyOperationDto findLatestOperationForAllocation(String idOrderOrigin, String idUser, Long allocationId, String strategyCode, String typeOperation);
     boolean existsByOriginAndUser(String idOrderOrigin, String idUser);
     List<CopyOperationDto> findActiveOperationsForUserOrigin(String idOrderOrigin, String idUser);
     List<CopyOperationDto> findActiveOperationsByUserAndWallet(String idUser, String walletId);

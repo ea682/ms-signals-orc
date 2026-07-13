@@ -25,6 +25,8 @@ public class CopyDispatchCoordinator {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final Pattern CLIENT_ORDER_ID = Pattern.compile("^[A-Za-z0-9._-]{1,36}$");
+    private static final String EXECUTION_TIMEOUT_RECONCILING = "EXECUTION_TIMEOUT_RECONCILING";
+    private static final String EXECUTION_AMBIGUOUS_RECONCILING = "EXECUTION_AMBIGUOUS_RECONCILING";
 
     private final CopyDispatchIntentStore intentStore;
     private final ProcesBinanceService binanceGateway;
@@ -70,9 +72,9 @@ public class CopyDispatchCoordinator {
         }
         if (permit.decision() == CopyDispatchPermit.Decision.CONFLICT) {
             recordDispatch(request, "conflict");
-            log.error("event=copy.dispatch.intent.conflict idempotencyKey={} existingIntentId={} existingStatus={} decision=BLOCK_PAYLOAD_MISMATCH",
+            log.debug("event=copy.dispatch.intent.conflict.propagated idempotencyKey={} existingIntentId={} existingStatus={} decision=BLOCK_PAYLOAD_MISMATCH",
                     request.idempotencyKey(), permit.intentId(), permit.existingStatus());
-            throw new SkipExecutionException("COPY_IDEMPOTENCY_PAYLOAD_MISMATCH",
+            throw new SkipExecutionException("BLOCKED_IDEMPOTENCY_PAYLOAD_CONFLICT",
                     "La misma idempotency key llego con un payload de orden diferente",
                     LogFmt.kv("dispatchIntentId", permit.intentId(), "status", permit.existingStatus()));
         }
@@ -144,9 +146,10 @@ public class CopyDispatchCoordinator {
                                 "clientOrderId", safe(execution.clientOrderId()), "status", safe(execution.status())));
             }
             if (!execution.accepted()) {
-                intentStore.markAmbiguous(permit.intentId(), "BINANCE_RESPONSE_AMBIGUOUS", execution.executionState().name());
+                intentStore.markAmbiguous(permit.intentId(), EXECUTION_AMBIGUOUS_RECONCILING,
+                        execution.executionState().name());
                 recordDispatch(request, "ambiguous");
-                throw reconciliationPending(permit.intentId(), request, "binance_response_ambiguous", null);
+                throw reconciliationPending(permit.intentId(), request, EXECUTION_AMBIGUOUS_RECONCILING, null);
             }
             annotateResponse(response, execution, permit.intentId(), request);
 
@@ -161,7 +164,11 @@ public class CopyDispatchCoordinator {
             throw pending;
         } catch (CopyOrderRejectedException | BinanceApiReadinessException rejected) {
             recordDispatch(request, "rejected");
-            intentStore.markRejected(permit.intentId(), rejected.getClass().getSimpleName(), safe(rejected.getMessage()));
+            String rejectionReason = definitiveBinanceRejectionReason(rejected);
+            intentStore.markRejected(permit.intentId(), rejectionReason, safe(rejected.getMessage()));
+            log.warn("event=copy.dispatch.rejected dispatchIntentId={} reasonCode={} decision=NO_RETRY_REJECTED errorClass={} binanceCode={} binanceMessage=\"{}\"",
+                    permit.intentId(), rejectionReason, rejected.getClass().getSimpleName(),
+                    detail(rejected, "binanceCode"), safe(detail(rejected, "binanceMsg")));
             throw rejected;
         } catch (SkipExecutionException rejectedBeforeSend) {
             recordDispatch(request, "rejected");
@@ -172,16 +179,57 @@ public class CopyDispatchCoordinator {
             // A transport timeout or incomplete response is an ambiguous outcome.
             // The order may already exist at Binance. Move the intent to RECONCILING and
             // query by orderId/clientOrderId. Never resend until non-existence is confirmed.
-            intentStore.markAmbiguous(permit.intentId(), "BINANCE_OUTCOME_AMBIGUOUS", safe(ambiguous.getMessage()));
+            String reasonCode = ambiguousExecutionReason(ambiguous);
+            intentStore.markAmbiguous(permit.intentId(), reasonCode, safe(ambiguous.getMessage()));
             recordDispatch(request, "ambiguous");
-            log.warn("event=copy.dispatch.ambiguous dispatchIntentId={} reasonCode=BINANCE_OUTCOME_AMBIGUOUS decision=RECONCILE_NOT_RESEND errClass={} errMsg=\"{}\"",
-                    permit.intentId(), ambiguous.getClass().getSimpleName(), safe(ambiguous.getMessage()));
-            throw reconciliationPending(permit.intentId(), request, "binance_outcome_ambiguous", ambiguous);
+            log.warn("event=copy.dispatch.ambiguous dispatchIntentId={} reasonCode={} decision=RECONCILE_NOT_RESEND errClass={} errMsg=\"{}\"",
+                    permit.intentId(), reasonCode, ambiguous.getClass().getSimpleName(), safe(ambiguous.getMessage()));
+            throw reconciliationPending(permit.intentId(), request, reasonCode, ambiguous);
         }
     }
 
     public void markPersistencePending(String clientOrderId, String reasonCode, String detail) {
         markPersistencePending(null, clientOrderId, reasonCode, detail);
+    }
+
+    private String definitiveBinanceRejectionReason(RuntimeException rejected) {
+        if (rejected instanceof BinanceApiReadinessException) {
+            return BinanceApiReadinessException.REASON_CODE;
+        }
+        String code = detail(rejected, "binanceCode");
+        String message = firstNonBlank(detail(rejected, "binanceMsg"), rejected.getMessage());
+        String normalized = message == null ? "" : message.toLowerCase(Locale.ROOT);
+
+        if ("-4061".equals(code) || "-4047".equals(code) || "-4048".equals(code)
+                || normalized.contains("position side") || normalized.contains("position mode")
+                || normalized.contains("hedge mode") || normalized.contains("one-way")
+                || normalized.contains("margin type")) {
+            return "REJECTED_BY_BINANCE_MARGIN_MODE";
+        }
+        if ("-2027".equals(code) || "-2028".equals(code)
+                || normalized.contains("leverage")) {
+            return "REJECTED_BY_BINANCE_LEVERAGE";
+        }
+        if ("-2018".equals(code) || "-2019".equals(code)
+                || normalized.contains("insufficient balance")
+                || normalized.contains("margin is insufficient")) {
+            return "REJECTED_BY_BINANCE_BALANCE";
+        }
+        if ("-1013".equals(code) || "-1111".equals(code) || "-4164".equals(code)
+                || normalized.contains("filter failure") || normalized.contains("precision")
+                || normalized.contains("min notional") || normalized.contains("lot size")) {
+            return "REJECTED_BY_BINANCE_FILTER";
+        }
+        return "REJECTED_BY_BINANCE_UNKNOWN";
+    }
+
+    private String detail(RuntimeException failure, String key) {
+        if (failure instanceof com.apunto.engine.shared.exception.EngineException engine
+                && engine.getDetails() != null) {
+            Object value = engine.getDetails().get(key);
+            return value == null ? null : value.toString();
+        }
+        return null;
     }
 
     public void markPersistencePending(UUID intentId, String clientOrderId, String reasonCode, String detail) {
@@ -302,19 +350,14 @@ public class CopyDispatchCoordinator {
                             "symbol", operation.getSymbol(), "copyIntent", copyIntent));
         }
         boolean reservePosition = Boolean.TRUE.equals(operation.getReservePosition());
-        String requestHash = keyFactory.hashPayload(String.join("|",
-                symbol, safe(name(operation.getSide())),
-                safe(name(operation.getPositionSide())), safe(name(operation.getType())),
-                canonical(qty), canonical(requestedMargin), canonical(notional), canonical(ref),
-                operation.getLeverage() == null ? "" : Integer.toString(operation.getLeverage()),
-                Boolean.toString(operation.isReduceOnly()),
-                String.valueOf(Boolean.TRUE.equals(operation.getConfigureAccountSettings())),
-                clientOrderId));
+        String requestHash = keyFactory.hashPayload(CopyDispatchRequestFingerprint.canonical(
+                operation, qty, allocation.getUserMaxConcurrentPositions(), reservePosition));
 
         return new CopyDispatchRequest(idempotencyKey, identity, operation, operation.getWalletId(),
                 symbol, name(operation.getSide()), name(operation.getPositionSide()),
-                operation.isReduceOnly(), qty, requestedMargin, notional, ref,
-                operation.getLeverage(), reservePosition, operation.getSourceEventType(), requestHash, traceId);
+                 operation.isReduceOnly(), qty, requestedMargin, notional, ref,
+                 operation.getLeverage(), allocation.getUserMaxConcurrentPositions(), reservePosition,
+                 operation.getSourceEventType(), requestHash, traceId);
     }
 
     private BigDecimal resolveMargin(OperationDto operation, BigDecimal notional) {
@@ -363,6 +406,36 @@ public class CopyDispatchCoordinator {
         if (values == null) return null;
         for (String value : values) if (value != null && !value.isBlank()) return value.trim();
         return null;
+    }
+
+    private String ambiguousExecutionReason(Throwable failure) {
+        Throwable current = failure;
+        int depth = 0;
+        while (current != null && depth++ < 16) {
+            String type = current.getClass().getSimpleName().toLowerCase(Locale.ROOT);
+            String message = current.getMessage() == null
+                    ? "" : current.getMessage().toLowerCase(Locale.ROOT);
+            boolean timeoutType = type.contains("sockettimeout")
+                    || type.contains("connecttimeout")
+                    || type.contains("readtimeout")
+                    || type.contains("writetimeout")
+                    || type.contains("httptimeout")
+                    || "timeoutexception".equals(type);
+            boolean networkTimeoutMessage = message.contains("read timed out")
+                    || message.contains("connect timed out")
+                    || message.contains("connection timed out")
+                    || message.contains("socket timeout")
+                    || message.contains("request timeout");
+            boolean explicitBinanceTimeout = current == failure
+                    && "copybinanceclientexception".equals(type)
+                    && ("timeout".equals(message) || message.contains("timed out"));
+            if (timeoutType || networkTimeoutMessage || explicitBinanceTimeout) {
+                return EXECUTION_TIMEOUT_RECONCILING;
+            }
+            if (current.getCause() == current) break;
+            current = current.getCause();
+        }
+        return EXECUTION_AMBIGUOUS_RECONCILING;
     }
 
     private String safe(String value) {

@@ -69,6 +69,8 @@ public class CopyDispatchIntentEntity {
     private BigDecimal referencePrice;
     @Column(name = "requested_leverage")
     private Integer requestedLeverage;
+    @Column(name = "user_max_concurrent_positions")
+    private Integer userMaxConcurrentPositions;
     @Column(name = "reserved_position_count", nullable = false)
     private short reservedPositionCount;
     @Column(name = "reservation_status", nullable = false, length = 24)

@@ -4,7 +4,9 @@ import com.apunto.engine.client.BinanceClient;
 import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.dto.client.BinanceFuturesMarketPriceClientDto;
 import com.apunto.engine.dto.client.BinanceFuturesOrderClientResponse;
+import com.apunto.engine.dto.client.BinanceFuturesPositionClientDto;
 import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
+import com.apunto.engine.dto.client.BinanceOrderBookSnapshotClientDto;
 import com.apunto.engine.dto.client.CloseOperationClientRequest;
 import com.apunto.engine.dto.client.NewOperationClientRequest;
 import com.apunto.engine.service.ProcesBinanceService;
@@ -97,6 +99,8 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
                 .reduceOnly(reduceOnlyForClient)
                 .configureAccountSettings(configureAccountSettingsForClient)
                 .clientOrderId(dto.getClientOrderId())
+                .referencePrice(dto.getReferencePrice())
+                .sourceObservedAt(dto.getSourceObservedAt())
                 .build();
 
         log.info("event=binance.futures.order.send traceId={} originId={} userId={} wallet={} symbol={} side={} type={} positionSide={} reduceOnlyIntent={} reduceOnlySent={} qty={} clientOrderId={}",
@@ -656,6 +660,79 @@ public class ProcesBinanceServiceImpl implements ProcesBinanceService {
         } catch (EngineException | RestClientException | IllegalStateException ex) {
             log.warn("event=binance.market_price.client.fail reason=client_error symbol={} usage={} allowStale={} errClass={} errMsg=\"{}\"",
                     safeNull(symbol), safeUsage, allowStale, ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public List<BinanceFuturesPositionClientDto> getPositions(String apiKey, String secret, String traceId) {
+        if (apiKey == null || apiKey.isBlank() || secret == null || secret.isBlank()) {
+            throw new CopyBinanceClientException(
+                    "API key y secret son requeridos para consultar posiciones autoritativas",
+                    Collections.emptyMap());
+        }
+        try {
+            ApiResponse<List<BinanceFuturesPositionClientDto>> response =
+                    binanceClient.positions(apiKey, secret, safeNull(traceId));
+            List<BinanceFuturesPositionClientDto> positions = unwrap(response, "futures.positions");
+            List<BinanceFuturesPositionClientDto> result = positions == null
+                    ? Collections.emptyList()
+                    : List.copyOf(positions);
+            log.info("event=binance.target_positions.client.ok traceId={} positions={} source=BINANCE_POSITION_RISK",
+                    safeNull(traceId), result.size());
+            return result;
+        } catch (RestClientResponseException ex) {
+            BinanceHttpError error = parseBinanceHttpError(ex);
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("httpStatus", Integer.toString(error.httpStatus()));
+            details.put("errorCode", safeNull(error.errorCode()));
+            details.put("binanceCode", safeNull(error.binanceCode()));
+            details.put("traceId", safeNull(error.traceId()));
+            details.put("path", safeNull(error.path()));
+            log.warn("event=binance.target_positions.client.fail reason=http_error traceId={} httpStatus={} errorCode={} binanceCode={} path={}",
+                    safeNull(traceId), error.httpStatus(), error.errorCode(), error.binanceCode(), error.path());
+            throw new CopyBinanceClientException(
+                    "No se pudo obtener el snapshot autoritativo de posiciones Binance", ex, details);
+        } catch (ResourceAccessException ex) {
+            log.warn("event=binance.target_positions.client.fail reason=network_timeout traceId={} errorClass={}",
+                    safeNull(traceId), ex.getClass().getSimpleName());
+            throw new CopyBinanceClientException(
+                    "Timeout/red leyendo posiciones autoritativas desde ms-binance", ex,
+                    Collections.emptyMap());
+        } catch (EngineException ex) {
+            throw new CopyBinanceClientException(
+                    "ms-binance devolvio una respuesta invalida para posiciones autoritativas", ex,
+                    ex.getDetails() == null ? Collections.emptyMap() : ex.getDetails());
+        } catch (RestClientException | IllegalStateException ex) {
+            log.warn("event=binance.target_positions.client.fail reason=client_error traceId={} errorClass={} errorMessage=\"{}\"",
+                    safeNull(traceId), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
+            throw new CopyBinanceClientException(
+                    "Error cliente leyendo posiciones autoritativas desde ms-binance", ex,
+                    Collections.emptyMap());
+        }
+    }
+
+    @Override
+    public Optional<BinanceOrderBookSnapshotClientDto> getOrderBookSnapshot(String symbol, int limit) {
+        if (symbol == null || symbol.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            ApiResponse<BinanceOrderBookSnapshotClientDto> response =
+                    binanceClient.orderBook(symbol.trim().toUpperCase(java.util.Locale.ROOT), limit);
+            return Optional.ofNullable(unwrap(response, "market.order-book"));
+        } catch (RestClientResponseException ex) {
+            BinanceHttpError error = parseBinanceHttpError(ex);
+            log.warn("event=binance.order_book.client.fail symbol={} limit={} httpStatus={} errorCode={} binanceCode={} traceId={} executionLane=COLD",
+                    safeNull(symbol), limit, error.httpStatus(), error.errorCode(), error.binanceCode(), error.traceId());
+            return Optional.empty();
+        } catch (ResourceAccessException ex) {
+            log.warn("event=binance.order_book.client.fail symbol={} limit={} reason=network_timeout errorClass={} executionLane=COLD",
+                    safeNull(symbol), limit, ex.getClass().getSimpleName());
+            return Optional.empty();
+        } catch (EngineException | RestClientException | IllegalStateException ex) {
+            log.warn("event=binance.order_book.client.fail symbol={} limit={} reason=client_error errorClass={} error={} executionLane=COLD",
+                    safeNull(symbol), limit, ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
             return Optional.empty();
         }
     }

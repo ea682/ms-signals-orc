@@ -42,6 +42,38 @@ class CopyExecutionPersistenceServiceTest {
         assertEquals(1, operations.rows.size());
         assertEquals(1, events.uniqueClientOrderIds.size());
         assertEquals(1, store.persisted);
+        assertEquals("EXECUTED", events.lastRequired.getReasonCode());
+    }
+
+    @Test
+    void recoveredFillAfterTimeoutKeepsTheStableRecoveryReason() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        FakeStore store = new FakeStore();
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(operations, events, store);
+        CopyDispatchIntentEntity intent = openIntent();
+        intent.setLastErrorCode("EXECUTION_TIMEOUT_RECONCILING");
+
+        service.persistRecovered(intent, filled("100"));
+
+        assertEquals("RECONCILED_AFTER_TIMEOUT", events.lastRequired.getReasonCode());
+    }
+
+    @Test
+    void recoveredPartialFillUsesTheStablePartialReason() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        FakeStore store = new FakeStore();
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(operations, events, store);
+        CopyDispatchIntentEntity intent = openIntent();
+        intent.setLastErrorCode("EXECUTION_AMBIGUOUS_RECONCILING");
+        BinanceFuturesOrderClientResponse partial = filled("100");
+        partial.setStatus("PARTIALLY_FILLED");
+        partial.setExecutedQty(new BigDecimal("0.4"));
+
+        service.persistRecovered(intent, partial);
+
+        assertEquals("PARTIALLY_FILLED", events.lastRequired.getReasonCode());
     }
 
     @Test
@@ -96,6 +128,138 @@ class CopyExecutionPersistenceServiceTest {
 
         assertFalse(recovered.isActive());
         assertEquals(BigDecimal.ZERO, recovered.getSizePar());
+    }
+
+    @Test
+    void openStatePersistedBeforeLedgerFailureRecordsTheCumulativeFillWithoutApplyingItTwice() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        FakeStore store = new FakeStore();
+        CopyDispatchIntentEntity intent = openIntent();
+        CopyOperationDto alreadyPersisted = openCopy(BigDecimal.ONE);
+        alreadyPersisted.setDispatchIntentId(intent.getId());
+        operations.upsertActiveOperation(alreadyPersisted);
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(operations, events, store);
+
+        CopyOperationDto recovered = service.persistRecovered(intent, filled("100"));
+
+        assertTrue(recovered.isActive());
+        assertEquals(0, BigDecimal.ONE.compareTo(recovered.getSizePar()));
+        assertNotNull(events.lastRequired);
+        assertEquals(0, BigDecimal.ONE.compareTo(events.lastRequired.getQtyExecuted()));
+        assertEquals(0, BigDecimal.ZERO.compareTo(events.lastRequired.getPreviousQty()));
+        assertEquals(0, BigDecimal.ONE.compareTo(events.lastRequired.getResultingQty()));
+    }
+
+    @Test
+    void closeStatePersistedBeforeLedgerFailureIsCompletedWithoutReopeningOrReclosing() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        FakeStore store = new FakeStore();
+        CopyOperationDto alreadyClosed = openCopy(BigDecimal.ONE);
+        alreadyClosed.setSizePar(BigDecimal.ZERO);
+        alreadyClosed.setSiseUsd(BigDecimal.ZERO);
+        alreadyClosed.setPriceClose(new BigDecimal("99"));
+        alreadyClosed.setDateClose(OffsetDateTime.now());
+        alreadyClosed.setActive(false);
+        operations.closeOperation(alreadyClosed);
+        CopyDispatchIntentEntity close = openIntent();
+        close.setCopyIntent("CLOSE");
+        close.setReduceOnly(true);
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(operations, events, store);
+
+        CopyOperationDto recovered = service.persistRecovered(close, filled("99"));
+
+        assertFalse(recovered.isActive());
+        assertEquals(0, BigDecimal.ZERO.compareTo(recovered.getSizePar()));
+        assertNotNull(events.lastRequired);
+        assertEquals("CLOSE", events.lastRequired.getEventType());
+        assertEquals(0, BigDecimal.ONE.compareTo(events.lastRequired.getQtyExecuted()));
+        assertEquals(0, BigDecimal.ONE.compareTo(events.lastRequired.getPreviousQty()));
+        assertEquals(0, BigDecimal.ZERO.compareTo(events.lastRequired.getResultingQty()));
+    }
+
+    @Test
+    void authoritativeLinkedClosedOperationReconcilesEvenWhenBusinessLookupNoLongerMatches() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        FakeStore store = new FakeStore();
+        CopyOperationDto alreadyClosed = openCopy(BigDecimal.ONE);
+        alreadyClosed.setSizePar(BigDecimal.ZERO);
+        alreadyClosed.setSiseUsd(BigDecimal.ZERO);
+        alreadyClosed.setPriceClose(new BigDecimal("100"));
+        alreadyClosed.setDateClose(OffsetDateTime.now());
+        alreadyClosed.setActive(false);
+        operations.closeOperation(alreadyClosed);
+
+        CopyDispatchIntentEntity close = openIntent();
+        close.setCopyIntent("CLOSE");
+        close.setReduceOnly(true);
+        close.setCopyOperationId(alreadyClosed.getIdOperation());
+        close.setIdOrderOrigin("origin-after-rebalance");
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(operations, events, store);
+
+        CopyOperationDto recovered = service.persistRecovered(close, filled("99"));
+
+        assertFalse(recovered.isActive());
+        assertEquals(alreadyClosed.getIdOperation(), recovered.getIdOperation());
+        assertEquals(new BigDecimal("99"), recovered.getPriceClose());
+        assertEquals("AVAILABLE", recovered.getPriceStatus());
+        assertEquals("CLOSE", events.lastRequired.getEventType());
+    }
+
+    @Test
+    void nonReduceOnlyFlipWithoutTargetPositionReconcilesAsOpen() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        CopyDispatchIntentEntity flip = openIntent();
+        flip.setCopyIntent("FLIP");
+        flip.setReduceOnly(false);
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(operations, events, new FakeStore());
+
+        CopyOperationDto recovered = service.persistRecovered(flip, filled("101"));
+
+        assertTrue(recovered.isActive());
+        assertEquals("OPEN", events.lastRequired.getEventType());
+        assertEquals("FLIP_OPEN", events.lastRequired.getCopyIntent());
+    }
+
+    @Test
+    void linkedFlipUsesPersistedOpenLedgerTypeInsteadOfBeingReclassifiedAsIncrease() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        CopyDispatchIntentEntity flip = openIntent();
+        flip.setCopyIntent("FLIP");
+        flip.setReduceOnly(false);
+        CopyOperationDto alreadyApplied = openCopy(BigDecimal.ONE);
+        alreadyApplied.setDispatchIntentId(flip.getId());
+        operations.upsertActiveOperation(alreadyApplied);
+        flip.setCopyOperationId(alreadyApplied.getIdOperation());
+        flip.setCopyOperationEventId(UUID.randomUUID());
+        events.recordedEventType = "OPEN";
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(
+                operations, events, new FakeStore());
+
+        CopyOperationDto recovered = service.persistRecovered(flip, filled("101"));
+
+        assertEquals(BigDecimal.ONE, recovered.getSizePar());
+        assertEquals("OPEN", events.lastRequired.getEventType());
+        assertEquals("FLIP_OPEN", events.lastRequired.getCopyIntent());
+    }
+
+    @Test
+    void nonReduceOnlyAdjustWithoutPositionReconcilesAsOpen() {
+        FakeOperations operations = new FakeOperations();
+        FakeEvents events = new FakeEvents();
+        CopyDispatchIntentEntity adjust = openIntent();
+        adjust.setCopyIntent("ADJUST");
+        adjust.setReduceOnly(false);
+        CopyExecutionPersistenceService service = new CopyExecutionPersistenceService(operations, events, new FakeStore());
+
+        CopyOperationDto recovered = service.persistRecovered(adjust, filled("101"));
+
+        assertTrue(recovered.isActive());
+        assertEquals("OPEN", events.lastRequired.getEventType());
     }
 
     @Test
@@ -204,10 +368,12 @@ class CopyExecutionPersistenceServiceTest {
         @Override public void newOperation(CopyOperationDto operation) { upsertActiveOperation(operation); }
         @Override public void closeOperation(CopyOperationDto operation) { operation.setActive(false); rows.put(key(operation), operation); }
         @Override public CopyOperationDto findOperation(String idOrden) { return rows.values().stream().filter(v -> idOrden.equals(v.getIdOrden())).findFirst().orElse(null); }
+        @Override public CopyOperationDto findOperationById(UUID id) { return rows.values().stream().filter(v -> id.equals(v.getIdOperation())).findFirst().orElse(null); }
         @Override public List<CopyOperationDto> findOperationsByOrigin(String id) { return new ArrayList<>(rows.values()); }
         @Override public Optional<CopyOperationEntity> findOperationByOrigin(String id) { return Optional.empty(); }
         @Override public CopyOperationDto findOperationForUser(String a, String b) { return null; }
         @Override public CopyOperationDto findOperationForAllocation(String origin, String user, Long allocation, String strategy, String type) { return rows.get(allocation + "|" + origin + "|" + type); }
+        @Override public CopyOperationDto findLatestOperationForAllocation(String origin, String user, Long allocation, String strategy, String type) { return rows.get(allocation + "|" + origin + "|" + type); }
         @Override public boolean existsByOriginAndUser(String a, String b) { return !rows.isEmpty(); }
         @Override public List<CopyOperationDto> findActiveOperationsForUserOrigin(String a, String b) { return rows.values().stream().filter(CopyOperationDto::isActive).toList(); }
         @Override public List<CopyOperationDto> findActiveOperationsByUserAndWallet(String a, String b) { return findActiveOperationsForUserOrigin(a, b); }
@@ -215,16 +381,32 @@ class CopyExecutionPersistenceServiceTest {
         @Override public CopyOperationDto findOperationForUserAndType(String a, String b, String c) { return null; }
         @Override public BigDecimal sumBufferedMarginActive(String a, String b, BigDecimal c) { return BigDecimal.ZERO; }
         @Override public BigDecimal sumBufferedMarginActiveForUser(String a, BigDecimal b) { return BigDecimal.ZERO; }
+        @Override public CopyOperationDto updateExecutionPriceEvidence(UUID id, BigDecimal price, String status, boolean closing) {
+            CopyOperationDto operation = findOperationById(id);
+            if (operation == null) return null;
+            if (closing) operation.setPriceClose(price); else operation.setPriceEntry(price);
+            operation.setPriceStatus(status);
+            return operation;
+        }
     }
 
     private static final class FakeEvents implements CopyOperationEventService {
         private final java.util.Set<String> uniqueClientOrderIds = new java.util.HashSet<>();
+        private CopyOperationEventRecordCommand lastRequired;
+        private String recordedEventType;
         @Override public void record(CopyOperationEventRecordCommand command) { uniqueClientOrderIds.add(command.getClientOrderId()); }
         @Override public UUID recordRequired(CopyOperationEventRecordCommand command) {
             uniqueClientOrderIds.add(command.getClientOrderId());
+            lastRequired = command;
             return UUID.nameUUIDFromBytes((command.getDispatchIntentId() + "|" + command.getEventType()
                     + "|" + command.getQtyExecuted()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         }
+        @Override public UUID recordReconciliationRequired(CopyOperationEventRecordCommand command) {
+            uniqueClientOrderIds.add(command.getClientOrderId());
+            return UUID.nameUUIDFromBytes((command.getClientOrderId() + "|" + command.getEventType())
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        @Override public String findEventType(UUID id) { return recordedEventType; }
     }
 
     private static final class FakeStore implements CopyDispatchIntentStore {

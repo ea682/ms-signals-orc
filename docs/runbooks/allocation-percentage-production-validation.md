@@ -173,10 +173,11 @@ where is_active = true and ends_at is null and lower(status) = 'active'
 group by execution_mode;
 ```
 
-El presupuesto 100/20/5 se valida en runtime con las metricas y logs de
-`CopyBudgetResolver` / `PostgresCopyDispatchIntentStore`: capital total 100,
-margen por operacion <=20 y posiciones+reservas <=5. REDUCE/CLOSE no consumen
-una reserva nueva y permanecen permitidos.
+El presupuesto V3 se valida en runtime con las metricas y logs de
+`CopyBudgetResolver` / `PostgresCopyDispatchIntentStore`: capital total 100 por
+`user + wallet`, leverage 5x, sin margen fijo por operacion y sin maximo global
+de posiciones. `userMaxConcurrentPositions` se valida solo cuando el usuario lo
+configura. REDUCE/CLOSE no consumen una reserva nueva y permanecen permitidos.
 
 ## Alertas
 

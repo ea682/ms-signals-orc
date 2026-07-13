@@ -1,5 +1,6 @@
 package com.apunto.engine.dto;
 
+import com.apunto.engine.dto.client.BinanceExecutionFillClientDto;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -7,6 +8,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -15,6 +17,7 @@ import java.util.UUID;
 @AllArgsConstructor
 public class CopyOperationEventRecordCommand {
     private UUID idOperation;
+    private UUID economicCycleId;
     private UUID dispatchIntentId;
     private Long userCopyAllocationId;
     private String copyStrategyCode;
@@ -43,6 +46,38 @@ public class CopyOperationEventRecordCommand {
     private BigDecimal resultingQty;
     private BigDecimal realizedPnlUsd;
     private BigDecimal feeUsd;
+    private List<String> tradeIds;
+    private List<BinanceExecutionFillClientDto> individualFills;
+    private BigDecimal averageFillPrice;
+    private BigDecimal entryPrice;
+    private BigDecimal exitPrice;
+    private BigDecimal entryFee;
+    private BigDecimal exitFee;
+    private BigDecimal totalFees;
+    private BigDecimal fundingPaid;
+    private BigDecimal fundingReceived;
+    private BigDecimal netFunding;
+    private BigDecimal grossRealizedPnl;
+    private BigDecimal netRealizedPnl;
+    private BigDecimal unrealizedPnl;
+    private BigDecimal expectedPrice;
+    private BigDecimal actualPrice;
+    private BigDecimal slippageBps;
+    private BigDecimal slippageUsd;
+    private OffsetDateTime submittedAt;
+    private OffsetDateTime acceptedAt;
+    private OffsetDateTime filledAt;
+    private Long sourceToSubmitLatencyMs;
+    private Long submitToFillLatencyMs;
+    private Long endToEndLatencyMs;
+    private String economicDataStatus;
+    private String strategyVersion;
+    private String sizingPolicyVersion;
+    private String symbolMappingVersion;
+    private String feeModelVersion;
+    private String fundingModelVersion;
+    private String slippageModelVersion;
+    private String liquidityModelVersion;
     private String traceId;
     private String source;
     private String reasonCode;

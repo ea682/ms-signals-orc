@@ -7,6 +7,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Builder;
 import lombok.Data;
 
+import java.math.BigDecimal;
+import java.time.Instant;
+
 @Data
 @Builder
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -27,4 +30,6 @@ public class NewOperationClientRequest {
      * Max 36 chars, allowed [A-Za-z0-9._-].
      */
     private String clientOrderId;
+    private BigDecimal referencePrice;
+    private Instant sourceObservedAt;
 }

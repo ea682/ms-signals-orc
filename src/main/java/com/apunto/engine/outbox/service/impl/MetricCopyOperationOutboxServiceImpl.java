@@ -22,7 +22,7 @@ import java.util.Locale;
 @RequiredArgsConstructor
 public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperationOutboxService {
     private static final String EVENT_TYPE = "copy-operation-event-persisted-v1";
-    private static final String EVENT_VERSION = "1";
+    private static final String EVENT_VERSION = "3";
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -104,7 +104,48 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
                 entity.getSource(),
                 entity.getReasonCode(),
                 entity.getEventTime(),
-                entity.getDateCreation()
+                entity.getDateCreation(),
+                entity.getEconomicCycleId(),
+                entity.getDispatchIntentId(),
+                entity.getUserCopyAllocationId(),
+                entity.getCopyStrategyCode(),
+                entity.getExecutionMode(),
+                entity.getDecision(),
+                entity.getDecisionReason(),
+                entity.getPriceStatus(),
+                entity.getTradeIds(),
+                entity.getIndividualFills(),
+                entity.getAverageFillPrice(),
+                entity.getEntryPrice(),
+                entity.getExitPrice(),
+                entity.getEntryFee(),
+                entity.getExitFee(),
+                entity.getTotalFees(),
+                entity.getFundingPaid(),
+                entity.getFundingReceived(),
+                entity.getNetFunding(),
+                entity.getGrossRealizedPnl(),
+                entity.getNetRealizedPnl(),
+                entity.getUnrealizedPnl(),
+                entity.getExpectedPrice(),
+                entity.getActualPrice(),
+                entity.getSlippageBps(),
+                entity.getSlippageUsd(),
+                entity.getSubmittedAt(),
+                entity.getAcceptedAt(),
+                entity.getFilledAt(),
+                entity.getPersistedAt(),
+                entity.getSourceToSubmitLatencyMs(),
+                entity.getSubmitToFillLatencyMs(),
+                entity.getEndToEndLatencyMs(),
+                entity.getEconomicDataStatus(),
+                entity.getStrategyVersion(),
+                entity.getSizingPolicyVersion(),
+                entity.getSymbolMappingVersion(),
+                entity.getFeeModelVersion(),
+                entity.getFundingModelVersion(),
+                entity.getSlippageModelVersion(),
+                entity.getLiquidityModelVersion()
         );
     }
 

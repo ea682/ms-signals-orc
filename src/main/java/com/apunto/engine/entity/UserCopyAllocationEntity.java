@@ -122,6 +122,9 @@ public class UserCopyAllocationEntity {
     @Column(name = "leverage_override", precision = 10, scale = 2)
     private BigDecimal leverageOverride;
 
+    @Column(name = "user_max_concurrent_positions")
+    private Integer userMaxConcurrentPositions;
+
     @Builder.Default
     @Enumerated(EnumType.STRING)
     @Column(name = "copy_min_notional_mode", nullable = false, length = 32)

@@ -51,6 +51,27 @@ class CopyDispatchCoordinatorTest {
     }
 
     @Test
+    void allocationPositionLimitTravelsToAtomicReservationAndChangesPayloadIdentity() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+        UserCopyAllocationEntity first = allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE");
+        first.setUserMaxConcurrentPositions(7);
+        UserCopyAllocationEntity changed = allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE");
+        changed.setUserMaxConcurrentPositions(8);
+
+        coordinator.dispatch(open("evt-user-limit"), first, new BigDecimal("100"), "trace-1");
+        assertEquals(7, store.lastRequest().userMaxConcurrentPositions());
+
+        SkipExecutionException conflict = assertThrows(SkipExecutionException.class,
+                () -> coordinator.dispatch(open("evt-user-limit"), changed,
+                        new BigDecimal("100"), "trace-2"));
+
+        assertEquals("BLOCKED_IDEMPOTENCY_PAYLOAD_CONFLICT", conflict.getReasonCode());
+        assertEquals(1, gateway.calls.get());
+    }
+
+    @Test
     void sameSourceEventDifferentStrategyAllocationsMayEachSendOnce() {
         FakeStore store = new FakeStore();
         FakeGateway gateway = new FakeGateway(filled("100"));
@@ -117,6 +138,7 @@ class CopyDispatchCoordinatorTest {
         assertThrows(CopyDispatchReconciliationPendingException.class,
                 () -> coordinator.dispatch(open("evt-timeout"), allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
         assertTrue(store.hasReconciling());
+        assertEquals("EXECUTION_TIMEOUT_RECONCILING", store.lastAmbiguousReason);
         assertEquals(1, gateway.calls.get());
 
         assertThrows(CopyDispatchReconciliationPendingException.class,
@@ -153,6 +175,24 @@ class CopyDispatchCoordinatorTest {
 
         assertEquals(1, gateway.calls.get());
         assertTrue(store.hasReconciling());
+        assertEquals("EXECUTION_AMBIGUOUS_RECONCILING", store.lastAmbiguousReason);
+    }
+
+    @Test
+    void httpRateLimitAfterPossibleSendNeverRetriesBlindly() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(new CopyBinanceClientException("http 429 rate limit"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-http-429"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-1"));
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-http-429"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace-2"));
+
+        assertEquals(1, gateway.calls.get());
+        assertEquals("EXECUTION_AMBIGUOUS_RECONCILING", store.lastAmbiguousReason);
     }
 
     @Test
@@ -196,6 +236,7 @@ class CopyDispatchCoordinatorTest {
         assertThrows(CopyDispatchReconciliationPendingException.class,
                 () -> coordinator.dispatch(open("evt-live-timeout"), allocation(700L, "LONG_ONLY", "LIVE"), new BigDecimal("100"), "trace"));
         assertTrue(store.hasReconciling());
+        assertEquals("EXECUTION_AMBIGUOUS_RECONCILING", store.lastAmbiguousReason);
         assertEquals(1, gateway.calls.get());
     }
 
@@ -216,6 +257,50 @@ class CopyDispatchCoordinatorTest {
         assertTrue(store.hasRejected());
         assertFalse(store.hasReconciling());
         assertEquals(1, gateway.calls.get());
+    }
+
+    @Test
+    void wrappedSocketTimeoutUsesTheStableTimeoutReason() {
+        FakeStore store = new FakeStore();
+        RuntimeException wrapped = new CopyBinanceClientException(
+                "gateway unavailable",
+                new IllegalStateException(new java.net.SocketTimeoutException("read timed out")),
+                Map.of());
+        CopyDispatchCoordinator coordinator = coordinator(store, new FakeGateway(wrapped));
+
+        assertThrows(CopyDispatchReconciliationPendingException.class,
+                () -> coordinator.dispatch(open("evt-wrapped-timeout"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals("EXECUTION_TIMEOUT_RECONCILING", store.lastAmbiguousReason);
+    }
+
+    @Test
+    void definitiveBinanceRejectionsPersistSpecificStableReasons() {
+        assertRejectedReason("-2019", "Margin is insufficient.", "REJECTED_BY_BINANCE_BALANCE");
+        assertRejectedReason("-4061", "Order position side does not match user's setting.",
+                "REJECTED_BY_BINANCE_MARGIN_MODE");
+        assertRejectedReason("-2027", "Exceeded the maximum allowable position at current leverage.",
+                "REJECTED_BY_BINANCE_LEVERAGE");
+        assertRejectedReason("-1111", "Precision is over the maximum defined for this asset.",
+                "REJECTED_BY_BINANCE_FILTER");
+        assertRejectedReason("-4999", "Unexpected exchange rejection.",
+                "REJECTED_BY_BINANCE_UNKNOWN");
+    }
+
+    private void assertRejectedReason(String binanceCode, String binanceMessage, String expectedReason) {
+        FakeStore store = new FakeStore();
+        CopyOrderRejectedException rejection = new CopyOrderRejectedException(
+                binanceMessage,
+                Map.of("binanceCode", binanceCode, "binanceMsg", binanceMessage));
+        CopyDispatchCoordinator coordinator = coordinator(store, new FakeGateway(rejection));
+
+        assertThrows(CopyOrderRejectedException.class,
+                () -> coordinator.dispatch(open("evt-rejection-" + binanceCode),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"),
+                        new BigDecimal("100"), "trace"));
+
+        assertEquals(expectedReason, store.lastRejectedReason());
     }
 
     @Test
@@ -246,7 +331,7 @@ class CopyDispatchCoordinatorTest {
                 () -> coordinator.dispatch(conflicting, allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"),
                         new BigDecimal("100"), "trace-2"));
 
-        assertEquals("COPY_IDEMPOTENCY_PAYLOAD_MISMATCH", conflict.getReasonCode());
+        assertEquals("BLOCKED_IDEMPOTENCY_PAYLOAD_CONFLICT", conflict.getReasonCode());
         assertEquals(1, gateway.calls.get());
     }
 
@@ -548,9 +633,13 @@ class CopyDispatchCoordinatorTest {
         private final Map<UUID, BinanceFuturesOrderClientResponse> responses = new ConcurrentHashMap<>();
         private final Map<UUID, String> statuses = new ConcurrentHashMap<>();
         private final Map<UUID, String> requestHashes = new ConcurrentHashMap<>();
+        private volatile CopyDispatchRequest lastRequest;
+        private volatile String lastRejectedReason;
+        private volatile String lastAmbiguousReason;
 
         @Override
         public CopyDispatchPermit acquire(CopyDispatchRequest request) {
+            lastRequest = request;
             AtomicBoolean created = new AtomicBoolean(false);
             UUID id = ids.computeIfAbsent(request.idempotencyKey(), ignored -> {
                 created.set(true);
@@ -576,8 +665,14 @@ class CopyDispatchCoordinatorTest {
             statuses.put(intentId, execution.executionState().name());
         }
 
-        @Override public void markAmbiguous(UUID intentId, String reasonCode, String detail) { statuses.put(intentId, "RECONCILING"); }
-        @Override public void markRejected(UUID intentId, String reasonCode, String detail) { statuses.put(intentId, "REJECTED"); }
+        @Override public void markAmbiguous(UUID intentId, String reasonCode, String detail) {
+            lastAmbiguousReason = reasonCode;
+            statuses.put(intentId, "RECONCILING");
+        }
+        @Override public void markRejected(UUID intentId, String reasonCode, String detail) {
+            lastRejectedReason = reasonCode;
+            statuses.put(intentId, "REJECTED");
+        }
 
         @Override
         public void markPersistencePending(String clientOrderId, String reasonCode, String detail) {
@@ -594,6 +689,8 @@ class CopyDispatchCoordinatorTest {
         boolean hasReconciling() { return statuses.containsValue("RECONCILING"); }
         boolean hasPersistencePending() { return statuses.containsValue("PERSISTENCE_PENDING"); }
         boolean hasRejected() { return statuses.containsValue("REJECTED"); }
+        CopyDispatchRequest lastRequest() { return lastRequest; }
+        String lastRejectedReason() { return lastRejectedReason; }
     }
 
     @Test

@@ -34,9 +34,11 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
                    count(*) - count(DISTINCT i.idempotency_key) AS duplicate_count,
                    count(*) FILTER (
                        WHERE i.status IN ('RECONCILING', 'MANUAL_REVIEW')
-                         AND upper(coalesce(i.last_error_code, '')) IN (
-                             'BINANCE_OUTCOME_AMBIGUOUS',
-                             'BINANCE_RESPONSE_AMBIGUOUS',
+                          AND upper(coalesce(i.last_error_code, '')) IN (
+                              'EXECUTION_TIMEOUT_RECONCILING',
+                              'EXECUTION_AMBIGUOUS_RECONCILING',
+                              'BINANCE_OUTCOME_AMBIGUOUS',
+                              'BINANCE_RESPONSE_AMBIGUOUS',
                              'NEW_ORDER_RECONCILIATION_EXHAUSTED',
                              'ORDER_NOT_FOUND_REQUIRES_MANUAL_REVIEW'
                          )
@@ -119,14 +121,16 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
             wallet_id, strategy_code, scope_type, scope_value, source_event_id,
             id_order_origin, source_event_type, copy_intent, symbol, side, position_side,
             reduce_only, requested_qty, requested_margin_usd, requested_notional_usd,
-            reference_price, requested_leverage, reserved_position_count, reservation_status,
+            reference_price, requested_leverage, user_max_concurrent_positions,
+            reserved_position_count, reservation_status,
             client_order_id, average_price_status, status, request_hash, attempts,
             reconciliation_attempts, created_at, updated_at
         ) VALUES (
             :id, :key, :userId, :allocationId, :mode, :walletId, :strategy,
             :scopeType, :scopeValue, :sourceEventId, :originId, :sourceEventType,
             :copyIntent, :symbol, :side, :positionSide, :reduceOnly, :qty, :margin,
-            :notional, :referencePrice, :leverage, :reservedPositions, 'UNRESERVED',
+            :notional, :referencePrice, :leverage, :userMaxConcurrentPositions,
+            :reservedPositions, 'UNRESERVED',
             :clientOrderId, 'NOT_AVAILABLE', 'CREATED', :requestHash, 0, 0, :now, :now
         ) ON CONFLICT (idempotency_key) DO NOTHING
         """, nativeQuery = true)
@@ -151,9 +155,10 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
             @Param("qty") BigDecimal qty,
             @Param("margin") BigDecimal margin,
             @Param("notional") BigDecimal notional,
-            @Param("referencePrice") BigDecimal referencePrice,
-            @Param("leverage") Integer leverage,
-            @Param("reservedPositions") int reservedPositions,
+             @Param("referencePrice") BigDecimal referencePrice,
+             @Param("leverage") Integer leverage,
+             @Param("userMaxConcurrentPositions") Integer userMaxConcurrentPositions,
+             @Param("reservedPositions") int reservedPositions,
             @Param("clientOrderId") String clientOrderId,
             @Param("requestHash") String requestHash,
             @Param("now") OffsetDateTime now);

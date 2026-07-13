@@ -1,5 +1,9 @@
 # SDD: Idempotencia y reconciliacion de Copy Execution
 
+> Nota de precedencia (2026-07-13): las reglas de idempotencia y recovery de
+> este documento siguen vigentes. Sus topes economicos fijos fueron sustituidos
+> por `copy-trading-proportional-portfolio-v3-sdd.md` y no deben usarse en V3.
+
 Estado: aprobado para implementacion
 Fecha: 2026-07-09
 Servicios: `ms-signals-orc`, `ms-binance-engine`

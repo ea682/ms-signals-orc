@@ -2,6 +2,7 @@ package com.apunto.engine.service.copy.dispatch;
 
 import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
+import com.apunto.engine.service.copy.certification.LiveEntryAuthorizationDecision;
 import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 
@@ -22,12 +23,12 @@ class CopyRealExecutionGateTest {
     }
 
     @Test
-    void masterDispatchSwitchBlocksEveryModeIncludingReductions() {
+    void masterEntrySwitchBlocksEntriesButNotDeriskOrders() {
         CopyRealExecutionGate gate = gate(false, true, true, true, false);
 
         assertEquals("COPY_NEW_DISPATCH_DISABLED",
                 gate.evaluate(operation(false), allocation("MICRO_LIVE")).reasonCode());
-        assertEquals("COPY_NEW_DISPATCH_DISABLED",
+        assertEquals("LIVE_DERISK_ALLOWED",
                 gate.evaluate(operation(true), allocation("LIVE")).reasonCode());
     }
 
@@ -38,7 +39,26 @@ class CopyRealExecutionGateTest {
         CopyRealExecutionGate.Decision decision = gate.evaluate(operation(true), allocation("LIVE"));
 
         assertTrue(decision.allowed());
-        assertEquals("LIVE_REDUCTION_ALLOWED", decision.reasonCode());
+        assertEquals("LIVE_DERISK_ALLOWED", decision.reasonCode());
+    }
+
+    @Test
+    void liveEntryRequiresExactCertificationAndUserAdoption() {
+        CopyRealExecutionGate blocked = gate(true, true, true, true, false);
+        setField(blocked, "liveEntryAuthorizationGate",
+                (com.apunto.engine.service.copy.certification.LiveEntryAuthorizationGate)
+                        (operation, allocation) -> LiveEntryAuthorizationDecision.blocked("LIVE_ADOPTION_EXPIRED"));
+
+        assertEquals("LIVE_ADOPTION_EXPIRED",
+                blocked.evaluate(operation(false), allocation("LIVE")).reasonCode());
+
+        CopyRealExecutionGate allowed = gate(true, true, true, true, false);
+        setField(allowed, "liveEntryAuthorizationGate",
+                (com.apunto.engine.service.copy.certification.LiveEntryAuthorizationGate)
+                        (operation, allocation) -> LiveEntryAuthorizationDecision.allowed(
+                                "LIVE_CERTIFICATION_AND_ADOPTION_VALID", null));
+
+        assertTrue(allowed.evaluate(operation(false), allocation("LIVE")).allowed());
     }
 
     @Test
@@ -57,6 +77,7 @@ class CopyRealExecutionGateTest {
         setField(gate, "liveEnabled", live);
         setField(gate, "liveCanaryEnabled", canary);
         setField(gate, "liveDryRun", dryRun);
+        setField(gate, "deriskExecutionEnabled", true);
         setField(gate, "liveWhitelistUserIds", "user-1");
         setField(gate, "liveWhitelistWalletIds", "");
         setField(gate, "liveWhitelistSymbols", "");
