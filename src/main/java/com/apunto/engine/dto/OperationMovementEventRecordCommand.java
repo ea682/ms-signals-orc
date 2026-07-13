@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -48,6 +49,16 @@ public class OperationMovementEventRecordCommand {
     private BigDecimal effectiveRealizedPnlUsd;
     private String normalizationStatus;
     private String normalizationReason;
+    private String economicEventKind;
+    private Integer economicEventVersion;
+    private String sourceEventId;
+    private Long sourceSequence;
+    private BigDecimal sourceFeeUsd;
+    private BigDecimal fundingPnlUsd;
+    private String executionPriceBasis;
+    private String notionalBasis;
+    private List<String> lifecycleQualityFlags;
+    private Boolean sourceEstimated;
     private Long walletVersion;
     private Long snapshotVersion;
     private OffsetDateTime sourceTs;

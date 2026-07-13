@@ -20,6 +20,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 @Slf4j
@@ -28,7 +30,7 @@ import java.util.Locale;
 public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxService {
 
     private static final String EVENT_TYPE = "operation-movement-persisted-v1";
-    private static final String EVENT_VERSION = "1";
+    private static final String EVENT_VERSION = "2";
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -53,6 +55,7 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
 
     private void insertOutbox(OperationMovementEventEntity entity, String payload) {
         String wallet = normalizeWallet(entity.getIdWalletOrigin());
+        String partitionKey = metricPartitionKey(entity);
         try {
             jdbcTemplate.update(
                     """
@@ -62,7 +65,7 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
                     """,
                     EVENT_TYPE,
                     entity.getMovementKey(),
-                    wallet,
+                    partitionKey,
                     payload
             );
             log.debug("event=metric_outbox.enqueued movementKey={} wallet={} topicEvent={}",
@@ -117,8 +120,71 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
                 entity.getCopySubmittedTasks(),
                 entity.getCopyBusinessSkipped(),
                 entity.getCopyFallbackJobs(),
-                entity.getCopyFallbackUsed()
+                entity.getCopyFallbackUsed(),
+                firstNonBlank(entity.getEconomicEventKind(), "POSITION_DELTA"),
+                entity.getEconomicEventVersion() == null ? 2 : entity.getEconomicEventVersion(),
+                firstNonBlank(entity.getSourceEventId(), firstNonBlank(entity.getIdempotencyKey(), entity.getMovementKey())),
+                sourceSequence(entity),
+                entity.getSourceFeeUsd(),
+                entity.getFundingPnlUsd(),
+                firstNonBlank(entity.getExecutionPriceBasis(), "PUBLIC_TRIGGER_TRADE_PX"),
+                firstNonBlank(entity.getNotionalBasis(), "POSITION_SNAPSHOT"),
+                lifecycleQualityFlags(entity),
+                sourceEstimated(entity)
         );
+    }
+
+    private Long sourceSequence(OperationMovementEventEntity entity) {
+        if (entity != null && entity.getSourceSequence() != null) {
+            return entity.getSourceSequence();
+        }
+        if (entity == null || entity.getRaw() == null) {
+            return null;
+        }
+        String externalId = entity.getRaw().path("request").path("externalId").asText(null);
+        if (!StringUtils.hasText(externalId)) {
+            return null;
+        }
+        String[] parts = externalId.split("\\|");
+        if (parts.length < 2) {
+            return null;
+        }
+        try {
+            return Long.parseLong(parts[parts.length - 2]);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private Boolean sourceEstimated(OperationMovementEventEntity entity) {
+        if (entity != null && entity.getSourceEstimated() != null) {
+            return entity.getSourceEstimated();
+        }
+        if (entity == null || entity.getRaw() == null) {
+            return null;
+        }
+        var estimated = entity.getRaw().path("request").path("estimated");
+        return estimated.isBoolean() ? estimated.booleanValue() : null;
+    }
+
+    private List<String> lifecycleQualityFlags(OperationMovementEventEntity entity) {
+        if (entity != null && entity.getLifecycleQualityFlags() != null && !entity.getLifecycleQualityFlags().isEmpty()) {
+            return List.copyOf(entity.getLifecycleQualityFlags());
+        }
+        List<String> flags = new ArrayList<>();
+        String normalization = upper(entity == null ? null : entity.getNormalizationStatus());
+        if ("SEMANTIC_CONFLICT".equals(normalization) || "NOT_CLOSING".equals(normalization)) {
+            flags.add("SOURCE_LEDGER_CLASSIFICATION_CONFLICT");
+        }
+        if ("AGGREGATED_POSITION_DELTA".equals(normalization)) {
+            flags.add("AGGREGATED_POSITION_DELTA");
+            flags.add("FILL_HISTORY_INCOMPLETE");
+        }
+        if (Boolean.TRUE.equals(sourceEstimated(entity))) {
+            flags.add("SOURCE_ESTIMATED");
+        }
+        flags.add("POSITION_DELTA_NOT_FILL");
+        return List.copyOf(flags);
     }
 
     private String serialize(MetricMovementPersistedEvent event) {
@@ -181,6 +247,19 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
 
     private String normalizeWallet(String wallet) {
         return wallet == null ? "" : wallet.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (StringUtils.hasText(first)) {
+            return first.trim();
+        }
+        return StringUtils.hasText(second) ? second.trim() : null;
+    }
+
+    private String metricPartitionKey(OperationMovementEventEntity entity) {
+        String wallet = normalizeWallet(entity == null ? null : entity.getIdWalletOrigin());
+        String symbol = upper(entity == null ? null : entity.getParsymbol());
+        return wallet + "|" + (symbol == null || symbol.isBlank() ? "UNKNOWN" : symbol);
     }
 
     private String upper(String value) {
