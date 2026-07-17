@@ -9,6 +9,7 @@ public record CopySimulationContext(
         String userId,
         Long allocationId,
         String walletId,
+        String generationId,
         String strategyCode,
         String strategyVersion,
         String scopeType,
@@ -19,6 +20,7 @@ public record CopySimulationContext(
         sourceEventId = normalize(sourceEventId, "sourceEventId");
         userId = normalize(userId, "userId");
         walletId = normalize(walletId, "walletId").toLowerCase(Locale.ROOT);
+        generationId = normalize(generationId, "generationId");
         strategyCode = normalize(strategyCode, "strategyCode").toUpperCase(Locale.ROOT);
         strategyVersion = normalize(strategyVersion, "strategyVersion");
         scopeType = normalize(scopeType, "scopeType").toUpperCase(Locale.ROOT);
@@ -27,6 +29,10 @@ public record CopySimulationContext(
 
     public boolean isMicroLive() {
         return "MICRO_LIVE".equals(executionMode);
+    }
+
+    public String strategyKey() {
+        return String.join("|", walletId, strategyCode, scopeType, scopeValue);
     }
 
     private static String normalize(String value, String name) {

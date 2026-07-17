@@ -8,9 +8,10 @@ import java.util.Objects;
 public final class CapitalLeverageMatrixSimulator {
 
     public static final List<BigDecimal> CAPITAL_BANDS = decimals(
-            "100", "250", "1000", "5000", "10000", "50000",
+            "100", "250", "500", "1000", "5000", "10000", "50000",
             "100000", "250000", "500000", "1000000");
     public static final List<BigDecimal> LEVERAGE_BANDS = decimals("5", "10", "15", "20");
+    public static final int SCENARIO_COUNT = CAPITAL_BANDS.size() * LEVERAGE_BANDS.size();
 
     private final TargetPortfolioCalculator calculator;
 
@@ -20,7 +21,7 @@ public final class CapitalLeverageMatrixSimulator {
 
     public List<CapitalLeverageScenario> simulate(TargetPortfolioRequest sourceSnapshot) {
         Objects.requireNonNull(sourceSnapshot, "sourceSnapshot");
-        List<CapitalLeverageScenario> scenarios = new ArrayList<>(CAPITAL_BANDS.size() * LEVERAGE_BANDS.size());
+        List<CapitalLeverageScenario> scenarios = new ArrayList<>(SCENARIO_COUNT);
         for (BigDecimal capital : CAPITAL_BANDS) {
             for (BigDecimal leverage : LEVERAGE_BANDS) {
                 TargetPortfolioResult result = calculator.calculate(simulationRequest(sourceSnapshot, capital, leverage));
@@ -51,6 +52,7 @@ public final class CapitalLeverageMatrixSimulator {
                         null,
                         null,
                         modeledEconomicsStatus(result),
+                        economicEvidence(result),
                         true,
                         result
                 ));
@@ -66,8 +68,31 @@ public final class CapitalLeverageMatrixSimulator {
                  BLOCKED_SOURCE_EQUITY_INVALID,
                  BLOCKED_SOURCE_SNAPSHOT_MISMATCH ->
                     "UNAVAILABLE_" + result.portfolioDecisionCode().name();
-            default -> "NOT_CALCULATED";
+            default -> "UNKNOWN_HISTORICAL_EXECUTION_EVIDENCE";
         };
+    }
+
+    private ScenarioEconomicEvidence economicEvidence(TargetPortfolioResult result) {
+        List<String> reasons = new ArrayList<>();
+        switch (result.portfolioDecisionCode()) {
+            case BLOCKED_SOURCE_EQUITY_MISSING,
+                 BLOCKED_SOURCE_EQUITY_STALE,
+                 BLOCKED_SOURCE_EQUITY_INVALID,
+                 BLOCKED_SOURCE_SNAPSHOT_MISMATCH ->
+                    reasons.add(result.portfolioDecisionCode().name());
+            default -> {
+                reasons.add("HISTORICAL_EXECUTION_EVIDENCE_MISSING");
+                reasons.add("HISTORICAL_BINANCE_PRICE_MISSING");
+                reasons.add("LIQUIDITY_CAPACITY_EVIDENCE_MISSING");
+                reasons.add("LIQUIDATION_INPUTS_MISSING");
+                reasons.add("VENUE_BASIS_EVIDENCE_MISSING");
+            }
+        }
+        return new ScenarioEconomicEvidence(
+                null, null, null, null, null, null,
+                decimals("0.5", "1", "2", "5", "10", "30"),
+                null, null, null, null, null, null, null, null, null, null, null,
+                "UNKNOWN", reasons);
     }
 
     private TargetPortfolioRequest simulationRequest(TargetPortfolioRequest source,

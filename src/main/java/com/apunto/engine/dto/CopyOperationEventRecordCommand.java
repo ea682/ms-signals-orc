@@ -21,6 +21,10 @@ public class CopyOperationEventRecordCommand {
     private UUID dispatchIntentId;
     private Long userCopyAllocationId;
     private String copyStrategyCode;
+    private String scopeType;
+    private String scopeValue;
+    private String strategyKey;
+    private String generationId;
     private String executionMode;
     private Boolean shadow;
     private String decision;
@@ -78,6 +82,11 @@ public class CopyOperationEventRecordCommand {
     private String fundingModelVersion;
     private String slippageModelVersion;
     private String liquidityModelVersion;
+    private BigDecimal calibrationCapitalUsd;
+    private BigDecimal targetLeverage;
+    private BigDecimal calibrationTargetNotionalUsd;
+    private String copyAction;
+    private String notionalBand;
     private String traceId;
     private String source;
     private String reasonCode;

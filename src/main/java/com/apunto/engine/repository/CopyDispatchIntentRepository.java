@@ -118,18 +118,18 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
     @Query(value = """
         INSERT INTO futuros_operaciones.copy_dispatch_intent (
             id, idempotency_key, id_user, user_copy_allocation_id, execution_mode,
-            wallet_id, strategy_code, scope_type, scope_value, source_event_id,
+            wallet_id, strategy_code, scope_type, scope_value, metric_generation_id, source_event_id,
             id_order_origin, source_event_type, copy_intent, symbol, side, position_side,
             reduce_only, requested_qty, requested_margin_usd, requested_notional_usd,
-            reference_price, requested_leverage, user_max_concurrent_positions,
+            notional_band, reference_price, requested_leverage, user_max_concurrent_positions,
             reserved_position_count, reservation_status,
             client_order_id, average_price_status, status, request_hash, attempts,
             reconciliation_attempts, created_at, updated_at
         ) VALUES (
             :id, :key, :userId, :allocationId, :mode, :walletId, :strategy,
-            :scopeType, :scopeValue, :sourceEventId, :originId, :sourceEventType,
+            :scopeType, :scopeValue, :generationId, :sourceEventId, :originId, :sourceEventType,
             :copyIntent, :symbol, :side, :positionSide, :reduceOnly, :qty, :margin,
-            :notional, :referencePrice, :leverage, :userMaxConcurrentPositions,
+            :notional, :notionalBand, :referencePrice, :leverage, :userMaxConcurrentPositions,
             :reservedPositions, 'UNRESERVED',
             :clientOrderId, 'NOT_AVAILABLE', 'CREATED', :requestHash, 0, 0, :now, :now
         ) ON CONFLICT (idempotency_key) DO NOTHING
@@ -142,9 +142,10 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
             @Param("mode") String mode,
             @Param("walletId") String walletId,
             @Param("strategy") String strategy,
-            @Param("scopeType") String scopeType,
-            @Param("scopeValue") String scopeValue,
-            @Param("sourceEventId") String sourceEventId,
+             @Param("scopeType") String scopeType,
+             @Param("scopeValue") String scopeValue,
+             @Param("generationId") String generationId,
+             @Param("sourceEventId") String sourceEventId,
             @Param("originId") String originId,
             @Param("sourceEventType") String sourceEventType,
             @Param("copyIntent") String copyIntent,
@@ -154,7 +155,8 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
             @Param("reduceOnly") boolean reduceOnly,
             @Param("qty") BigDecimal qty,
             @Param("margin") BigDecimal margin,
-            @Param("notional") BigDecimal notional,
+             @Param("notional") BigDecimal notional,
+             @Param("notionalBand") String notionalBand,
              @Param("referencePrice") BigDecimal referencePrice,
              @Param("leverage") Integer leverage,
              @Param("userMaxConcurrentPositions") Integer userMaxConcurrentPositions,

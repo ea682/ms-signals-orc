@@ -1,5 +1,6 @@
 package com.apunto.engine.service.copy;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
@@ -203,13 +204,8 @@ public class CopyStrategyRuntimeRouter {
 
     public String profileKey(String walletId, String strategyCode, String scopeType, String scopeValue) {
         String wallet = normalizeWalletId(walletId);
-        String strategy = normalizeStrategyCode(strategyCode);
         if (wallet == null) return null;
-        String effectiveStrategy = strategy == null ? DEFAULT_STRATEGY_CODE : strategy;
-        return wallet
-                + "|" + effectiveStrategy
-                + "|" + normalizeScopeType(scopeType)
-                + "|" + normalizeScopeValue(scopeValue, effectiveStrategy);
+        return MetricStrategyIdentity.canonicalKey(wallet, strategyCode, scopeType, scopeValue);
     }
 
     public boolean isCopyableJoyasCandidate(MetricaWalletDto metric) {
@@ -603,17 +599,22 @@ public class CopyStrategyRuntimeRouter {
     }
 
 
-    private static String normalizeScopeType(String raw) {
-        String value = normalizeLower(raw);
-        return value == null ? "strategy" : value;
+    private static String normalizeScopeType(String raw, String strategyCode) {
+        String value = normalize(raw);
+        if (value != null && !"STRATEGY".equals(value) && !"DEFAULT".equals(value)) {
+            return value;
+        }
+        if (LONG_ONLY.equals(strategyCode) || SHORT_ONLY.equals(strategyCode)) return "DIRECTION";
+        if (SYMBOL_SPECIALIST.equals(strategyCode)) return "SYMBOL";
+        return "ALL";
     }
 
     private static String normalizeScopeValue(String raw, String strategyCode) {
-        String value = raw == null ? null : raw.trim();
-        if (value == null || value.isEmpty()) {
-            return strategyCode == null ? "ALL" : strategyCode;
-        }
-        return value;
+        String value = normalize(raw);
+        if (value != null && !"DEFAULT".equals(value) && !"STRATEGY".equals(value)) return value;
+        if (LONG_ONLY.equals(strategyCode)) return "LONG";
+        if (SHORT_ONLY.equals(strategyCode)) return "SHORT";
+        return "ALL";
     }
 
     private static String normalizeLower(String raw) {

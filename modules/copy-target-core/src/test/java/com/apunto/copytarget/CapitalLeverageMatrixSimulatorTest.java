@@ -13,20 +13,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CapitalLeverageMatrixSimulatorTest {
 
     @Test
-    void producesTheExactTenByFourColdMatrixWithoutChangingTheRealRequest() {
+    void producesTheExactElevenByFourColdMatrixWithoutChangingTheRealRequest() {
         TargetPortfolioRequest real = request(new BigDecimal("100"), new BigDecimal("5"));
 
         List<CapitalLeverageScenario> matrix = new CapitalLeverageMatrixSimulator(
                 new TargetPortfolioCalculator()).simulate(real);
 
-        assertEquals(40, matrix.size());
+        assertEquals(44, matrix.size());
         assertEquals(0, matrix.getFirst().capitalUsd().compareTo(new BigDecimal("100")));
         assertEquals(0, matrix.getFirst().leverage().compareTo(new BigDecimal("5")));
         assertEquals(0, matrix.getLast().capitalUsd().compareTo(new BigDecimal("1000000")));
         assertEquals(0, matrix.getLast().leverage().compareTo(new BigDecimal("20")));
+        assertTrue(matrix.stream().anyMatch(scenario ->
+                scenario.capitalUsd().compareTo(new BigDecimal("500")) == 0));
         assertEquals(0, real.targetAllocatedCapitalUsd().compareTo(new BigDecimal("100")));
         assertEquals(0, real.targetLeverage().compareTo(new BigDecimal("5")));
         assertTrue(matrix.stream().allMatch(CapitalLeverageScenario::simulationOnly));
+        assertTrue(matrix.stream().allMatch(scenario ->
+                "UNKNOWN".equals(scenario.economicEvidence().status())));
+        assertTrue(matrix.stream().allMatch(scenario ->
+                scenario.economicEvidence().reasonCodes().contains("HISTORICAL_BINANCE_PRICE_MISSING")));
+        assertEquals(List.of(new BigDecimal("0.5"), new BigDecimal("1"), new BigDecimal("2"),
+                        new BigDecimal("5"), new BigDecimal("10"), new BigDecimal("30")),
+                matrix.getFirst().economicEvidence().latencyGridSeconds());
     }
 
     @Test
@@ -51,7 +60,7 @@ class CapitalLeverageMatrixSimulatorTest {
         List<CapitalLeverageScenario> matrix = new CapitalLeverageMatrixSimulator(
                 new TargetPortfolioCalculator()).simulate(request);
 
-        assertEquals(40, matrix.size());
+        assertEquals(44, matrix.size());
         assertTrue(matrix.stream().allMatch(scenario ->
                 scenario.targetPortfolio().portfolioDecisionCode()
                         == DecisionCode.BLOCKED_SOURCE_EQUITY_MISSING));

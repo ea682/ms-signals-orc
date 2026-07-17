@@ -50,6 +50,18 @@ public class CopyOperationEventEntity {
     @Column(name = "copy_strategy_code", length = 64)
     private String copyStrategyCode;
 
+    @Column(name = "scope_type", length = 32)
+    private String scopeType;
+
+    @Column(name = "scope_value", length = 180)
+    private String scopeValue;
+
+    @Column(name = "strategy_key", length = 520)
+    private String strategyKey;
+
+    @Column(name = "metric_generation_id", length = 80)
+    private String metricGenerationId;
+
     @Column(name = "execution_mode", length = 16, nullable = false)
     private String executionMode;
 
@@ -231,6 +243,21 @@ public class CopyOperationEventEntity {
 
     @Column(name = "liquidity_model_version", length = 64)
     private String liquidityModelVersion;
+
+    @Column(name = "calibration_capital_usd", precision = 38, scale = 12)
+    private BigDecimal calibrationCapitalUsd;
+
+    @Column(name = "target_leverage", precision = 12, scale = 4)
+    private BigDecimal targetLeverage;
+
+    @Column(name = "calibration_target_notional_usd", precision = 38, scale = 12)
+    private BigDecimal calibrationTargetNotionalUsd;
+
+    @Column(name = "copy_action", length = 32)
+    private String copyAction;
+
+    @Column(name = "notional_band", length = 32)
+    private String notionalBand;
 
     @Column(name = "trace_id")
     private String traceId;

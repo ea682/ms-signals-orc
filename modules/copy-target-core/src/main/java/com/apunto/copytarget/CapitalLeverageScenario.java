@@ -23,6 +23,7 @@ public record CapitalLeverageScenario(
         BigDecimal profitFactor,
         BigDecimal liquidationRisk,
         String modeledEconomicsStatus,
+        ScenarioEconomicEvidence economicEvidence,
         boolean simulationOnly,
         TargetPortfolioResult targetPortfolio
 ) {

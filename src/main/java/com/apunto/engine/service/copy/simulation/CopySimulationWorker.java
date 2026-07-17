@@ -60,8 +60,9 @@ public class CopySimulationWorker {
 
     public CopySimulationWorkerOutcome process(CopySimulationJob job) {
         List<CapitalLeverageScenario> scenarios = simulator.simulate(job.inputSnapshot().toRequest());
-        if (scenarios.size() != 40) {
-            throw new IllegalStateException("capital/leverage matrix must contain exactly 40 scenarios");
+        if (scenarios.size() != CapitalLeverageMatrixSimulator.SCENARIO_COUNT) {
+            throw new IllegalStateException("capital/leverage matrix must contain exactly "
+                    + CapitalLeverageMatrixSimulator.SCENARIO_COUNT + " scenarios");
         }
         int cursor = Math.max(0, Math.min(job.resumeCursor(), scenarios.size()));
         for (int index = cursor; index < scenarios.size(); index++) {

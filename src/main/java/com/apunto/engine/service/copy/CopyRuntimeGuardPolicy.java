@@ -22,7 +22,7 @@ public class CopyRuntimeGuardPolicy {
         }
 
         if (metricGuard == null) {
-            return Decision.allow("RUNTIME_GUARD_NOT_AVAILABLE", "runtime_allocation");
+            return Decision.block("RUNTIME_GUARD_NOT_AVAILABLE", "runtime_allocation");
         }
         if (isRealRisk(metricGuard, executionMode)) {
             return Decision.fromGuard(false, reasonCode(metricGuard, "RUNTIME_GUARD_BLOCKED"), metricGuard);

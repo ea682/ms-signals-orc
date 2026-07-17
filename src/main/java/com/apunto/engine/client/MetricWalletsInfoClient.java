@@ -3,6 +3,7 @@ package com.apunto.engine.client;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.dto.client.CopyGuardWindowSnapshotDto;
 import com.apunto.engine.dto.client.CopyDecisionDto;
+import com.apunto.engine.dto.client.MetricStrategySnapshotDto;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.service.annotation.GetExchange;
 import org.springframework.web.service.annotation.HttpExchange;
@@ -22,6 +23,13 @@ public interface MetricWalletsInfoClient {
             @RequestParam("simulation") String simulation
     );
 
+    @GetExchange("/operaciones/metrica/joyas")
+    List<MetricStrategySnapshotDto> metricStrategySnapshots(
+            @RequestParam("limitWallet") int limit,
+            @RequestParam("dayz") int dayz,
+            @RequestParam("simulation") String simulation
+    );
+
     @GetExchange("/operaciones/metrica/copy-guard/windows")
     List<CopyGuardWindowSnapshotDto> copyGuardWindows(
             @RequestParam("limit") int limit,
@@ -30,8 +38,31 @@ public interface MetricWalletsInfoClient {
             @RequestParam("windows") String windows
     );
 
+    @GetExchange("/operaciones/metrica/copy-guard/windows")
+    List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindows(
+            @RequestParam("limitWallet") int limit,
+            @RequestParam("dayz") int dayz,
+            @RequestParam("mode") String mode,
+            @RequestParam("windows") String windows
+    );
+
     @GetExchange("/operaciones/metrica/copy-decision")
     CopyDecisionDto copyDecision(
+            @RequestParam("walletId") String walletId,
+            @RequestParam("strategyCode") String strategyCode,
+            @RequestParam("scopeType") String scopeType,
+            @RequestParam("scopeValue") String scopeValue,
+            @RequestParam("mode") String mode,
+            @RequestParam("simulation") String simulation,
+            @RequestParam("minHistoryDays") int minHistoryDays,
+            @RequestParam("simulationLookbackDays") int simulationLookbackDays,
+            @RequestParam("maxFactsPerUnit") int maxFactsPerUnit,
+            @RequestParam("timeoutMs") int timeoutMs,
+            @RequestParam("debug") boolean debug
+    );
+
+    @GetExchange("/operaciones/metrica/copy-decision")
+    MetricStrategySnapshotDto metricStrategyDecision(
             @RequestParam("walletId") String walletId,
             @RequestParam("strategyCode") String strategyCode,
             @RequestParam("scopeType") String scopeType,

@@ -6,6 +6,7 @@ import com.apunto.engine.dto.client.BinanceFuturesOrderClientResponse;
 import com.apunto.engine.entity.CopyDispatchIntentEntity;
 import com.apunto.engine.service.CopyOperationEventService;
 import com.apunto.engine.service.CopyOperationService;
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -139,6 +140,11 @@ public class CopyExecutionPersistenceService {
                 .dispatchIntentId(intent.getId())
                 .userCopyAllocationId(intent.getUserCopyAllocationId())
                 .copyStrategyCode(intent.getStrategyCode())
+                .scopeType(intent.getScopeType())
+                .scopeValue(intent.getScopeValue())
+                .strategyKey(MetricStrategyIdentity.canonicalKey(
+                        intent.getWalletId(), intent.getStrategyCode(), intent.getScopeType(), intent.getScopeValue()))
+                .generationId(intent.getMetricGenerationId())
                 .executionMode(intent.getExecutionMode())
                 .shadow(false)
                 .decision("RECOVERED_" + eventType(copyIntent, persisted.isActive()))
@@ -189,13 +195,19 @@ public class CopyExecutionPersistenceService {
                 .submitToFillLatencyMs(response.getSubmitToFillLatencyMs())
                 .endToEndLatencyMs(response.getEndToEndLatencyMs())
                 .economicDataStatus(response.getEconomicDataStatus())
-                .strategyVersion(response.getStrategyVersion())
-                .sizingPolicyVersion(response.getSizingPolicyVersion())
-                .symbolMappingVersion(response.getSymbolMappingVersion())
-                .feeModelVersion(response.getFeeModelVersion())
-                .fundingModelVersion(response.getFundingModelVersion())
-                .slippageModelVersion(response.getSlippageModelVersion())
-                .liquidityModelVersion(response.getLiquidityModelVersion())
+                .strategyVersion(firstNonBlank(response.getStrategyVersion(), "copy-strategy-v3"))
+                .sizingPolicyVersion(firstNonBlank(response.getSizingPolicyVersion(), "proportional-portfolio-v3"))
+                .symbolMappingVersion(firstNonBlank(response.getSymbolMappingVersion(), "binance-symbol-map-v3"))
+                .feeModelVersion(firstNonBlank(response.getFeeModelVersion(), "binance-fee-v3"))
+                .fundingModelVersion(firstNonBlank(response.getFundingModelVersion(), "binance-funding-v3"))
+                .slippageModelVersion(firstNonBlank(response.getSlippageModelVersion(), "binance-slippage-v3"))
+                .liquidityModelVersion(firstNonBlank(response.getLiquidityModelVersion(), "order-book-liquidity-v3"))
+                .calibrationCapitalUsd(calibrationCapital(intent.getExecutionMode()))
+                .targetLeverage(intent.getRequestedLeverage() == null
+                        ? null : BigDecimal.valueOf(intent.getRequestedLeverage()))
+                .calibrationTargetNotionalUsd(intent.getRequestedNotionalUsd())
+                .copyAction(intent.getCopyIntent())
+                .notionalBand(intent.getNotionalBand())
                 .traceId("reconcile-" + intent.getId())
                 .source("copy_order_reconciliation")
                 .reasonCode(recoveryReasonCode)
@@ -334,6 +346,12 @@ public class CopyExecutionPersistenceService {
             return current != null && current.isActive() ? "INCREASE" : "OPEN";
         }
         return normalized;
+    }
+
+    private BigDecimal calibrationCapital(String executionMode) {
+        return "MICRO_LIVE".equalsIgnoreCase(executionMode)
+                || "EXECUTABLE_SHADOW".equalsIgnoreCase(executionMode)
+                ? new BigDecimal("100") : null;
     }
     private void validateLinkedOperation(CopyDispatchIntentEntity intent, CopyOperationDto linked) {
         if (linked == null) return;

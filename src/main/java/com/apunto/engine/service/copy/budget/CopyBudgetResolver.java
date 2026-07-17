@@ -14,8 +14,10 @@ import java.util.UUID;
 public class CopyBudgetResolver {
 
     public static final String MICRO_LIVE_PROPORTIONAL_PORTFOLIO = "MICRO_LIVE_PROPORTIONAL_PORTFOLIO_V3";
+    public static final String EXECUTABLE_SHADOW_PROPORTIONAL_PORTFOLIO = "EXECUTABLE_SHADOW_PROPORTIONAL_PORTFOLIO_V3";
     public static final String LIVE_PROPORTIONAL_PORTFOLIO = "LIVE_PROPORTIONAL_PORTFOLIO_V3";
     public static final String MICRO_LIVE_PROPORTIONAL_TARGET = "MICRO_LIVE_PROPORTIONAL_TARGET";
+    public static final String EXECUTABLE_SHADOW_PROPORTIONAL_TARGET = "EXECUTABLE_SHADOW_PROPORTIONAL_TARGET";
     public static final String LIVE_PROPORTIONAL_TARGET = "LIVE_PROPORTIONAL_TARGET";
     public static final String MICRO_LIVE_TOTAL_MARGIN_EXCEEDED = "MICRO_LIVE_TOTAL_MARGIN_EXCEEDED";
     public static final String MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE = "MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE";
@@ -47,9 +49,11 @@ public class CopyBudgetResolver {
         BigDecimal allocationPct = percentage(safe.allocationPct());
         String capitalAsset = FuturesCapitalAsset.fromNullable(safe.capitalAsset()).name();
 
-        CopyBudgetDecision decision = "MICRO_LIVE".equals(executionMode)
-                ? resolveMicroLive(safe, accountCapital, allocationPct, capitalAsset)
-                : resolveLive(safe, executionMode, accountCapital, allocationPct, capitalAsset);
+        CopyBudgetDecision decision = switch (executionMode) {
+            case "MICRO_LIVE" -> resolveMicroLive(safe, accountCapital, allocationPct, capitalAsset);
+            case "SHADOW" -> resolveExecutableShadow(safe, accountCapital, allocationPct, capitalAsset);
+            default -> resolveLive(safe, executionMode, accountCapital, allocationPct, capitalAsset);
+        };
         logResolved(safe, decision);
         return decision;
     }
@@ -89,6 +93,25 @@ public class CopyBudgetResolver {
         return proportionalDecision("MICRO_LIVE", MICRO_LIVE_PROPORTIONAL_PORTFOLIO,
                 MICRO_LIVE_TOTAL, accountCapital, allocationPct, false, capitalAsset,
                 MICRO_LIVE_LEVERAGE, request, openMargin, remainingMargin, MICRO_LIVE_PROPORTIONAL_TARGET);
+    }
+
+    private static CopyBudgetDecision resolveExecutableShadow(CopyBudgetRequest request,
+                                                               BigDecimal accountCapital,
+                                                               BigDecimal allocationPct,
+                                                               String capitalAsset) {
+        BigDecimal openMargin = nonNegative(request.openMarginUsedUsd());
+        BigDecimal remainingMargin = MICRO_LIVE_TOTAL.subtract(openMargin)
+                .max(BigDecimal.ZERO).setScale(SCALE, RoundingMode.DOWN);
+        if (remainingMargin.compareTo(BigDecimal.ZERO) <= 0) {
+            return decision(false, "SHADOW", EXECUTABLE_SHADOW_PROPORTIONAL_PORTFOLIO,
+                    MICRO_LIVE_TOTAL, accountCapital, allocationPct,
+                    MICRO_LIVE_TOTAL_MARGIN_EXCEEDED, false, capitalAsset,
+                    MICRO_LIVE_LEVERAGE, request, openMargin, remainingMargin, ZERO, ZERO, ZERO);
+        }
+        return proportionalDecision("SHADOW", EXECUTABLE_SHADOW_PROPORTIONAL_PORTFOLIO,
+                MICRO_LIVE_TOTAL, accountCapital, allocationPct, false, capitalAsset,
+                MICRO_LIVE_LEVERAGE, request, openMargin, remainingMargin,
+                EXECUTABLE_SHADOW_PROPORTIONAL_TARGET);
     }
 
     private static CopyBudgetDecision resolveLive(CopyBudgetRequest request,

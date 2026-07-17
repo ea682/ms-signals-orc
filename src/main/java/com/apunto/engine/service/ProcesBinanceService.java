@@ -27,9 +27,7 @@ public interface ProcesBinanceService {
 
     Optional<BinanceFuturesOrderClientResponse> findOrderByClientOrderId(OperationDto dto);
 
-    default List<BinanceFuturesPositionClientDto> getPositions(String apiKey, String secret, String traceId) {
-        throw new UnsupportedOperationException("authoritative Binance positions are not implemented");
-    }
+    List<BinanceFuturesPositionClientDto> getPositions(String apiKey, String secret, String traceId);
 
     /**
      * Obtiene el catálogo de símbolos de Binance Futures.

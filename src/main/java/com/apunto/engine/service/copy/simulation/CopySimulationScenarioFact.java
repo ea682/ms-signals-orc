@@ -1,6 +1,7 @@
 package com.apunto.engine.service.copy.simulation;
 
 import com.apunto.copytarget.CapitalLeverageScenario;
+import com.apunto.copytarget.ScenarioEconomicEvidence;
 import com.apunto.copytarget.TargetPortfolioResult;
 
 import java.math.BigDecimal;
@@ -27,6 +28,7 @@ public record CopySimulationScenarioFact(
         BigDecimal profitFactor,
         BigDecimal liquidationRisk,
         String modeledEconomicsStatus,
+        ScenarioEconomicEvidence economicEvidence,
         TargetPortfolioResult targetPortfolio
 ) {
     public static CopySimulationScenarioFact from(int index, CapitalLeverageScenario scenario) {
@@ -52,6 +54,7 @@ public record CopySimulationScenarioFact(
                 scenario.profitFactor(),
                 scenario.liquidationRisk(),
                 scenario.modeledEconomicsStatus(),
+                scenario.economicEvidence(),
                 scenario.targetPortfolio()
         );
     }

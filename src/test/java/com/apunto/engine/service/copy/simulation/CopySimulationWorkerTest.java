@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class CopySimulationWorkerTest {
 
     @Test
-    void persistsExactlyFortyScenariosAndCompletes() {
+    void persistsExactlyFortyFourScenariosAndCompletes() {
         RecordingStore store = new RecordingStore(false);
         CopySimulationJob job = job(0);
         CopySimulationWorker worker = new CopySimulationWorker(store, 0L);
@@ -20,7 +20,7 @@ class CopySimulationWorkerTest {
         CopySimulationWorkerOutcome outcome = worker.process(job);
 
         assertEquals(CopySimulationWorkerOutcome.COMPLETED, outcome);
-        assertEquals(40, store.scenarios.size());
+        assertEquals(44, store.scenarios.size());
         assertEquals(List.of("completed"), store.terminalEvents);
     }
 
@@ -32,7 +32,7 @@ class CopySimulationWorkerTest {
 
         worker.process(job);
 
-        assertEquals(23, store.scenarios.size());
+        assertEquals(27, store.scenarios.size());
         assertEquals(17, store.scenarios.getFirst().scenarioIndex());
         assertEquals(List.of("completed"), store.terminalEvents);
     }
@@ -72,6 +72,8 @@ class CopySimulationWorkerTest {
         @Override public boolean enqueue(CopySimulationContext context, CopySimulationInputSnapshot snapshot) { return true; }
         @Override public List<CopySimulationJob> claimBatch(String workerId, int limit) { return List.of(); }
         @Override public boolean isPauseRequested(UUID jobId) { return paused; }
+        @Override public boolean requestPause(UUID jobId) { return false; }
+        @Override public boolean resume(UUID jobId) { return false; }
         @Override public void saveScenario(UUID jobId, CopySimulationScenarioFact scenario) { scenarios.add(scenario); }
         @Override public void markCompleted(UUID jobId) { terminalEvents.add("completed"); }
         @Override public void markPaused(UUID jobId) { terminalEvents.add("paused"); }

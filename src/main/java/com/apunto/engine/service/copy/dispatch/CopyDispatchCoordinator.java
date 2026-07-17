@@ -8,10 +8,12 @@ import com.apunto.engine.shared.exception.BinanceApiReadinessException;
 import com.apunto.engine.shared.exception.CopyDispatchReconciliationPendingException;
 import com.apunto.engine.shared.exception.CopyOrderRejectedException;
 import com.apunto.engine.shared.exception.SkipExecutionException;
+import com.apunto.engine.service.copy.calibration.CopyNotionalBandPolicy;
 import com.apunto.engine.shared.util.LogFmt;
 import lombok.extern.slf4j.Slf4j;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -33,17 +35,30 @@ public class CopyDispatchCoordinator {
     private final BinanceOrderExecutionNormalizer normalizer;
     private final CopyIdempotencyKeyFactory keyFactory;
     private final MeterRegistry meterRegistry;
+    private final CopyNotionalBandPolicy notionalBandPolicy;
 
     public CopyDispatchCoordinator(CopyDispatchIntentStore intentStore,
                                    ProcesBinanceService binanceGateway,
                                    BinanceOrderExecutionNormalizer normalizer,
                                    CopyIdempotencyKeyFactory keyFactory,
                                    MeterRegistry meterRegistry) {
+        this(intentStore, binanceGateway, normalizer, keyFactory, meterRegistry,
+                new CopyNotionalBandPolicy(new BigDecimal("100"), new BigDecimal("1000"), new BigDecimal("10000")));
+    }
+
+    @Autowired
+    public CopyDispatchCoordinator(CopyDispatchIntentStore intentStore,
+                                   ProcesBinanceService binanceGateway,
+                                   BinanceOrderExecutionNormalizer normalizer,
+                                   CopyIdempotencyKeyFactory keyFactory,
+                                   MeterRegistry meterRegistry,
+                                   CopyNotionalBandPolicy notionalBandPolicy) {
         this.intentStore = intentStore;
         this.binanceGateway = binanceGateway;
         this.normalizer = normalizer;
         this.keyFactory = keyFactory;
         this.meterRegistry = meterRegistry;
+        this.notionalBandPolicy = notionalBandPolicy;
     }
 
     public BinanceFuturesOrderClientResponse dispatch(OperationDto operation,
@@ -318,6 +333,13 @@ public class CopyDispatchCoordinator {
                     LogFmt.kv("allocationId", allocation.getId(), "symbol", operation.getSymbol(),
                             "quantity", safe(operation.getQuantity())));
         }
+        String generationId = firstNonBlank(allocation.getMetricGenerationId());
+        if (!operation.isReduceOnly() && generationId == null) {
+            throw new SkipExecutionException("COPY_METRIC_GENERATION_REQUIRED",
+                    "OPEN/INCREASE real requiere generationId V2 capturada en la allocation",
+                    LogFmt.kv("allocationId", allocation.getId(), "strategyKey", allocation.getStrategyKey(),
+                            "copyIntent", copyIntent, "exitsAllowed", true));
+        }
         CopyDispatchIdentity identity = new CopyDispatchIdentity(
                 operation.getUserId(),
                 allocation.getId(),
@@ -325,6 +347,7 @@ public class CopyDispatchCoordinator {
                 allocation.getCopyStrategyCode(),
                 allocation.getScopeType(),
                 allocation.getScopeValue(),
+                generationId,
                 sourceEventId,
                 copyIntent);
         String idempotencyKey = keyFactory.create(identity);
@@ -357,7 +380,7 @@ public class CopyDispatchCoordinator {
                 symbol, name(operation.getSide()), name(operation.getPositionSide()),
                  operation.isReduceOnly(), qty, requestedMargin, notional, ref,
                  operation.getLeverage(), allocation.getUserMaxConcurrentPositions(), reservePosition,
-                 operation.getSourceEventType(), requestHash, traceId);
+                 operation.getSourceEventType(), requestHash, traceId, notionalBandPolicy.band(notional));
     }
 
     private BigDecimal resolveMargin(OperationDto operation, BigDecimal notional) {

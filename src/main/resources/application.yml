@@ -348,6 +348,14 @@ copy:
       network-latency-millis: ${COPY_LIQUIDITY_NETWORK_LATENCY_MILLIS:100}
       taker-fee-bps: ${COPY_LIQUIDITY_TAKER_FEE_BPS:4}
       funding-bps-per-eight-hours: ${COPY_LIQUIDITY_FUNDING_BPS_PER_EIGHT_HOURS:1}
+  calibration:
+    medium-sample-size: ${COPY_CALIBRATION_MEDIUM_SAMPLE_SIZE:10}
+    high-sample-size: ${COPY_CALIBRATION_HIGH_SAMPLE_SIZE:30}
+    maximum-age: ${COPY_CALIBRATION_MAXIMUM_AGE:P14D}
+    notional-band:
+      small-max-usd: ${COPY_CALIBRATION_NOTIONAL_SMALL_MAX_USD:100}
+      medium-max-usd: ${COPY_CALIBRATION_NOTIONAL_MEDIUM_MAX_USD:1000}
+      large-max-usd: ${COPY_CALIBRATION_NOTIONAL_LARGE_MAX_USD:10000}
 
 operation:
   movement-ledger:
@@ -393,6 +401,7 @@ engine:
       enabled: ${METRIC_WALLET_DISTRIBUTION_WORKER_ENABLED:false}
 
 metric-wallet:
+  read-mode: ${METRIC_WALLET_READ_MODE:COMPARE}
   history:
     source: ${METRIC_WALLET_HISTORY_SOURCE:joyas}
     limit: ${METRIC_WALLET_HISTORY_LIMIT:300}
@@ -407,6 +416,16 @@ metric-wallet:
     limit: ${METRIC_WALLET_JOYAS_LIMIT:3}
     dayz: ${METRIC_WALLET_JOYAS_DAYZ:30}
     simulation: ${METRIC_WALLET_JOYAS_SIMULATION:summary}
+  v2:
+    summary-limit: ${METRIC_WALLET_V2_SUMMARY_LIMIT:${METRIC_WALLET_HISTORY_LIMIT:300}}
+    full-limit: ${METRIC_WALLET_V2_FULL_LIMIT:${METRIC_WALLET_SHADOW_MAX_STRATEGIES:80}}
+    summary-refresh-after: ${METRIC_WALLET_V2_SUMMARY_REFRESH_AFTER:PT2M}
+    full-refresh-after: ${METRIC_WALLET_V2_FULL_REFRESH_AFTER:PT10M}
+    copy-guard-refresh-after: ${METRIC_WALLET_V2_COPY_GUARD_REFRESH_AFTER:PT2M}
+    max-staleness: ${METRIC_WALLET_V2_MAX_STALENESS:PT10M}
+    fail-open-new-exposure: ${METRIC_WALLET_V2_FAIL_OPEN_NEW_EXPOSURE:false}
+    allow-close-on-failure: ${METRIC_WALLET_V2_ALLOW_CLOSE_ON_FAILURE:true}
+    shadow-auto-enroll-enabled: ${METRIC_WALLET_V2_SHADOW_AUTO_ENROLL_ENABLED:false}
   copy-guard:
     enabled: ${METRIC_WALLET_COPY_GUARD_ENABLED:true}
     windows: ${METRIC_WALLET_COPY_GUARD_WINDOWS:1w,2w,3w,1mo,2mo,3mo}

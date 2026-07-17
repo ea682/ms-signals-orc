@@ -14,6 +14,6 @@ public interface CopySimulationJobStore {
     void markFailed(UUID jobId, String error, OffsetDateTime retryAt);
     int requeueStale(OffsetDateTime threshold);
 
-    default boolean requestPause(UUID jobId) { throw new UnsupportedOperationException(); }
-    default boolean resume(UUID jobId) { throw new UnsupportedOperationException(); }
+    boolean requestPause(UUID jobId);
+    boolean resume(UUID jobId);
 }

@@ -59,8 +59,8 @@ class CopyStrategyRuntimeRouterTest {
         String btc = router.allocationKey("0xABC", "SYMBOL_SPECIALIST", "SYMBOL", "BTCUSDT");
         String eth = router.allocationKey("0xABC", "SYMBOL_SPECIALIST", "SYMBOL", "ETHUSDT");
 
-        assertTrue(btc.contains("0xabc|SYMBOL_SPECIALIST|symbol|BTCUSDT"));
-        assertTrue(eth.contains("0xabc|SYMBOL_SPECIALIST|symbol|ETHUSDT"));
+        assertTrue(btc.contains("0xabc|SYMBOL_SPECIALIST|SYMBOL|BTCUSDT"));
+        assertTrue(eth.contains("0xabc|SYMBOL_SPECIALIST|SYMBOL|ETHUSDT"));
         assertFalse(btc.equals(eth));
     }
 

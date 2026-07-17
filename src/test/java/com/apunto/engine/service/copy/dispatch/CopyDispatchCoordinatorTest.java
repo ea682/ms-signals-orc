@@ -400,6 +400,47 @@ class CopyDispatchCoordinatorTest {
     }
 
     @Test
+    void openWithoutMetricGenerationFailsClosedBeforeClaim() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+        UserCopyAllocationEntity allocation = allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE");
+        allocation.setMetricGenerationId(null);
+
+        SkipExecutionException rejected = assertThrows(SkipExecutionException.class,
+                () -> coordinator.dispatch(open("evt-no-generation"), allocation,
+                        new BigDecimal("100"), "trace"));
+
+        assertEquals("COPY_METRIC_GENERATION_REQUIRED", rejected.getReasonCode());
+        assertEquals(0, store.size());
+        assertEquals(0, gateway.calls.get());
+    }
+
+    @Test
+    void exitsWithoutMetricGenerationRemainAllowed() {
+        for (String copyIntent : List.of("REDUCE", "CLOSE")) {
+            FakeStore store = new FakeStore();
+            FakeGateway gateway = new FakeGateway(filled("100"));
+            CopyDispatchCoordinator coordinator = coordinator(store, gateway);
+            UserCopyAllocationEntity allocation = allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE");
+            allocation.setMetricGenerationId(null);
+            OperationDto exit = open("evt-no-generation-" + copyIntent.toLowerCase());
+            exit.setCopyIntent(copyIntent);
+            exit.setReduceOnly(true);
+            exit.setConfigureAccountSettings(false);
+            exit.setReservePosition(false);
+            exit.setRequestedMarginUsd(BigDecimal.ZERO);
+
+            BinanceFuturesOrderClientResponse response = coordinator.dispatch(
+                    exit, allocation, new BigDecimal("100"), "trace");
+
+            assertEquals("FILLED", response.getStatus());
+            assertEquals(1, store.size());
+            assertEquals(1, gateway.calls.get());
+        }
+    }
+
+    @Test
     void nonPositiveOrMalformedQuantityRejectsBeforeClaimAndGateway() {
         for (String quantity : List.of("0", "-1", "not-a-number")) {
             FakeStore store = new FakeStore();
@@ -572,6 +613,8 @@ class CopyDispatchCoordinatorTest {
                 .copyStrategyCode(strategy)
                 .scopeType("DIRECTION")
                 .scopeValue("LONG")
+                .strategyKey("0xabc|" + strategy + "|DIRECTION|LONG")
+                .metricGenerationId("e3293fec-6f42-48cf-ae57-99a31d173f01")
                 .executionMode(mode)
                 .status(UserCopyAllocationEntity.Status.ACTIVE)
                 .isActive(true)
@@ -624,6 +667,8 @@ class CopyDispatchCoordinatorTest {
         }
 
         @Override public Optional<BinanceFuturesOrderClientResponse> findOrderByClientOrderId(OperationDto dto) { return Optional.ofNullable(response); }
+        @Override public List<com.apunto.engine.dto.client.BinanceFuturesPositionClientDto> getPositions(
+                String apiKey, String secret, String traceId) { return List.of(); }
         @Override public List<BinanceFuturesSymbolInfoClientDto> getSymbols(String apiKey) { return List.of(); }
         @Override public Optional<BinanceFuturesMarketPriceClientDto> getMarketPrice(String symbol, String usage, boolean allowStale) { return Optional.empty(); }
     }

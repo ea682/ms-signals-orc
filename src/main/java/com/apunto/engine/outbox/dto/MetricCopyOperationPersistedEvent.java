@@ -11,6 +11,7 @@ public record MetricCopyOperationPersistedEvent(
         UUID idEvent,
         UUID idOperation,
         String idOrderOrigin,
+        String sourceEventId,
         String idUser,
         String wallet,
         String symbol,
@@ -38,6 +39,10 @@ public record MetricCopyOperationPersistedEvent(
         UUID dispatchIntentId,
         Long userCopyAllocationId,
         String copyStrategyCode,
+        String scopeType,
+        String scopeValue,
+        String strategyKey,
+        String generationId,
         String executionMode,
         String decision,
         String decisionReason,
@@ -74,6 +79,11 @@ public record MetricCopyOperationPersistedEvent(
         String feeModelVersion,
         String fundingModelVersion,
         String slippageModelVersion,
-        String liquidityModelVersion
+        String liquidityModelVersion,
+        BigDecimal calibrationCapitalUsd,
+        BigDecimal targetLeverage,
+        BigDecimal calibrationTargetNotionalUsd,
+        String copyAction,
+        String notionalBand
 ) {
 }

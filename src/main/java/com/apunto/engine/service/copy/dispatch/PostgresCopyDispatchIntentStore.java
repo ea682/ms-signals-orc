@@ -89,12 +89,13 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         int inserted = repository.insertIfAbsent(
                 candidateId, request.idempotencyKey(), identity.userId(), identity.userCopyAllocationId(),
                 realMode(identity.executionMode()), trim(normalizedWalletId(request.walletId()), 180), trim(identity.strategyCode(), 64),
-                trim(identity.scopeType(), 32), trim(identity.scopeValue(), 180), trim(identity.sourceEventId(), 600),
+                trim(identity.scopeType(), 32), trim(identity.scopeValue(), 180), trim(identity.generationId(), 80),
+                trim(identity.sourceEventId(), 600),
                 trim(request.operation().getOriginId(), 120), trim(request.sourceEventType(), 40),
                 trim(identity.copyIntent(), 40), trim(request.symbol(), 40), trim(request.side(), 12),
                 trim(request.positionSide(), 12), request.reduceOnly(), request.requestedQty(),
                 nonNegative(request.requestedMarginUsd()), nonNegative(request.requestedNotionalUsd()),
-                request.referencePrice(), request.requestedLeverage(), request.userMaxConcurrentPositions(),
+                trim(request.notionalBand(), 32), request.referencePrice(), request.requestedLeverage(), request.userMaxConcurrentPositions(),
                 request.reservePosition() ? 1 : 0,
                 trim(request.operation().getClientOrderId(), 36), request.requestHash(), now);
 
@@ -150,6 +151,7 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
                 meterRegistry.counter("copy_reservation_rejected", "execution_mode", "micro_live",
                         "result", "rejected").increment();
                 meterRegistry.counter("copy_budget_reject_total", "reason", safeTag(decision.reasonCode())).increment();
+                meterRegistry.counter("signals.portfolio.capacity_limit.total").increment();
                 meterRegistry.counter("copy_dispatch_total", "mode", "micro_live", "result", "rejected",
                         "reason", safeTag(decision.reasonCode())).increment();
                 recordClaim(started, intent.getExecutionMode(), "reservation_rejected");

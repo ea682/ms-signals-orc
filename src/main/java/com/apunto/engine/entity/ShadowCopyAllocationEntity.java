@@ -1,5 +1,6 @@
 package com.apunto.engine.entity;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -55,14 +56,17 @@ public class ShadowCopyAllocationEntity {
 
     @Builder.Default
     @Column(name = "scope_type", nullable = false, length = 32)
-    private String scopeType = "strategy";
+    private String scopeType = "ALL";
 
     @Builder.Default
     @Column(name = "scope_value", nullable = false, length = 160)
-    private String scopeValue = "default";
+    private String scopeValue = "ALL";
 
     @Column(name = "strategy_key", nullable = false, length = 420)
     private String strategyKey;
+
+    @Column(name = "metric_generation_id", length = 80)
+    private String metricGenerationId;
 
     @Column(name = "wallet_profile_id")
     private Long walletProfileId;
@@ -170,8 +174,8 @@ public class ShadowCopyAllocationEntity {
     private void normalize() {
         walletId = normalizeLower(walletId);
         copyStrategyCode = normalizeStrategy(copyStrategyCode);
-        scopeType = normalizeScopeType(scopeType);
-        scopeValue = normalizeScopeValue(scopeValue);
+        scopeType = normalizeScopeType(scopeType, copyStrategyCode);
+        scopeValue = normalizeScopeValue(scopeValue, copyStrategyCode);
         strategyKey = normalizeStrategyKey(strategyKey, walletId, copyStrategyCode, scopeType, scopeValue);
         status = normalizeStatus(status);
         copyGuardStatus = normalizeNullable(copyGuardStatus);
@@ -197,14 +201,12 @@ public class ShadowCopyAllocationEntity {
         return value == null ? "MOVEMENT_ALL" : value.toUpperCase(Locale.ROOT).replace('-', '_');
     }
 
-    private static String normalizeScopeType(String raw) {
-        String value = normalize(raw);
-        return value == null ? "strategy" : value.toLowerCase(Locale.ROOT);
+    private static String normalizeScopeType(String raw, String strategy) {
+        return MetricStrategyIdentity.scopeType(raw, strategy);
     }
 
-    private static String normalizeScopeValue(String raw) {
-        String value = normalize(raw);
-        return value == null ? "default" : value;
+    private static String normalizeScopeValue(String raw, String strategy) {
+        return MetricStrategyIdentity.scopeValue(raw, strategy);
     }
 
     private static String normalizeStatus(String raw) {
@@ -218,12 +220,7 @@ public class ShadowCopyAllocationEntity {
     }
 
     private static String normalizeStrategyKey(String current, String wallet, String strategy, String scopeType, String scopeValue) {
-        String value = normalize(current);
-        if (value != null) return value;
-        return (wallet == null ? "" : wallet)
-                + "|" + normalizeStrategy(strategy)
-                + "|" + normalizeScopeType(scopeType)
-                + "|" + normalizeScopeValue(scopeValue);
+        return MetricStrategyIdentity.canonicalKey(wallet, strategy, scopeType, scopeValue);
     }
 
     private static String normalize(String raw) {

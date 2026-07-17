@@ -29,4 +29,21 @@ class CopySimulationMigrationContractTest {
         assertFalse(sql.contains("copy_dispatch_intent_id"));
         assertFalse(sql.contains("binance_order_id"));
     }
+
+    @Test
+    void additiveMigrationExpandsMatrixAndPreservesUnknownEvidence() throws Exception {
+        String sql = Files.readString(Path.of(
+                "src/main/resources/db/migration/V202607140001__institutional_financial_simulation_v3.sql"));
+
+        assertTrue(sql.contains("resume_cursor BETWEEN 0 AND 44"));
+        assertTrue(sql.contains("scenario_index BETWEEN 0 AND 43"));
+        assertTrue(sql.contains("strategy_key"));
+        assertTrue(sql.contains("generation_id"));
+        assertTrue(sql.contains("economic_evidence"));
+        assertTrue(sql.contains("UNKNOWN_HISTORICAL_EXECUTION_EVIDENCE"));
+        assertTrue(sql.contains("modeled_economics_status TYPE VARCHAR(64)"));
+        assertTrue(sql.contains("execution_mode IN ('SHADOW', 'MICRO_LIVE', 'LIVE')"));
+        assertFalse(sql.contains("DELETE FROM"));
+        assertFalse(sql.contains("TRUNCATE"));
+    }
 }

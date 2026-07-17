@@ -1,5 +1,6 @@
 package com.apunto.engine.service.copy.simulation;
 
+import com.apunto.copytarget.CapitalLeverageMatrixSimulator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -28,12 +29,13 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
     private static final String INSERT_JOB_SQL = """
             INSERT INTO copy_simulation_job_v3 (
                 id, idempotency_key, input_hash, source_event_id, source_snapshot_version,
-                allocation_id, user_id, wallet_id, strategy_code, strategy_version,
+                allocation_id, user_id, wallet_id, strategy_key, generation_id,
+                generation_status, generation_reason_codes, strategy_code, strategy_version,
                 scope_type, scope_value, sizing_policy_version, symbol_mapping_version,
                 execution_mode, input_snapshot, status, resume_cursor, pause_requested,
                 attempt, next_run_at, created_at, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb),
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'KNOWN', '[]'::jsonb, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb),
                 'PENDING', 0, FALSE, 0, now(), now(), now()
             )
             ON CONFLICT (idempotency_key) DO NOTHING
@@ -66,11 +68,11 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
                 exposure_coverage, rounding_loss_usd, min_notional_skips,
                 fees_usd, funding_usd, slippage_usd, gross_pnl_usd, net_pnl_usd,
                 drawdown_pct, profit_factor, liquidation_risk,
-                modeled_economics_status, target_portfolio, simulation_only,
+                modeled_economics_status, economic_evidence, target_portfolio, simulation_only,
                 created_at, updated_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                CAST(? AS jsonb), TRUE, now(), now()
+                CAST(? AS jsonb), CAST(? AS jsonb), TRUE, now(), now()
             )
             ON CONFLICT (job_id, scenario_index) DO UPDATE SET
                 capital_usd = EXCLUDED.capital_usd,
@@ -93,6 +95,7 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
                 profit_factor = EXCLUDED.profit_factor,
                 liquidation_risk = EXCLUDED.liquidation_risk,
                 modeled_economics_status = EXCLUDED.modeled_economics_status,
+                economic_evidence = EXCLUDED.economic_evidence,
                 target_portfolio = EXCLUDED.target_portfolio,
                 simulation_only = TRUE,
                 updated_at = now()
@@ -123,6 +126,8 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
                 context.allocationId(),
                 context.userId(),
                 context.walletId(),
+                context.strategyKey(),
+                context.generationId(),
                 context.strategyCode(),
                 context.strategyVersion(),
                 context.scopeType(),
@@ -199,6 +204,7 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
                 scenario.profitFactor(),
                 scenario.liquidationRisk(),
                 scenario.modeledEconomicsStatus(),
+                writeJson(scenario.economicEvidence()),
                 writeJson(scenario.targetPortfolio())
         );
         jdbcTemplate.update("""
@@ -213,10 +219,10 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
     public void markCompleted(UUID jobId) {
         jdbcTemplate.update("""
                 UPDATE copy_simulation_job_v3
-                SET status = 'COMPLETED', resume_cursor = 40, locked_at = NULL,
+                SET status = 'COMPLETED', resume_cursor = ?, locked_at = NULL,
                     locked_by = NULL, completed_at = now(), updated_at = now()
                 WHERE id = ? AND status = 'RUNNING'
-                """, jobId);
+                """, CapitalLeverageMatrixSimulator.SCENARIO_COUNT, jobId);
     }
 
     @Override
@@ -267,8 +273,8 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
                 UPDATE copy_simulation_job_v3
                 SET pause_requested = FALSE, status = 'PENDING', next_run_at = now(),
                     locked_at = NULL, locked_by = NULL, last_error = NULL, updated_at = now()
-                WHERE id = ? AND status IN ('PAUSED', 'FAILED') AND resume_cursor < 40
-                """, jobId) == 1;
+                WHERE id = ? AND status IN ('PAUSED', 'FAILED') AND resume_cursor < ?
+                """, jobId, CapitalLeverageMatrixSimulator.SCENARIO_COUNT) == 1;
     }
 
     private CopySimulationJob mapJob(ResultSet resultSet, int rowNumber) throws SQLException {
@@ -333,6 +339,8 @@ public class PostgresCopySimulationJobStore implements CopySimulationJobStore {
                 context.sourceEventId(),
                 String.valueOf(context.allocationId()),
                 context.walletId(),
+                context.strategyKey(),
+                context.generationId(),
                 context.strategyCode(),
                 context.strategyVersion(),
                 context.scopeType(),

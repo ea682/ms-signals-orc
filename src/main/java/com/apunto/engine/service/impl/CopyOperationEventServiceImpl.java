@@ -7,6 +7,7 @@ import com.apunto.engine.repository.CopyOperationEventRepository;
 import com.apunto.engine.repository.CopyEconomicCycleRepository;
 import com.apunto.engine.outbox.service.MetricCopyOperationOutboxService;
 import com.apunto.engine.service.CopyOperationEventService;
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
@@ -185,6 +186,10 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                 .executionIntentId(command.getDispatchIntentId())
                 .userCopyAllocationId(command.getUserCopyAllocationId())
                 .copyStrategyCode(normalizeStrategy(command.getCopyStrategyCode()))
+                .scopeType(MetricStrategyIdentity.scopeType(command.getScopeType(), command.getCopyStrategyCode()))
+                .scopeValue(MetricStrategyIdentity.scopeValue(command.getScopeValue(), command.getCopyStrategyCode()))
+                .strategyKey(strategyKey(command))
+                .metricGenerationId(trim(command.getGenerationId()))
                 .executionMode(normalizeExecutionMode(command.getExecutionMode()))
                 .shadow(Boolean.TRUE.equals(command.getShadow()))
                 .decision(safeDecision(command.getDecision()))
@@ -245,6 +250,12 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
                 .fundingModelVersion(command.getFundingModelVersion())
                 .slippageModelVersion(command.getSlippageModelVersion())
                 .liquidityModelVersion(command.getLiquidityModelVersion())
+                .calibrationCapitalUsd(command.getCalibrationCapitalUsd())
+                .targetLeverage(command.getTargetLeverage())
+                .calibrationTargetNotionalUsd(command.getCalibrationTargetNotionalUsd())
+                .copyAction(normalizeToken(command.getCopyAction() == null
+                        ? command.getCopyIntent() : command.getCopyAction()))
+                .notionalBand(normalizeToken(command.getNotionalBand()))
                 .traceId(command.getTraceId())
                 .source(command.getSource())
                 .reasonCode(command.getReasonCode())
@@ -372,6 +383,18 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
     private boolean copyEconomicVersions(CopyOperationEventEntity entity,
                                          CopyOperationEventRecordCommand command) {
         boolean changed = false;
+        if (StringUtils.hasText(command.getScopeType())) {
+            changed |= setValue(command.getScopeType(), entity.getScopeType(), entity::setScopeType);
+        }
+        if (StringUtils.hasText(command.getScopeValue())) {
+            changed |= setValue(command.getScopeValue(), entity.getScopeValue(), entity::setScopeValue);
+        }
+        if (StringUtils.hasText(command.getStrategyKey())) {
+            changed |= setValue(command.getStrategyKey().trim(), entity.getStrategyKey(), entity::setStrategyKey);
+        }
+        if (StringUtils.hasText(command.getGenerationId())) {
+            changed |= setValue(command.getGenerationId().trim(), entity.getMetricGenerationId(), entity::setMetricGenerationId);
+        }
         changed |= setValue(command.getStrategyVersion(), entity.getStrategyVersion(), entity::setStrategyVersion);
         changed |= setValue(command.getSizingPolicyVersion(), entity.getSizingPolicyVersion(), entity::setSizingPolicyVersion);
         changed |= setValue(command.getSymbolMappingVersion(), entity.getSymbolMappingVersion(), entity::setSymbolMappingVersion);
@@ -379,6 +402,11 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
         changed |= setValue(command.getFundingModelVersion(), entity.getFundingModelVersion(), entity::setFundingModelVersion);
         changed |= setValue(command.getSlippageModelVersion(), entity.getSlippageModelVersion(), entity::setSlippageModelVersion);
         changed |= setValue(command.getLiquidityModelVersion(), entity.getLiquidityModelVersion(), entity::setLiquidityModelVersion);
+        changed |= setNumber(command.getCalibrationCapitalUsd(), entity.getCalibrationCapitalUsd(), entity::setCalibrationCapitalUsd);
+        changed |= setNumber(command.getTargetLeverage(), entity.getTargetLeverage(), entity::setTargetLeverage);
+        changed |= setNumber(command.getCalibrationTargetNotionalUsd(), entity.getCalibrationTargetNotionalUsd(), entity::setCalibrationTargetNotionalUsd);
+        changed |= setValue(normalizeToken(command.getCopyAction()), entity.getCopyAction(), entity::setCopyAction);
+        changed |= setValue(normalizeToken(command.getNotionalBand()), entity.getNotionalBand(), entity::setNotionalBand);
         return changed;
     }
 
@@ -427,6 +455,24 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
     private String normalizeStrategy(String strategy) {
         if (strategy == null || strategy.isBlank()) return null;
         return strategy.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+    }
+
+    private String strategyKey(CopyOperationEventRecordCommand command) {
+        if (StringUtils.hasText(command.getStrategyKey())) return command.getStrategyKey().trim();
+        if (!StringUtils.hasText(command.getIdWalletOrigin())) return null;
+        return MetricStrategyIdentity.canonicalKey(
+                command.getIdWalletOrigin(), command.getCopyStrategyCode(),
+                command.getScopeType(), command.getScopeValue());
+    }
+
+    private String trim(String value) {
+        return StringUtils.hasText(value) ? value.trim() : null;
+    }
+
+    private String normalizeToken(String value) {
+        return StringUtils.hasText(value)
+                ? value.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_')
+                : null;
     }
 
     private String safeDecision(String value) {

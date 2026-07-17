@@ -53,6 +53,18 @@ class CopyIdempotencyKeyFactoryTest {
     }
 
     @Test
+    void metricGenerationsDoNotShareDispatchIntent() {
+        CopyDispatchIdentity firstGeneration = new CopyDispatchIdentity(
+                "user-1", 505L, "MICRO_LIVE", "MOVEMENT_ALL", "ALL", "ALL",
+                "generation-1", "evt-1", "OPEN");
+        CopyDispatchIdentity nextGeneration = new CopyDispatchIdentity(
+                "user-1", 505L, "MICRO_LIVE", "MOVEMENT_ALL", "ALL", "ALL",
+                "generation-2", "evt-1", "OPEN");
+
+        assertNotEquals(factory.create(firstGeneration), factory.create(nextGeneration));
+    }
+
+    @Test
     void sameKeyAlwaysProducesStableBinanceClientOrderId() {
         CopyDispatchIdentity identity = new CopyDispatchIdentity(
                 "user-1", 505L, "MICRO_LIVE", "MOVEMENT_ALL", "ALL", "ALL", "evt-1", "OPEN");

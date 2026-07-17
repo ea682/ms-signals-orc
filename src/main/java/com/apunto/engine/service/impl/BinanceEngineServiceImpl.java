@@ -56,6 +56,7 @@ import com.apunto.engine.service.copy.slippage.CopySlippageAction;
 import com.apunto.engine.service.copy.simulation.CopySimulationContext;
 import com.apunto.engine.service.copy.simulation.CopySimulationSubmissionResult;
 import com.apunto.engine.service.copy.simulation.CopySimulationSubmissionService;
+import com.apunto.engine.service.copy.calibration.CopyNotionalBandPolicy;
 import com.apunto.engine.service.copy.position.BinanceTargetPositionSnapshot;
 import com.apunto.engine.service.copy.position.BinanceTargetPositionSnapshotService;
 import com.apunto.engine.service.copy.position.TargetPositionExitDecision;
@@ -241,6 +242,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     private final CopyDispatchCoordinator copyDispatchCoordinator;
     private final CopySimulationSubmissionService copySimulationSubmissionService;
     private final BinanceTargetPositionSnapshotService targetPositionSnapshotService;
+    private final CopyNotionalBandPolicy copyNotionalBandPolicy;
     private final TargetPortfolioCalculator targetPortfolioCalculator = new TargetPortfolioCalculator();
     private final BinanceOrderExecutionNormalizer orderExecutionNormalizer = new BinanceOrderExecutionNormalizer();
 
@@ -1842,7 +1844,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         }
         final String executionMode = executionModeOf(allocation);
         final double allocationPct = allocationPctForBudget(walletMetric, allocation, executionMode);
-        if (!"MICRO_LIVE".equals(executionMode) && allocationPct <= 0.0) {
+        if (!"MICRO_LIVE".equals(executionMode) && !"SHADOW".equals(executionMode)
+                && allocationPct <= 0.0) {
             return ZERO;
         }
         CopyBudgetDecision decision = resolveCopyBudget(userDetail, walletMetric, allocation, allocationPct, executionMode);
@@ -1906,7 +1909,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
     }
 
     private int resolveUserLeverage(UserDetailDto userDetail, UserCopyAllocationEntity allocation) {
-        if ("MICRO_LIVE".equals(executionModeOf(allocation))) {
+        if ("MICRO_LIVE".equals(executionModeOf(allocation)) || isShadowMode(allocation)) {
             return Math.max(1, microLiveTargetLeverage);
         }
         if (allocation != null && allocation.getLeverageOverride() != null
@@ -3414,6 +3417,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         copyOperationEventService.record(CopyOperationEventRecordCommand.builder()
                 .userCopyAllocationId(allocation.getId())
                 .copyStrategyCode(allocation.getCopyStrategyCode())
+                .scopeType(allocation.getScopeType())
+                .scopeValue(allocation.getScopeValue())
+                .strategyKey(allocation.getStrategyKey())
+                .generationId(allocation.getMetricGenerationId())
                 .executionMode(executionModeOf(allocation))
                 .shadow(isShadowMode(allocation))
                 .decision("REJECT")
@@ -3549,6 +3556,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final String executionMode = executionModeOf(allocation);
         final boolean shadow = isShadowMode(allocation);
+        final BigDecimal calibrationTargetNotional = calibrationTargetNotional(
+                requestedQty, firstPositive(order == null ? null : order.getExpectedPrice(),
+                        slippage.expectedPrice(), executionPrice));
 
         long responseToPersistNs = timing.mark();
         long dbNs = timing.mark();
@@ -3558,6 +3568,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .dispatchIntentId(order == null ? null : order.getDispatchIntentId())
                 .userCopyAllocationId(allocation == null ? null : allocation.getId())
                 .copyStrategyCode(allocation == null ? null : allocation.getCopyStrategyCode())
+                .scopeType(allocation == null ? null : allocation.getScopeType())
+                .scopeValue(allocation == null ? null : allocation.getScopeValue())
+                .strategyKey(allocation == null ? null : allocation.getStrategyKey())
+                .generationId(allocation == null ? null : allocation.getMetricGenerationId())
                 .executionMode(executionMode)
                 .shadow(shadow)
                 .decision("ALLOW_" + eventType)
@@ -3618,10 +3632,15 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .strategyVersion(firstNonBlank(order == null ? null : order.getStrategyVersion(), TARGET_CALCULATION_VERSIONS.strategyVersion()))
                 .sizingPolicyVersion(firstNonBlank(order == null ? null : order.getSizingPolicyVersion(), TARGET_CALCULATION_VERSIONS.sizingPolicyVersion()))
                 .symbolMappingVersion(firstNonBlank(order == null ? null : order.getSymbolMappingVersion(), TARGET_CALCULATION_VERSIONS.symbolMappingVersion()))
-                .feeModelVersion(order == null ? null : order.getFeeModelVersion())
-                .fundingModelVersion(order == null ? null : order.getFundingModelVersion())
-                .slippageModelVersion(order == null ? null : order.getSlippageModelVersion())
-                .liquidityModelVersion(order == null ? null : order.getLiquidityModelVersion())
+                .feeModelVersion(firstNonBlank(order == null ? null : order.getFeeModelVersion(), "binance-fee-v3"))
+                .fundingModelVersion(firstNonBlank(order == null ? null : order.getFundingModelVersion(), "binance-funding-v3"))
+                .slippageModelVersion(firstNonBlank(order == null ? null : order.getSlippageModelVersion(), "binance-slippage-v3"))
+                .liquidityModelVersion(firstNonBlank(order == null ? null : order.getLiquidityModelVersion(), "order-book-liquidity-v3"))
+                .calibrationCapitalUsd(calibrationCapital(executionMode))
+                .targetLeverage(calibrationLeverage(executionMode, allocation))
+                .calibrationTargetNotionalUsd(calibrationTargetNotional)
+                .copyAction(copyIntent)
+                .notionalBand(copyNotionalBandPolicy.band(calibrationTargetNotional))
                 .traceId(firstNonBlank(traceId, MDC.get("traceId")))
                 .source(source)
                 .reasonCode(reasonCode)
@@ -4355,6 +4374,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .economicCycleId(copyOperation.getEconomicCycleId())
                 .userCopyAllocationId(allocation == null ? null : allocation.getId())
                 .copyStrategyCode(allocation == null ? null : allocation.getCopyStrategyCode())
+                .scopeType(allocation == null ? null : allocation.getScopeType())
+                .scopeValue(allocation == null ? null : allocation.getScopeValue())
+                .strategyKey(allocation == null ? null : allocation.getStrategyKey())
+                .generationId(allocation == null ? null : allocation.getMetricGenerationId())
                 .executionMode(executionModeOf(allocation))
                 .shadow(false)
                 .decision("RECONCILED_CLOSE")
@@ -4380,6 +4403,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 .strategyVersion(TARGET_CALCULATION_VERSIONS.strategyVersion())
                 .sizingPolicyVersion(TARGET_CALCULATION_VERSIONS.sizingPolicyVersion())
                 .symbolMappingVersion(TARGET_CALCULATION_VERSIONS.symbolMappingVersion())
+                .calibrationCapitalUsd(calibrationCapital(executionModeOf(allocation)))
+                .targetLeverage(calibrationLeverage(executionModeOf(allocation), allocation))
+                .calibrationTargetNotionalUsd(copyOperation.getSiseUsd())
+                .copyAction("CLOSE")
+                .notionalBand(copyNotionalBandPolicy.band(copyOperation.getSiseUsd()))
                 .traceId(firstNonBlank(traceId, MDC.get("traceId")))
                 .source("binance_position_snapshot")
                 .reasonCode(reasonCode)
@@ -4435,8 +4463,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         final String walletId = walletMetric.getWallet().getIdWallet();
         final String executionMode = executionModeOf(allocation);
 
+        final boolean fixedValidationBand = "MICRO_LIVE".equals(executionMode) || "SHADOW".equals(executionMode);
         Double capitalShareRaw = walletMetric.getCapitalShare();
-        if (capitalShareRaw == null || !Double.isFinite(capitalShareRaw)) {
+        if (!fixedValidationBand && (capitalShareRaw == null || !Double.isFinite(capitalShareRaw))) {
             log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
             throw new SkipExecutionException(
                     "metric_invalid",
@@ -4444,8 +4473,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     com.apunto.engine.shared.util.LogFmt.kv("wallet", walletId, "capitalShare", capitalShareRaw)
             );
         }
-        double capitalShare = Math.max(0.0, Math.min(1.0, capitalShareRaw));
-        if (!"MICRO_LIVE".equals(executionMode) && capitalShare <= 0.0) {
+        double capitalShare = capitalShareRaw == null || !Double.isFinite(capitalShareRaw)
+                ? 0.0 : Math.max(0.0, Math.min(1.0, capitalShareRaw));
+        if (!fixedValidationBand && capitalShare <= 0.0) {
             log.warn(LOG_PREP_INVALID_METRIC, originId, userId, walletId);
             throw new SkipExecutionException(
                     "metric_invalid",
@@ -4456,7 +4486,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
 
         final int copyCapital = resolveCopyCapital(userDetail, allocation);
         final boolean microLiveExecution = "MICRO_LIVE".equals(executionMode);
-        final boolean liveExecution = "LIVE".equals(executionMode);
+        final boolean executableShadow = "SHADOW".equals(executionMode);
         CopyBudgetDecision budgetDecision = resolveCopyBudget(userDetail, walletMetric, allocation, capitalShare, executionMode);
         BigDecimal walletMarginBudget = budgetDecision.budgetUsd();
         final FuturesCapitalAsset capitalAsset = resolveCapitalAsset(userDetail);
@@ -4586,8 +4616,11 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
             );
         }
         walletMarginBudget = budgetDecision.budgetUsd();
-        final BigDecimal reserve = microLiveExecution ? ZERO : walletMarginBudget.multiply(safePct(walletReservePct, ONE));
-        final BigDecimal hardCap = microLiveExecution ? budgetDecision.totalCapitalUsd() : walletMarginBudget.multiply(ONE.add(safePct(walletHardcapOverPct, ONE)));
+        final BigDecimal reserve = microLiveExecution || executableShadow
+                ? ZERO : walletMarginBudget.multiply(safePct(walletReservePct, ONE));
+        final BigDecimal hardCap = microLiveExecution || executableShadow
+                ? budgetDecision.totalCapitalUsd()
+                : walletMarginBudget.multiply(ONE.add(safePct(walletHardcapOverPct, ONE)));
         final BigDecimal availableBufferedMargin = hardCap.subtract(reserve).subtract(usedMargin).max(ZERO);
 
         if (availableBufferedMargin.compareTo(ZERO) <= 0) {
@@ -5884,6 +5917,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 allocation == null ? null : allocation.getScopeValue(),
                 metricScopeValue(walletMetric, strategyCode),
                 "ALL");
+        String generationId = walletMetric == null ? null : walletMetric.getGenerationId();
+        if (generationId == null || generationId.isBlank()) {
+            log.warn("event=copy.simulation.not_enqueued reasonCode=SIMULATION_GENERATION_ID_REQUIRED sourceEventId={} allocationId={} wallet={} strategy={}",
+                    sourceEventId, allocation == null ? null : allocation.getId(), safeLog(walletId), safeLog(strategyCode));
+            return;
+        }
         try {
             CopySimulationSubmissionResult result = copySimulationSubmissionService.submit(
                     new CopySimulationContext(
@@ -5892,6 +5931,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                             userDetail.getUser().getId().toString(),
                             allocation == null ? null : allocation.getId(),
                             walletId,
+                            generationId,
                             strategyCode,
                             request.versions().strategyVersion(),
                             scopeType,
@@ -6011,6 +6051,27 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         return UserCopyAllocationEntity.normalizeExecutionMode(
                 allocation == null ? null : allocation.getExecutionMode()
         );
+    }
+
+    private BigDecimal calibrationCapital(String executionMode) {
+        return "MICRO_LIVE".equalsIgnoreCase(executionMode)
+                || "SHADOW".equalsIgnoreCase(executionMode)
+                || "EXECUTABLE_SHADOW".equalsIgnoreCase(executionMode)
+                ? new BigDecimal("100") : null;
+    }
+
+    private BigDecimal calibrationLeverage(String executionMode, UserCopyAllocationEntity allocation) {
+        if ("MICRO_LIVE".equalsIgnoreCase(executionMode)
+                || "SHADOW".equalsIgnoreCase(executionMode)
+                || "EXECUTABLE_SHADOW".equalsIgnoreCase(executionMode)) {
+            return new BigDecimal("5");
+        }
+        return allocation == null ? null : allocation.getLeverageOverride();
+    }
+
+    private BigDecimal calibrationTargetNotional(BigDecimal requestedQty, BigDecimal expectedPrice) {
+        if (!positive(requestedQty) || !positive(expectedPrice)) return null;
+        return requestedQty.abs().multiply(expectedPrice.abs()).stripTrailingZeros();
     }
 
     private CopyBudgetDecision resolveCopyBudget(UserDetailDto userDetail,

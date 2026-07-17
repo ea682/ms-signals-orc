@@ -1,5 +1,6 @@
 package com.apunto.engine.entity;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
@@ -119,9 +120,10 @@ public class ShadowPositionStateEntity {
     }
 
     private void normalize() {
-        if (copyStrategyCode == null || copyStrategyCode.isBlank()) copyStrategyCode = "MOVEMENT_ALL";
-        if (scopeType == null || scopeType.isBlank()) scopeType = "strategy";
-        if (scopeValue == null || scopeValue.isBlank()) scopeValue = "default";
+        copyStrategyCode = MetricStrategyIdentity.strategyCode(copyStrategyCode);
+        scopeType = MetricStrategyIdentity.scopeType(scopeType, copyStrategyCode);
+        scopeValue = MetricStrategyIdentity.scopeValue(scopeValue, copyStrategyCode);
+        strategyKey = MetricStrategyIdentity.canonicalKey(walletId, copyStrategyCode, scopeType, scopeValue);
         if (positionSide == null || positionSide.isBlank()) positionSide = "BOTH";
         if (status == null || status.isBlank()) status = "OPEN";
         if (qty == null) qty = BigDecimal.ZERO;

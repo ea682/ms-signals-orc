@@ -34,6 +34,28 @@ class CopyBudgetResolverTest {
     }
 
     @Test
+    void executableShadowUsesTheSameOneHundredAtFiveXWithoutRealBalanceGate() {
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                .executionMode("SHADOW")
+                .accountCapitalUsd(BigDecimal.ZERO)
+                .allocationPct(BigDecimal.ZERO)
+                .leverage(bd("20"))
+                .sourceAccountEquityUsd(bd("500000"))
+                .sourcePositionNotionalUsd(bd("100000"))
+                .requireSourceExposure(true)
+                .build());
+
+        assertTrue(decision.allowed());
+        assertEquals(CopyBudgetResolver.EXECUTABLE_SHADOW_PROPORTIONAL_PORTFOLIO, decision.budgetMode());
+        assertEquals("SHADOW", decision.executionMode());
+        assertEquals(0, bd("100").compareTo(decision.budgetUsd()));
+        assertEquals(0, bd("5").compareTo(decision.leverage()));
+        assertEquals(0, bd("20").compareTo(decision.copyNotionalUsd()));
+        assertEquals(0, bd("4").compareTo(decision.copyMarginUsd()));
+        assertFalse(decision.usesAllocationPct());
+    }
+
+    @Test
     void microLiveDoesNotApplyLegacyTwentyDollarOrFivePositionLimits() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("MICRO_LIVE")

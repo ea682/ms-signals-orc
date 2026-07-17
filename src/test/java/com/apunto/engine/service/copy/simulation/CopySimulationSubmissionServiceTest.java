@@ -61,6 +61,7 @@ class CopySimulationSubmissionServiceTest {
                 "user-1",
                 41L,
                 "0xa445",
+                "generation-1",
                 "MOVEMENT_ALL",
                 "copy-strategy-v3",
                 "ALL",
@@ -116,6 +117,8 @@ class CopySimulationSubmissionServiceTest {
 
         @Override public List<CopySimulationJob> claimBatch(String workerId, int limit) { return List.of(); }
         @Override public boolean isPauseRequested(UUID jobId) { return false; }
+        @Override public boolean requestPause(UUID jobId) { return false; }
+        @Override public boolean resume(UUID jobId) { return false; }
         @Override public void saveScenario(UUID jobId, CopySimulationScenarioFact scenario) { }
         @Override public void markCompleted(UUID jobId) { }
         @Override public void markPaused(UUID jobId) { }

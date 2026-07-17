@@ -43,6 +43,8 @@ public class CopyDispatchIntentEntity {
     private String scopeType;
     @Column(name = "scope_value", length = 180)
     private String scopeValue;
+    @Column(name = "metric_generation_id", length = 80)
+    private String metricGenerationId;
     @Column(name = "source_event_id", nullable = false, length = 600)
     private String sourceEventId;
     @Column(name = "id_order_origin", length = 120)
@@ -65,6 +67,8 @@ public class CopyDispatchIntentEntity {
     private BigDecimal requestedMarginUsd;
     @Column(name = "requested_notional_usd", precision = 38, scale = 12, nullable = false)
     private BigDecimal requestedNotionalUsd;
+    @Column(name = "notional_band", length = 32)
+    private String notionalBand;
     @Column(name = "reference_price", precision = 38, scale = 18)
     private BigDecimal referencePrice;
     @Column(name = "requested_leverage")

@@ -1,5 +1,6 @@
 package com.apunto.engine.entity;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -41,11 +42,11 @@ public class CopyWalletProfileEntity {
 
     @Builder.Default
     @Column(name = "scope_type", nullable = false, length = 32)
-    private String scopeType = "strategy";
+    private String scopeType = "ALL";
 
     @Builder.Default
     @Column(name = "scope_value", nullable = false, length = 160)
-    private String scopeValue = "MOVEMENT_ALL";
+    private String scopeValue = "ALL";
 
     @Column(name = "profile_config_hash", length = 80)
     private String profileConfigHash;
@@ -127,10 +128,10 @@ public class CopyWalletProfileEntity {
         walletId = normalizeLower(walletId);
         copyProfileCode = normalizeUpper(copyProfileCode, "MOVEMENT_ALL");
         copyProfileCategory = normalizeUpper(copyProfileCategory, "CORE_COPY_PROFILE");
-        scopeType = normalizeLowerOr(scopeType, "strategy");
-        scopeValue = normalizeTextOr(scopeValue, copyProfileCode);
+        scopeType = MetricStrategyIdentity.scopeType(scopeType, copyProfileCode);
+        scopeValue = MetricStrategyIdentity.scopeValue(scopeValue, copyProfileCode);
         status = normalizeUpper(status, "SHADOW_TESTING");
-        profileKey = normalizeTextOr(profileKey, walletId + "|" + copyProfileCode + "|" + scopeType + "|" + scopeValue);
+        profileKey = MetricStrategyIdentity.canonicalKey(walletId, copyProfileCode, scopeType, scopeValue);
         copyGuardStatus = normalizeNullable(copyGuardStatus);
         copyGuardAction = normalizeNullable(copyGuardAction);
         lastValidationReasonCode = normalizeNullable(lastValidationReasonCode);

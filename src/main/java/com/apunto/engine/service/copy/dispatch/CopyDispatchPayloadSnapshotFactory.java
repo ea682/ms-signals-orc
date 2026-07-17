@@ -39,6 +39,7 @@ public class CopyDispatchPayloadSnapshotFactory {
         put(payload, "strategyCode", value.getStrategyCode());
         put(payload, "scopeType", value.getScopeType());
         put(payload, "scopeValue", value.getScopeValue());
+        put(payload, "generationId", value.getMetricGenerationId());
         put(payload, "sourceEventId", value.getSourceEventId());
         put(payload, "sourceEventType", value.getSourceEventType());
         put(payload, "copyIntent", value.getCopyIntent());
@@ -68,6 +69,7 @@ public class CopyDispatchPayloadSnapshotFactory {
         put(payload, "strategyCode", identity.strategyCode());
         put(payload, "scopeType", identity.scopeType());
         put(payload, "scopeValue", identity.scopeValue());
+        put(payload, "generationId", identity.generationId());
         put(payload, "sourceEventId", identity.sourceEventId());
         put(payload, "sourceEventType", value.sourceEventType());
         put(payload, "copyIntent", identity.copyIntent());
