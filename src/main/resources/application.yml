@@ -157,9 +157,13 @@ copy:
     initial-capital-usd: ${COPY_MICRO_LIVE_INITIAL_CAPITAL_USD:100}
     max-capital-usd: ${COPY_MICRO_LIVE_MAX_CAPITAL_USD:100}
     total-capital-usd: ${COPY_MICRO_LIVE_TOTAL_CAPITAL_USD:100}
-    max-margin-per-operation-usd: ${COPY_MICRO_LIVE_MAX_MARGIN_PER_OPERATION_USD:20}
-    max-concurrent-positions: ${COPY_MICRO_LIVE_MAX_CONCURRENT_POSITIONS:5}
+    target-leverage: ${COPY_MICRO_LIVE_TARGET_LEVERAGE:5}
     margin-buffer-pct: ${COPY_MICRO_LIVE_MARGIN_BUFFER_PCT:0.03}
+  source-equity:
+    max-age-ms: ${COPY_SOURCE_EQUITY_MAX_AGE_MS:30000}
+  target-position-authority:
+    cache-ttl-ms: ${COPY_TARGET_POSITION_CACHE_TTL_MS:250}
+    max-age-ms: ${COPY_TARGET_POSITION_MAX_AGE_MS:1000}
   runtime:
     forbid-db-in-live-hot-path: ${COPY_RUNTIME_FORBID_DB_IN_LIVE_HOT_PATH:true}
     user-snapshot:
@@ -171,7 +175,7 @@ copy:
       refresh-ms: ${COPY_RUNTIME_ALLOCATION_SNAPSHOT_REFRESH_MS:5000}
       max-stale: ${COPY_RUNTIME_ALLOCATION_SNAPSHOT_MAX_STALE:PT30S}
   promotion:
-    enabled: ${COPY_PROMOTION_ENABLED:true}
+    enabled: ${COPY_PROMOTION_ENABLED:false}
     from-shadow-enabled: ${COPY_PROMOTION_FROM_SHADOW_ENABLED:true}
     candidate-limit: ${COPY_PROMOTION_CANDIDATE_LIMIT:100}
     min-shadow-days: ${COPY_PROMOTION_MIN_SHADOW_DAYS:3}
@@ -202,11 +206,12 @@ copy:
       min-evaluable-events: ${SHADOW_PROMOTION_COVERAGE_MIN_EVENTS:100}
       minimum-percent: ${SHADOW_PROMOTION_COVERAGE_MIN_PERCENT:95}
     job:
-      enabled: ${COPY_PROMOTION_JOB_ENABLED:true}
+      enabled: ${COPY_PROMOTION_JOB_ENABLED:false}
       initial-delay-ms: ${COPY_PROMOTION_JOB_INITIAL_DELAY_MS:30000}
       fixed-delay-ms: ${COPY_PROMOTION_JOB_FIXED_DELAY_MS:120000}
   live-promotion:
-    enabled: ${COPY_LIVE_PROMOTION_ENABLED:true}
+    enabled: ${COPY_LIVE_PROMOTION_ENABLED:false}
+    manual-certification-required: ${COPY_LIVE_PROMOTION_MANUAL_CERTIFICATION_REQUIRED:true}
     candidate-limit: ${COPY_LIVE_PROMOTION_CANDIDATE_LIMIT:100}
     min-micro-days: ${COPY_LIVE_PROMOTION_MIN_MICRO_DAYS:7}
     min-micro-orders: ${COPY_LIVE_PROMOTION_MIN_MICRO_ORDERS:10}
@@ -230,9 +235,19 @@ copy:
     copy-decision-max-facts-per-unit: ${COPY_LIVE_PROMOTION_COPY_DECISION_MAX_FACTS_PER_UNIT:50000}
     copy-decision-timeout-ms: ${COPY_LIVE_PROMOTION_COPY_DECISION_TIMEOUT_MS:55000}
     job:
-      enabled: ${COPY_LIVE_PROMOTION_JOB_ENABLED:true}
+      enabled: ${COPY_LIVE_PROMOTION_JOB_ENABLED:false}
       initial-delay-ms: ${COPY_LIVE_PROMOTION_JOB_INITIAL_DELAY_MS:45000}
       fixed-delay-ms: ${COPY_LIVE_PROMOTION_JOB_FIXED_DELAY_MS:300000}
+  certification:
+    runtime:
+      exchange: ${COPY_CERTIFICATION_EXCHANGE:BINANCE}
+      strategy-version: ${COPY_CERTIFICATION_STRATEGY_VERSION:copy-strategy-v3}
+      sizing-policy-version: ${COPY_CERTIFICATION_SIZING_POLICY_VERSION:proportional-portfolio-v3}
+      symbol-mapping-version: ${COPY_CERTIFICATION_SYMBOL_MAPPING_VERSION:binance-symbol-map-v3}
+      fee-model-version: ${COPY_CERTIFICATION_FEE_MODEL_VERSION:binance-fee-v3}
+      funding-model-version: ${COPY_CERTIFICATION_FUNDING_MODEL_VERSION:binance-funding-v3}
+      slippage-model-version: ${COPY_CERTIFICATION_SLIPPAGE_MODEL_VERSION:binance-slippage-v3}
+      liquidity-model-version: ${COPY_CERTIFICATION_LIQUIDITY_MODEL_VERSION:order-book-liquidity-v3}
   capital-allocator:
     enabled: ${COPY_CAPITAL_ALLOCATOR_ENABLED:true}
     scale-enabled: ${COPY_CAPITAL_ALLOCATOR_SCALE_ENABLED:false}
@@ -305,6 +320,42 @@ copy:
       enabled: ${COPY_DISPATCH_GAUGES_ENABLED:true}
       initial-delay-ms: ${COPY_DISPATCH_GAUGES_INITIAL_DELAY_MS:15000}
       refresh-ms: ${COPY_DISPATCH_GAUGES_REFRESH_MS:15000}
+  simulation:
+    worker:
+      enabled: ${COPY_SIMULATION_WORKER_ENABLED:false}
+      batch-size: ${COPY_SIMULATION_WORKER_BATCH_SIZE:1}
+      fixed-delay-ms: ${COPY_SIMULATION_WORKER_FIXED_DELAY_MS:2000}
+      yield-ms: ${COPY_SIMULATION_WORKER_YIELD_MS:2}
+      stale-lock: ${COPY_SIMULATION_WORKER_STALE_LOCK:PT10M}
+      retry-delay: ${COPY_SIMULATION_WORKER_RETRY_DELAY:PT1M}
+      max-attempts: ${COPY_SIMULATION_WORKER_MAX_ATTEMPTS:5}
+      instance-id: ${COPY_SIMULATION_WORKER_INSTANCE_ID:${spring.application.name}:cold-simulation}
+    liquidity-worker:
+      enabled: ${COPY_LIQUIDITY_WORKER_ENABLED:false}
+      batch-size: ${COPY_LIQUIDITY_WORKER_BATCH_SIZE:1}
+      fixed-delay-ms: ${COPY_LIQUIDITY_WORKER_FIXED_DELAY_MS:5000}
+      stale-lock: ${COPY_LIQUIDITY_WORKER_STALE_LOCK:PT10M}
+      retry-delay: ${COPY_LIQUIDITY_WORKER_RETRY_DELAY:PT1M}
+      max-attempts: ${COPY_LIQUIDITY_WORKER_MAX_ATTEMPTS:5}
+      depth-limit: ${COPY_LIQUIDITY_DEPTH_LIMIT:100}
+      minimum-capital-usd: ${COPY_LIQUIDITY_MINIMUM_CAPITAL_USD:5000}
+      maximum-depth-consumption-pct: ${COPY_LIQUIDITY_MAX_DEPTH_CONSUMPTION_PCT:0.30}
+      participation-cap-pct: ${COPY_LIQUIDITY_PARTICIPATION_CAP_PCT:0.05}
+      fragment-count: ${COPY_LIQUIDITY_FRAGMENT_COUNT:10}
+      interval-millis: ${COPY_LIQUIDITY_INTERVAL_MILLIS:1000}
+      disappearing-liquidity-pct: ${COPY_LIQUIDITY_DISAPPEARING_PCT:0.10}
+      adverse-selection-bps: ${COPY_LIQUIDITY_ADVERSE_SELECTION_BPS:2}
+      network-latency-millis: ${COPY_LIQUIDITY_NETWORK_LATENCY_MILLIS:100}
+      taker-fee-bps: ${COPY_LIQUIDITY_TAKER_FEE_BPS:4}
+      funding-bps-per-eight-hours: ${COPY_LIQUIDITY_FUNDING_BPS_PER_EIGHT_HOURS:1}
+  calibration:
+    medium-sample-size: ${COPY_CALIBRATION_MEDIUM_SAMPLE_SIZE:10}
+    high-sample-size: ${COPY_CALIBRATION_HIGH_SAMPLE_SIZE:30}
+    maximum-age: ${COPY_CALIBRATION_MAXIMUM_AGE:P14D}
+    notional-band:
+      small-max-usd: ${COPY_CALIBRATION_NOTIONAL_SMALL_MAX_USD:100}
+      medium-max-usd: ${COPY_CALIBRATION_NOTIONAL_MEDIUM_MAX_USD:1000}
+      large-max-usd: ${COPY_CALIBRATION_NOTIONAL_LARGE_MAX_USD:10000}
 
 operation:
   movement-ledger:
@@ -350,6 +401,7 @@ engine:
       enabled: ${METRIC_WALLET_DISTRIBUTION_WORKER_ENABLED:false}
 
 metric-wallet:
+  read-mode: ${METRIC_WALLET_READ_MODE:COMPARE}
   history:
     source: ${METRIC_WALLET_HISTORY_SOURCE:joyas}
     limit: ${METRIC_WALLET_HISTORY_LIMIT:300}
@@ -364,6 +416,16 @@ metric-wallet:
     limit: ${METRIC_WALLET_JOYAS_LIMIT:3}
     dayz: ${METRIC_WALLET_JOYAS_DAYZ:30}
     simulation: ${METRIC_WALLET_JOYAS_SIMULATION:summary}
+  v2:
+    summary-limit: ${METRIC_WALLET_V2_SUMMARY_LIMIT:${METRIC_WALLET_HISTORY_LIMIT:300}}
+    full-limit: ${METRIC_WALLET_V2_FULL_LIMIT:${METRIC_WALLET_SHADOW_MAX_STRATEGIES:80}}
+    summary-refresh-after: ${METRIC_WALLET_V2_SUMMARY_REFRESH_AFTER:PT2M}
+    full-refresh-after: ${METRIC_WALLET_V2_FULL_REFRESH_AFTER:PT10M}
+    copy-guard-refresh-after: ${METRIC_WALLET_V2_COPY_GUARD_REFRESH_AFTER:PT2M}
+    max-staleness: ${METRIC_WALLET_V2_MAX_STALENESS:PT10M}
+    fail-open-new-exposure: ${METRIC_WALLET_V2_FAIL_OPEN_NEW_EXPOSURE:false}
+    allow-close-on-failure: ${METRIC_WALLET_V2_ALLOW_CLOSE_ON_FAILURE:true}
+    shadow-auto-enroll-enabled: ${METRIC_WALLET_V2_SHADOW_AUTO_ENROLL_ENABLED:false}
   copy-guard:
     enabled: ${METRIC_WALLET_COPY_GUARD_ENABLED:true}
     windows: ${METRIC_WALLET_COPY_GUARD_WINDOWS:1w,2w,3w,1mo,2mo,3mo}

@@ -7,7 +7,8 @@ import java.math.BigDecimal;
 @ConfigurationProperties(prefix = "copy.live-promotion")
 public class LivePromotionProperties {
 
-    private boolean enabled = true;
+    private boolean enabled = false;
+    private boolean manualCertificationRequired = true;
     private int candidateLimit = 100;
     private long minMicroDays = 7;
     private long minMicroOrders = 10;
@@ -37,6 +38,14 @@ public class LivePromotionProperties {
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
+    }
+
+    public boolean isManualCertificationRequired() {
+        return manualCertificationRequired;
+    }
+
+    public void setManualCertificationRequired(boolean manualCertificationRequired) {
+        this.manualCertificationRequired = manualCertificationRequired;
     }
 
     public int getCandidateLimit() {

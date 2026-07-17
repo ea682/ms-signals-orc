@@ -1,5 +1,6 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.entity.CopyPromotionAuditEntity;
 import com.apunto.engine.entity.DetailUserEntity;
@@ -1551,10 +1552,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     }
 
     private static String strategyKey(ShadowCopyAllocationEntity shadow) {
-        return normalizeWallet(shadow.getWalletId())
-                + "|" + normalizeStrategy(shadow.getCopyStrategyCode())
-                + "|" + normalizeScopeType(shadow.getScopeType())
-                + "|" + normalizeScopeValue(shadow.getScopeValue(), shadow.getCopyStrategyCode());
+        return MetricStrategyIdentity.canonicalKey(
+                shadow.getWalletId(),
+                shadow.getCopyStrategyCode(),
+                shadow.getScopeType(),
+                shadow.getScopeValue()
+        );
     }
 
     private static BigDecimal positiveOrDefault(BigDecimal value, BigDecimal fallback) {
@@ -1607,13 +1610,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     }
 
     private static String normalizeScopeType(String value) {
-        if (value == null || value.isBlank()) return "strategy";
-        return value.trim().toLowerCase(Locale.ROOT);
+        if (value == null || value.isBlank()) return "ALL";
+        return value.trim().toUpperCase(Locale.ROOT);
     }
 
     private static String normalizeScopeValue(String value, String strategy) {
-        if (value == null || value.isBlank()) return normalizeStrategy(strategy);
-        return value.trim();
+        return MetricStrategyIdentity.scopeValue(value, strategy);
     }
 
     private static String normalizeToken(String value) {

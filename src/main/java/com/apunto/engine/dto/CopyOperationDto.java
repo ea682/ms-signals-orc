@@ -41,4 +41,7 @@ public class CopyOperationDto {
     private String sourceEventId;
     private String clientOrderId;
     private String priceStatus;
+    private UUID economicCycleId;
+    private Long cycleSequence;
+    private String economicDataStatus;
 }

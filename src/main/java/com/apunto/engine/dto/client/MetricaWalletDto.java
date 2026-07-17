@@ -16,6 +16,19 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class MetricaWalletDto {
 
+    private Integer metricVersion;
+    private String sourceVersion;
+    private String generationId;
+    private OffsetDateTime generationActivatedAt;
+    private OffsetDateTime computedAt;
+    private OffsetDateTime dataAsOf;
+    private String strategyKey;
+    private String evaluationMode;
+    private Boolean allowNewEntries;
+    private List<String> reasonCodes;
+    private List<String> qualityFlags;
+    private List<String> unknownEconomicFields;
+
     private WalletDto wallet;
     private ActivityDto activity;
     private ActivityDto walletActivity;

@@ -179,6 +179,9 @@ public interface CopyTradingMapper {
     @Mapping(target = "sourceEventId", source = "order.sourceEventId")
     @Mapping(target = "clientOrderId", source = "order.clientOrderId")
     @Mapping(target = "priceStatus", source = "order.averagePriceStatus")
+    @Mapping(target = "economicCycleId", source = "operation.economicCycleId")
+    @Mapping(target = "cycleSequence", source = "operation.cycleSequence")
+    @Mapping(target = "economicDataStatus", expression = "java(order.getEconomicDataStatus() == null || order.getEconomicDataStatus().isBlank() ? operation.getEconomicDataStatus() : order.getEconomicDataStatus())")
     @Mapping(target = "active", constant = "false")
     @Mapping(target = "siseUsd", ignore = true)
     CopyOperationDto buildCopyCloseOperationDto(CopyOperationDto operation, BinanceFuturesOrderClientResponse order);

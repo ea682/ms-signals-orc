@@ -28,4 +28,6 @@ public class OriginBasketPositionDto {
     private OffsetDateTime createdAt;
     private OffsetDateTime updatedAt;
     private OffsetDateTime sourceTs;
+    private String sourcePositionKey;
+    private Long sourceSnapshotVersion;
 }

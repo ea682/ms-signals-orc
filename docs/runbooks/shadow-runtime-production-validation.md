@@ -9,8 +9,8 @@ Reglas obligatorias:
 
 - no enviar ordenes Binance de prueba;
 - no imprimir credenciales ni payloads privados;
-- MICRO_LIVE mantiene 100 USDC por user+wallet, 20 USDC por nueva operacion y
-  cinco posiciones/reservas;
+- MICRO_LIVE mantiene 100 USDC por user+wallet y leverage 5x, distribuidos
+  proporcionalmente, sin monto fijo por operacion ni maximo global de posiciones;
 - REDUCE y CLOSE no usan presupuesto MICRO_LIVE;
 - LIVE no toma el lock de presupuesto MICRO_LIVE;
 - SHADOW nunca autoriza una orden Binance;
@@ -265,16 +265,16 @@ Para OPEN/INCREASE deben observarse:
 ```text
 executionMode=MICRO_LIVE
 maxWalletMarginUsd=100
-maxMarginPerOperationUsd=20
-maxConcurrentPositions=5
+targetLeverage=5
+fixedPerOperation=absent
+userMaxConcurrentPositions=<null-or-configured-value>
 ```
 
 Reasons de rechazo permitidos:
 
 ```text
 MICRO_LIVE_TOTAL_MARGIN_EXCEEDED
-MICRO_LIVE_MAX_MARGIN_PER_OPERATION_EXCEEDED
-MICRO_LIVE_MAX_CONCURRENT_POSITIONS_EXCEEDED
+SKIPPED_USER_POSITION_LIMIT
 MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE
 MICRO_LIVE_DUPLICATE_INTENT
 MICRO_LIVE_GUARD_BLOCKED

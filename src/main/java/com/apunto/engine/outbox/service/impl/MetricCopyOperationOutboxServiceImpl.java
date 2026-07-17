@@ -22,7 +22,7 @@ import java.util.Locale;
 @RequiredArgsConstructor
 public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperationOutboxService {
     private static final String EVENT_TYPE = "copy-operation-event-persisted-v1";
-    private static final String EVENT_VERSION = "1";
+    private static final String EVENT_VERSION = "4";
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -42,8 +42,18 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
                     safe(entity == null ? null : entity.getIdWalletOrigin()));
             return;
         }
-        String payload = serialize(toEvent(entity));
-        insertOutbox(entity, payload);
+        enqueue(toEvent(entity));
+    }
+
+    @Override
+    public void enqueue(MetricCopyOperationPersistedEvent event) {
+        if (!enabled || event == null) return;
+        if (!isPublishable(event)) {
+            log.warn("event=metric_copy_outbox.skip reason=payload_incomplete idEvent={} userId={} wallet={}",
+                    safe(event.idEvent()), safe(event.idUser()), safe(event.wallet()));
+            return;
+        }
+        insertOutbox(event, serialize(event));
     }
 
     private boolean isPublishable(CopyOperationEventEntity entity) {
@@ -53,7 +63,14 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
                 && StringUtils.hasText(entity.getEventType());
     }
 
-    private void insertOutbox(CopyOperationEventEntity entity, String payload) {
+    private boolean isPublishable(MetricCopyOperationPersistedEvent event) {
+        return event.idEvent() != null
+                && StringUtils.hasText(event.idUser())
+                && StringUtils.hasText(event.wallet())
+                && StringUtils.hasText(event.eventType());
+    }
+
+    private void insertOutbox(MetricCopyOperationPersistedEvent event, String payload) {
         try {
             jdbcTemplate.update(
                     """
@@ -62,15 +79,15 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
                     ) VALUES (?, ?, ?, ?::jsonb)
                     """,
                     EVENT_TYPE,
-                    aggregateKey(entity),
-                    kafkaKey(entity),
+                    aggregateKey(event),
+                    kafkaKey(event),
                     payload
             );
             log.debug("event=metric_copy_outbox.enqueued idEvent={} userId={} wallet={}",
-                    safe(entity.getIdEvent()), safe(entity.getIdUser()), safe(entity.getIdWalletOrigin()));
+                    safe(event.idEvent()), safe(event.idUser()), safe(event.wallet()));
         } catch (DataAccessException ex) {
             log.error("event=metric_copy_outbox.enqueue_failed idEvent={} userId={} wallet={} errClass={} errMsg=\"{}\" {}",
-                    safe(entity.getIdEvent()), safe(entity.getIdUser()), safe(entity.getIdWalletOrigin()),
+                    safe(event.idEvent()), safe(event.idUser()), safe(event.wallet()),
                     ex.getClass().getSimpleName(), safe(ex.getMessage()), LogFmt.kv("component", "metric_copy_outbox"), ex);
             throw ex;
         }
@@ -82,6 +99,7 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
                 entity.getIdEvent(),
                 entity.getIdOperation(),
                 entity.getIdOrderOrigin(),
+                entity.getSourceMovementKey(),
                 entity.getIdUser(),
                 normalize(entity.getIdWalletOrigin()),
                 upper(entity.getParsymbol()),
@@ -104,7 +122,57 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
                 entity.getSource(),
                 entity.getReasonCode(),
                 entity.getEventTime(),
-                entity.getDateCreation()
+                entity.getDateCreation(),
+                entity.getEconomicCycleId(),
+                entity.getDispatchIntentId(),
+                entity.getUserCopyAllocationId(),
+                entity.getCopyStrategyCode(),
+                entity.getScopeType(),
+                entity.getScopeValue(),
+                entity.getStrategyKey(),
+                entity.getMetricGenerationId(),
+                publishedExecutionMode(entity),
+                entity.getDecision(),
+                entity.getDecisionReason(),
+                entity.getPriceStatus(),
+                entity.getTradeIds(),
+                entity.getIndividualFills(),
+                entity.getAverageFillPrice(),
+                entity.getEntryPrice(),
+                entity.getExitPrice(),
+                entity.getEntryFee(),
+                entity.getExitFee(),
+                entity.getTotalFees(),
+                entity.getFundingPaid(),
+                entity.getFundingReceived(),
+                entity.getNetFunding(),
+                entity.getGrossRealizedPnl(),
+                entity.getNetRealizedPnl(),
+                entity.getUnrealizedPnl(),
+                entity.getExpectedPrice(),
+                entity.getActualPrice(),
+                entity.getSlippageBps(),
+                entity.getSlippageUsd(),
+                entity.getSubmittedAt(),
+                entity.getAcceptedAt(),
+                entity.getFilledAt(),
+                entity.getPersistedAt(),
+                entity.getSourceToSubmitLatencyMs(),
+                entity.getSubmitToFillLatencyMs(),
+                entity.getEndToEndLatencyMs(),
+                entity.getEconomicDataStatus(),
+                entity.getStrategyVersion(),
+                entity.getSizingPolicyVersion(),
+                entity.getSymbolMappingVersion(),
+                entity.getFeeModelVersion(),
+                entity.getFundingModelVersion(),
+                entity.getSlippageModelVersion(),
+                entity.getLiquidityModelVersion(),
+                entity.getCalibrationCapitalUsd(),
+                entity.getTargetLeverage(),
+                entity.getCalibrationTargetNotionalUsd(),
+                entity.getCopyAction(),
+                entity.getNotionalBand()
         );
     }
 
@@ -116,15 +184,15 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
         }
     }
 
-    private String aggregateKey(CopyOperationEventEntity entity) {
-        if (StringUtils.hasText(entity.getClientOrderId())) {
-            return entity.getClientOrderId();
+    private String aggregateKey(MetricCopyOperationPersistedEvent event) {
+        if (StringUtils.hasText(event.clientOrderId())) {
+            return event.clientOrderId();
         }
-        return String.valueOf(entity.getIdEvent());
+        return String.valueOf(event.idEvent());
     }
 
-    private String kafkaKey(CopyOperationEventEntity entity) {
-        return entity.getIdUser() + "|" + normalize(entity.getIdWalletOrigin());
+    private String kafkaKey(MetricCopyOperationPersistedEvent event) {
+        return event.idUser() + "|" + normalize(event.wallet());
     }
 
     private String normalize(String value) {
@@ -133,6 +201,14 @@ public class MetricCopyOperationOutboxServiceImpl implements MetricCopyOperation
 
     private String upper(String value) {
         return value == null ? null : value.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private String publishedExecutionMode(CopyOperationEventEntity entity) {
+        if (entity != null && entity.isShadow()
+                && "SHADOW".equalsIgnoreCase(entity.getExecutionMode())) {
+            return "EXECUTABLE_SHADOW";
+        }
+        return entity == null ? null : upper(entity.getExecutionMode());
     }
 
     private String safe(Object value) {

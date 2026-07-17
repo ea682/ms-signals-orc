@@ -69,7 +69,8 @@ public class HyperliquidDirectIngestIdempotencyGuard {
             """;
 
     private static final String EXISTING_CLAIM_SQL = """
-            SELECT payload_fingerprint, status, lease_until < now() AS lease_expired
+            SELECT payload_fingerprint, status, lease_until < now() AS lease_expired,
+                   wallet, symbol, source_ts_ms
             FROM futuros_operaciones.hyperliquid_direct_ingest_dedupe
             WHERE idempotency_key = ?
             """;
@@ -88,6 +89,14 @@ public class HyperliquidDirectIngestIdempotencyGuard {
             SET duplicate_count = duplicate_count + 1,
                 last_seen_at = now(),
                 last_reason_code = 'IDEMPOTENCY_KEY_PAYLOAD_CONFLICT'
+            WHERE idempotency_key = ?
+            """;
+
+    private static final String REPLICA_PAYLOAD_DIVERGENCE_SQL = """
+            UPDATE futuros_operaciones.hyperliquid_direct_ingest_dedupe
+            SET duplicate_count = duplicate_count + 1,
+                last_seen_at = now(),
+                last_reason_code = 'REPLICA_DERIVED_PAYLOAD_DIVERGENCE'
             WHERE idempotency_key = ?
             """;
 
@@ -125,7 +134,14 @@ public class HyperliquidDirectIngestIdempotencyGuard {
     private final JdbcTemplate jdbcTemplate;
     private final MeterRegistry meterRegistry;
 
-    private record ExistingClaim(String payloadFingerprint, String status, boolean leaseExpired) {
+    private record ExistingClaim(
+            String payloadFingerprint,
+            String status,
+            boolean leaseExpired,
+            String wallet,
+            String symbol,
+            Long sourceTs
+    ) {
     }
 
     public HyperliquidDirectIngestIdempotencyGuard(
@@ -173,6 +189,11 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 if (existing.payloadFingerprint() != null
                         && !existing.payloadFingerprint().isBlank()
                         && !existing.payloadFingerprint().equals(payloadFingerprint)) {
+                    if (sameImmutableSourceIdentity(existing, mappedDelta)) {
+                        markReplicaPayloadDivergence(
+                                idempotencyKey, mappedDelta, dedupeKey, existing, payloadFingerprint);
+                        return false;
+                    }
                     markPayloadConflict(idempotencyKey, mappedDelta, dedupeKey, existing, payloadFingerprint);
                 }
                 markDuplicate(idempotencyKey, mappedDelta, dedupeKey, payloadFingerprint);
@@ -276,11 +297,43 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 (rs, rowNum) -> new ExistingClaim(
                         rs.getString("payload_fingerprint"),
                         rs.getString("status"),
-                        rs.getBoolean("lease_expired")
+                        rs.getBoolean("lease_expired"),
+                        rs.getString("wallet"),
+                        rs.getString("symbol"),
+                        rs.getObject("source_ts_ms", Long.class)
                 ),
                 idempotencyKey
         );
         return claims.isEmpty() ? null : claims.getFirst();
+    }
+
+    private boolean sameImmutableSourceIdentity(ExistingClaim existing,
+                                                HyperliquidMappedDelta incoming) {
+        return existing != null
+                && canonicalText(existing.wallet()).equals(canonicalText(incoming.wallet()))
+                && canonicalText(existing.symbol()).equals(canonicalText(incoming.symbol()))
+                && java.util.Objects.equals(existing.sourceTs(), sourceTs(incoming));
+    }
+
+    private void markReplicaPayloadDivergence(
+            String idempotencyKey,
+            HyperliquidMappedDelta mappedDelta,
+            String dedupeKey,
+            ExistingClaim existing,
+            String incomingFingerprint
+    ) {
+        try {
+            jdbcTemplate.update(REPLICA_PAYLOAD_DIVERGENCE_SQL, idempotencyKey);
+        } catch (DataAccessException auditFailure) {
+            log.error("event=hyperliquid.direct_ingest.replica_payload_divergence_audit_failed reasonCode=REPLICA_DERIVED_PAYLOAD_DIVERGENCE_AUDIT_FAILED decision=NOOP_STILL_ENFORCED shouldAlert=true idempotencyKey={} errorClass={} errorMessage=\"{}\"",
+                    safe(idempotencyKey), auditFailure.getClass().getSimpleName(), safeLog(auditFailure.getMessage()));
+        }
+        recordDedupeMetric("replica_payload_divergence");
+        log.warn("event=hyperliquid.direct_ingest.replica_payload_divergence reasonCode=REPLICA_DERIVED_PAYLOAD_DIVERGENCE decision=NOOP_HTTP_ACK expected=false shouldAlert=true retryable=false copyImpact=NO_DUPLICATE_ORDER idempotencyKey={} dedupeKey={} positionKey={} wallet={} symbol={} side={} deltaType={} sourceTs={} existingStatus={} leaseExpired={} existingFingerprint={} incomingFingerprint={} recommendedAction=COMPARE_HYPERLIQUID_REPLICA_LOCAL_STATE",
+                safe(idempotencyKey), safe(dedupeKey), safe(mappedDelta.positionKey()),
+                safe(mappedDelta.wallet()), safe(mappedDelta.symbol()), safe(mappedDelta.side()),
+                safe(mappedDelta.deltaType()), sourceTs(mappedDelta), safe(existing.status()),
+                existing.leaseExpired(), safe(existing.payloadFingerprint()), safe(incomingFingerprint));
     }
 
     private void markPayloadConflict(

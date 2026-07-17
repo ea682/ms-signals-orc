@@ -45,6 +45,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ShadowCopyTradingServiceImplTest {
 
+    private static final String TEST_GENERATION_ID = "e3293fec-6f42-48cf-ae57-99a31d173f01";
+
     @Test
     void livePromotionRequiresShadowEvidencePerUser() throws Exception {
         UUID userA = UUID.randomUUID();
@@ -143,6 +145,7 @@ class ShadowCopyTradingServiceImplTest {
         assertTrue(recordedEvents.stream().anyMatch(e -> "MOVEMENT_ALL".equals(e.getCopyStrategyCode())));
         assertTrue(recordedEvents.stream().anyMatch(e -> "LONG_ONLY".equals(e.getCopyStrategyCode())));
         assertFalse(recordedEvents.stream().anyMatch(e -> "SHORT_ONLY".equals(e.getCopyStrategyCode())));
+        assertTrue(recordedEvents.stream().allMatch(e -> TEST_GENERATION_ID.equals(e.getMetricGenerationId())));
     }
 
     @Test
@@ -214,7 +217,7 @@ class ShadowCopyTradingServiceImplTest {
         event.setDeltaType("OPEN");
 
         assertEquals(1, service.recordShadowEvent(event));
-        assertEquals(List.of("shadow-profile:0xabc|LOW_LEVERAGE_ONLY|strategy|<=5"), acquiredProfileLocks);
+        assertEquals(List.of("shadow-profile:0xabc|LOW_LEVERAGE_ONLY|LEVERAGE_RANGE|<=5"), acquiredProfileLocks);
     }
 
     @Test
@@ -1094,6 +1097,7 @@ class ShadowCopyTradingServiceImplTest {
                 .scopeType("strategy")
                 .scopeValue(scopeValue)
                 .strategyKey("0xabc|" + strategyCode + "|strategy|" + scopeValue)
+                .metricGenerationId(TEST_GENERATION_ID)
                 .walletProfileId(walletProfileId)
                 .shadowVersion(1)
                 .active(true)

@@ -1,6 +1,7 @@
 package com.apunto.engine.entity;
 
 import com.apunto.engine.entity.converter.UserCopyAllocationStatusConverter;
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import com.apunto.engine.shared.enums.CopyMinNotionalMode;
 import jakarta.persistence.Column;
 import jakarta.persistence.Convert;
@@ -122,6 +123,9 @@ public class UserCopyAllocationEntity {
     @Column(name = "leverage_override", precision = 10, scale = 2)
     private BigDecimal leverageOverride;
 
+    @Column(name = "user_max_concurrent_positions")
+    private Integer userMaxConcurrentPositions;
+
     @Builder.Default
     @Enumerated(EnumType.STRING)
     @Column(name = "copy_min_notional_mode", nullable = false, length = 32)
@@ -141,14 +145,17 @@ public class UserCopyAllocationEntity {
 
     @Builder.Default
     @Column(name = "scope_type", nullable = false, length = 32)
-    private String scopeType = "strategy";
+    private String scopeType = "ALL";
 
     @Builder.Default
     @Column(name = "scope_value", nullable = false, length = 160)
-    private String scopeValue = "default";
+    private String scopeValue = "ALL";
 
     @Column(name = "strategy_key", length = 420)
     private String strategyKey;
+
+    @Column(name = "metric_generation_id", length = 80)
+    private String metricGenerationId;
 
     @Column(name = "wallet_profile_id")
     private Long walletProfileId;
@@ -208,8 +215,8 @@ public class UserCopyAllocationEntity {
         copyStrategyLabel = normalize(copyStrategyLabel);
         copyMode = normalize(copyMode);
         strategySourceEndpoint = normalize(strategySourceEndpoint);
-        scopeType = normalizeScopeType(scopeType);
-        scopeValue = normalizeScopeValue(scopeValue);
+        scopeType = normalizeScopeType(scopeType, copyStrategyCode);
+        scopeValue = normalizeScopeValue(scopeValue, copyStrategyCode);
         strategyKey = normalizeStrategyKey(strategyKey, walletId, copyStrategyCode, scopeType, scopeValue);
         sourceSymbol = normalizeUpper(sourceSymbol);
         targetSymbol = normalizeUpper(targetSymbol);
@@ -253,8 +260,8 @@ public class UserCopyAllocationEntity {
         copyStrategyLabel = normalize(copyStrategyLabel);
         copyMode = normalize(copyMode);
         strategySourceEndpoint = normalize(strategySourceEndpoint);
-        scopeType = normalizeScopeType(scopeType);
-        scopeValue = normalizeScopeValue(scopeValue);
+        scopeType = normalizeScopeType(scopeType, copyStrategyCode);
+        scopeValue = normalizeScopeValue(scopeValue, copyStrategyCode);
         strategyKey = normalizeStrategyKey(strategyKey, walletId, copyStrategyCode, scopeType, scopeValue);
         sourceSymbol = normalizeUpper(sourceSymbol);
         targetSymbol = normalizeUpper(targetSymbol);
@@ -319,22 +326,16 @@ public class UserCopyAllocationEntity {
         return t.toUpperCase(java.util.Locale.ROOT).replace('-', '_');
     }
 
-    private static String normalizeScopeType(String s) {
-        String t = normalize(s);
-        return t == null ? "strategy" : t.toLowerCase(java.util.Locale.ROOT);
+    private static String normalizeScopeType(String s, String strategyCode) {
+        return MetricStrategyIdentity.scopeType(s, strategyCode);
     }
 
-    private static String normalizeScopeValue(String s) {
-        String t = normalize(s);
-        return t == null ? "default" : t;
+    private static String normalizeScopeValue(String s, String strategyCode) {
+        return MetricStrategyIdentity.scopeValue(s, strategyCode);
     }
 
     private static String normalizeStrategyKey(String current, String walletId, String strategyCode, String scopeType, String scopeValue) {
-        String t = normalize(current);
-        if (t != null) return t;
-        String wallet = walletId == null ? "" : walletId.toLowerCase(java.util.Locale.ROOT);
-        String strategy = normalizeStrategyCode(strategyCode);
-        return wallet + "|" + strategy + "|" + normalizeScopeType(scopeType) + "|" + normalizeScopeValue(scopeValue);
+        return MetricStrategyIdentity.canonicalKey(walletId, strategyCode, scopeType, scopeValue);
     }
 
     public boolean allowsNewEntries(OffsetDateTime now) {

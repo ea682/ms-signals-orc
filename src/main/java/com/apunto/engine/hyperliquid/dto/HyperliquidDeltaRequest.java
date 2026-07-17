@@ -57,7 +57,22 @@ public record HyperliquidDeltaRequest(
         String executionPriceBasis,
         String notionalBasis,
         List<String> lifecycleQualityFlags,
-        Boolean sourceEstimated
+        Boolean sourceEstimated,
+        BigDecimal sourceAccountEquityUsd,
+        Instant equityObservedAt,
+        String equitySource,
+        Long equityFreshnessMs,
+        String equityQuality,
+        Long sourceSnapshotVersion,
+        BigDecimal sourcePositionNotionalUsd,
+        BigDecimal sourcePositionQuantity,
+        BigDecimal sourceMarkPrice,
+        BigDecimal sourceEntryPrice,
+        BigDecimal sourceLeverage,
+        String sourceSide,
+        List<HyperliquidSourcePortfolioPosition> sourcePortfolioPositions,
+        Long sourcePortfolioSnapshotVersion,
+        Boolean sourcePortfolioComplete
 ) {
     public HyperliquidDeltaRequest(
             String eventId,
@@ -103,11 +118,31 @@ public record HyperliquidDeltaRequest(
                 effectiveCloseQty, effectiveEntryPrice, effectiveExitPrice, effectiveRealizedPnlUsd,
                 normalizationStatus, normalizationReason, sourceTs, detectedAt, publishedAt, walletVersion,
                 snapshotVersion, externalId, rawReference, estimated, null, null, null, null, null, null,
-                null, null, List.of(), null
+                null, null, List.of(), null, null, null, null, null, null, null, null, null, null, null,
+                null, null, List.of(), null, null
         );
     }
 
     public HyperliquidDeltaRequest {
         lifecycleQualityFlags = lifecycleQualityFlags == null ? List.of() : List.copyOf(lifecycleQualityFlags);
+        sourcePortfolioPositions = sourcePortfolioPositions == null
+                ? List.of()
+                : List.copyOf(sourcePortfolioPositions);
+        sourceSnapshotVersion = sourceSnapshotVersion == null ? snapshotVersion : sourceSnapshotVersion;
+        sourcePortfolioSnapshotVersion = sourcePortfolioSnapshotVersion == null
+                ? sourceSnapshotVersion
+                : sourcePortfolioSnapshotVersion;
+        sourcePortfolioComplete = sourcePortfolioComplete == null
+                ? !sourcePortfolioPositions.isEmpty()
+                : sourcePortfolioComplete;
+        sourcePositionNotionalUsd = sourcePositionNotionalUsd == null ? positionNotionalUsd : sourcePositionNotionalUsd;
+        sourcePositionQuantity = sourcePositionQuantity == null ? sizeQty : sourcePositionQuantity;
+        sourceMarkPrice = sourceMarkPrice == null ? markPrice : sourceMarkPrice;
+        sourceEntryPrice = sourceEntryPrice == null ? entryPrice : sourceEntryPrice;
+        sourceLeverage = sourceLeverage == null ? leverage : sourceLeverage;
+        sourceSide = sourceSide == null ? side : sourceSide;
+        equityQuality = equityQuality == null
+                ? sourceAccountEquityUsd == null ? "MISSING" : "UNKNOWN"
+                : equityQuality;
     }
 }

@@ -1,5 +1,6 @@
 package com.apunto.engine.dto;
 
+import com.apunto.engine.hyperliquid.dto.HyperliquidSourcePortfolioPosition;
 import com.apunto.engine.shared.enums.PositionSide;
 import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
@@ -10,6 +11,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @Data
@@ -77,4 +79,17 @@ public class OperacionDto {
     /** Compat: futures_position DTO usa "active" */
     @JsonAlias({"active"})
     private final boolean operacionActiva;
+
+    private final BigDecimal sourceAccountEquityUsd;
+    private final Instant equityObservedAt;
+    private final String equitySource;
+    private final Long equityFreshnessMs;
+    private final String equityQuality;
+    private final Long sourceSnapshotVersion;
+    private final String sourceEventId;
+    private final BigDecimal sourcePositionNotionalUsd;
+    @Builder.Default
+    private final List<HyperliquidSourcePortfolioPosition> sourcePortfolioPositions = List.of();
+    private final Long sourcePortfolioSnapshotVersion;
+    private final Boolean sourcePortfolioComplete;
 }

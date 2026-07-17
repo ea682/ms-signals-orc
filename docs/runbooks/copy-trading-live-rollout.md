@@ -83,13 +83,18 @@ Validar durante al menos una ventana representativa:
 
 Solo despues de obtener `MICRO_LIVE_CANARY_READY` en el reporte actualizado.
 
-Limites esperados:
+Politica economica esperada:
 
 ```text
-COPY_MICRO_LIVE_MAX_MARGIN_PER_OPERATION_USD=20
 COPY_MICRO_LIVE_TOTAL_CAPITAL_USD=100
-COPY_MICRO_LIVE_MAX_CONCURRENT_POSITIONS=5
+COPY_MICRO_LIVE_TARGET_LEVERAGE=5
+fixedPerOperation=absent
+globalMaxPositions=absent
 ```
+
+`userMaxConcurrentPositions` solo se aplica cuando el usuario lo configuro.
+El portafolio completo se dimensiona proporcionalmente y comparte los 100 USDC
+por `user + wallet`, aun cuando existan varias estrategias.
 
 Secuencia de activacion autorizada:
 
@@ -102,8 +107,9 @@ Secuencia de activacion autorizada:
 Abortar ante cualquiera:
 
 - duplicate economic effect;
-- active+reserved > 100 por allocation;
-- open+reserved > 5;
+- active+reserved > 100 por user+wallet;
+- posiciones sobre `userMaxConcurrentPositions` cuando ese limite existe;
+- sizing fijo por orden o seleccion dependiente del orden de eventos;
 - intent sin operation/event link;
 - replay que genera segundo send;
 - ambiguity sin reserva;

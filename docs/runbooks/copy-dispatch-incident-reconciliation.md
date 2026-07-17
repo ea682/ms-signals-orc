@@ -209,14 +209,20 @@ FROM used u FULL JOIN reserved r USING (id_user, user_copy_allocation_id)
 ORDER BY total_margin_usd DESC;
 ```
 
-### Allocations MICRO_LIVE sobre 100 USDC o cinco posiciones
+### MICRO_LIVE sobre 100 USDC o sobre el limite opcional del usuario
 
 Usar la consulta anterior y filtrar:
 
 ```sql
 WHERE total_margin_usd > 100
-   OR open_positions + reserved_positions > 5
 ```
+
+La consulta base no determina por si sola una violacion de cantidad de
+posiciones. Para esa validacion, unir por `user_copy_allocation_id` con
+`user_copy_allocation` y reportar solo cuando
+`user_max_concurrent_positions IS NOT NULL` y el total abierto+reservado supera
+ese valor. Una orden sobre 20 USDC o mas de cinco posiciones no son violaciones
+V3 por si mismas.
 
 ### Reconciliaciones pendientes, incluidas LIVE
 

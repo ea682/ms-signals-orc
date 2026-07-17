@@ -12,12 +12,16 @@ import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
 import com.apunto.engine.service.copy.CopyStrategyGuardRuntimeCache;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
 import com.apunto.engine.service.copy.concurrency.PostgresDeadlockRetryExecutor;
+import com.apunto.engine.service.metric.MetricV2SnapshotStore;
+import com.apunto.engine.service.metric.MetricWalletReadMode;
+import com.apunto.engine.service.metric.MetricWalletReadModeResolver;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ErrorCode;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -61,6 +65,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
     private final double maxPerWallet;
     private final double maxCapitalToUse;
     private final boolean syncDistributionEnabled;
+    private final boolean metricV2ShadowAutoEnrollEnabled;
     private final String historySource;
     private final int joyasLimit;
     private final int joyasDayz;
@@ -91,6 +96,8 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
 
     private final LoadingCache<Integer, HistorySnapshot> allPositionHistoryCache;
     private final LoadingCache<Integer, CopyGuardWindowSnapshotIndex> copyGuardWindowSnapshotCache;
+    private MetricWalletReadModeResolver metricWalletReadModeResolver;
+    private MetricV2SnapshotStore metricV2SnapshotStore;
 
     public MetricWalletServiceImpl(
             MetricWalletsInfoClient metricWalletsInfoClient,
@@ -106,6 +113,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             @Value("${metric-wallet.allocation.max-capital-to-use:0.90}") double maxCapitalToUse,
             @Value("${metric-wallet.allocation.max-per-wallet:0.90}") double maxPerWallet,
             @Value("${metric-wallet.allocation.sync-enabled:false}") boolean syncDistributionEnabled,
+            @Value("${metric-wallet.v2.shadow-auto-enroll-enabled:false}") boolean metricV2ShadowAutoEnrollEnabled,
             @Value("${metric-wallet.history.source:joyas}") String historySource,
             @Value("${metric-wallet.joyas.limit:3}") int joyasLimit,
             @Value("${metric-wallet.joyas.dayz:30}") int joyasDayz,
@@ -145,6 +153,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         this.maxCapitalToUse = maxCapitalToUse;
         this.maxPerWallet = maxPerWallet;
         this.syncDistributionEnabled = syncDistributionEnabled;
+        this.metricV2ShadowAutoEnrollEnabled = metricV2ShadowAutoEnrollEnabled;
         this.historySource = historySource == null || historySource.isBlank() ? "joyas" : historySource.trim().toLowerCase();
         this.joyasLimit = Math.max(1, joyasLimit);
         this.joyasDayz = Math.max(0, joyasDayz);
@@ -170,9 +179,18 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         this.copyGuardWindowSnapshotCache = buildCopyGuardWindowSnapshotCache();
 
         log.info(
-                "event=metric_wallets.config historyLimit={} historySource={} joyasLimit={} joyasDayz={} joyasSimulation={} minHistoryDays={} copyGuardEnabled={} copyGuardWindows={} copyGuardAvailableWindows={} copyGuardSnapshotEnabled={} copyGuardStaleSnapshotMaxAge={} copyGuardMinWindowPnlUsdt={} copyGuardMinTotalPnlUsdt={} copyGuardPauseWindowPnlUsdt={} copyGuardPauseTotalPnlUsdt={} copyGuardRequireWindowData={} copyGuardFailOpenOnMissingMetric={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={} syncDistributionEnabled={}",
-                this.historyLimit, this.historySource, this.joyasLimit, this.joyasDayz, this.joyasSimulation, this.minHistoryDays, this.copyGuardEnabled, this.copyGuardWindows, this.copyGuardAvailableWindows, this.copyGuardSnapshotEnabled, this.copyGuardStaleSnapshotMaxAge, this.copyGuardMinWindowPnlUsdt, this.copyGuardMinTotalPnlUsdt, this.copyGuardPauseWindowPnlUsdt, this.copyGuardPauseTotalPnlUsdt, this.copyGuardRequireWindowData, this.copyGuardFailOpenOnMissingMetric, this.cacheMaxSize, this.cacheRefreshAfter, this.cacheExpireAfter, this.slowThreshold, this.syncDistributionEnabled
+                "event=metric_wallets.config historyLimit={} historySource={} joyasLimit={} joyasDayz={} joyasSimulation={} minHistoryDays={} copyGuardEnabled={} copyGuardWindows={} copyGuardAvailableWindows={} copyGuardSnapshotEnabled={} copyGuardStaleSnapshotMaxAge={} copyGuardMinWindowPnlUsdt={} copyGuardMinTotalPnlUsdt={} copyGuardPauseWindowPnlUsdt={} copyGuardPauseTotalPnlUsdt={} copyGuardRequireWindowData={} copyGuardFailOpenOnMissingMetric={} cacheMaxSize={} refreshAfter={} expireAfter={} slowThreshold={} syncDistributionEnabled={} metricV2ShadowAutoEnrollEnabled={}",
+                this.historyLimit, this.historySource, this.joyasLimit, this.joyasDayz, this.joyasSimulation, this.minHistoryDays, this.copyGuardEnabled, this.copyGuardWindows, this.copyGuardAvailableWindows, this.copyGuardSnapshotEnabled, this.copyGuardStaleSnapshotMaxAge, this.copyGuardMinWindowPnlUsdt, this.copyGuardMinTotalPnlUsdt, this.copyGuardPauseWindowPnlUsdt, this.copyGuardPauseTotalPnlUsdt, this.copyGuardRequireWindowData, this.copyGuardFailOpenOnMissingMetric, this.cacheMaxSize, this.cacheRefreshAfter, this.cacheExpireAfter, this.slowThreshold, this.syncDistributionEnabled, this.metricV2ShadowAutoEnrollEnabled
         );
+    }
+
+    @Autowired
+    void configureMetricV2ReadPath(
+            MetricWalletReadModeResolver metricWalletReadModeResolver,
+            MetricV2SnapshotStore metricV2SnapshotStore
+    ) {
+        this.metricWalletReadModeResolver = Objects.requireNonNull(metricWalletReadModeResolver, "metricWalletReadModeResolver");
+        this.metricV2SnapshotStore = Objects.requireNonNull(metricV2SnapshotStore, "metricV2SnapshotStore");
     }
 
     private String normalizeJoyasDiscoverySimulation(String raw) {
@@ -256,7 +274,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
                             ? historyIndex.findByWallet(walletId)
                             : historyIndex.findByAllocationKey(allocationKey);
                     if (cached != null) {
-                        final CopyStrategyGuardDecision guardDecision = evaluateCopyGuard(cached);
+                        final CopyStrategyGuardDecision guardDecision = evaluateAllocationGuard(a, cached);
                         if (!guardDecision.allowed()) {
                             log.warn(
                                     "event=metric_wallets.candidates.skip_allocation userId={} wallet={} strategy={} reason={} detail={} allocationPct={} historySource={}",
@@ -379,13 +397,26 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             return List.of();
         }
 
-        HistorySnapshot history = allPositionHistoryCache.getIfPresent(historyLimit);
-        String source = "cache_if_present";
-        if (history == null || history.isEmpty()) {
-            history = lastKnownGoodHistory.get();
-            source = "last_known_good";
+        HistorySnapshot history;
+        String source;
+        if (v2ReadMode()) {
+            List<MetricaWalletDto> values = metricV2SnapshotStore == null
+                    ? List.of()
+                    : metricV2SnapshotStore.fullShadowCandidatesCachedOnly();
+            history = values.isEmpty()
+                    ? HistorySnapshot.empty()
+                    : HistorySnapshot.from(values, copyStrategyRuntimeRouter);
+            source = "metric_v2_full_cache";
+        } else {
+            history = allPositionHistoryCache.getIfPresent(historyLimit);
+            source = "cache_if_present";
+            if (history == null || history.isEmpty()) {
+                history = lastKnownGoodHistory.get();
+                source = "last_known_good";
+            }
         }
-        if (history == null || history.isEmpty() || history.isStale(cacheExpireAfter, Instant.now())) {
+        if (history == null || history.isEmpty()
+                || (!v2ReadMode() && history.isStale(cacheExpireAfter, Instant.now()))) {
             log.warn("event=metric_wallets.runtime_candidates.unavailable reasonCode=METRIC_SNAPSHOT_MISSING_OR_STALE decision=FAIL_CLOSED cacheSource={} hotPathRemoteCall=false",
                     source);
             return List.of();
@@ -418,7 +449,7 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             return null;
         }
 
-        final CopyStrategyGuardDecision guardDecision = evaluateCopyGuard(cached);
+        final CopyStrategyGuardDecision guardDecision = evaluateAllocationGuard(allocation, cached);
         if (!guardDecision.allowed()) {
             log.warn("event=metric_wallets.runtime_candidates.skip reasonCode={} action={} strategy={} decision=FAIL_CLOSED",
                     guardDecision.reason(), guardDecision.action(), copyStrategyRuntimeRouter.strategyCodeOf(allocation));
@@ -444,6 +475,27 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         return out;
     }
 
+    private CopyStrategyGuardDecision evaluateAllocationGuard(
+            UserCopyAllocationEntity allocation,
+            MetricaWalletDto metric
+    ) {
+        if (v2ReadMode()) {
+            if (allocation == null || metricV2SnapshotStore == null) {
+                return CopyStrategyGuardDecision.blocked(
+                        "METRIC_V2_CACHE_MISSING",
+                        "allocation or metricV2SnapshotStore is unavailable"
+                );
+            }
+            return metricV2SnapshotStore.evaluate(
+                    allocation.getWalletId(),
+                    allocation.getCopyStrategyCode(),
+                    allocation.getScopeType(),
+                    allocation.getScopeValue()
+            );
+        }
+        return evaluateCopyGuard(metric);
+    }
+
 
     @Override
     public boolean isCopyStrategyHealthyForCopy(String walletId, String strategyCode) {
@@ -453,6 +505,11 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
 
     @Override
     public CopyStrategyGuardDecision evaluateCopyStrategyForCopy(String walletId, String strategyCode) {
+        if (v2ReadMode()) {
+            return metricV2SnapshotStore == null
+                    ? CopyStrategyGuardDecision.blocked("METRIC_V2_CACHE_MISSING", "metricV2SnapshotStore is unavailable")
+                    : metricV2SnapshotStore.evaluateByWalletStrategy(walletId, strategyCode);
+        }
         if (!copyGuardEnabled) {
             return CopyStrategyGuardDecision.allow();
         }
@@ -512,6 +569,11 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             String scopeType,
             String scopeValue
     ) {
+        if (v2ReadMode()) {
+            return metricV2SnapshotStore == null
+                    ? CopyStrategyGuardDecision.blocked("METRIC_V2_CACHE_MISSING", "metricV2SnapshotStore is unavailable")
+                    : metricV2SnapshotStore.evaluate(walletId, strategyCode, scopeType, scopeValue);
+        }
         if (!copyGuardEnabled) {
             return CopyStrategyGuardDecision.allow();
         }
@@ -561,10 +623,30 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         return t.toLowerCase();
     }
 
+    private boolean v2ReadMode() {
+        return metricWalletReadModeResolver != null
+                && metricWalletReadModeResolver.effectiveMode() == MetricWalletReadMode.V2;
+    }
+
+    private boolean readsOrComparesV2() {
+        return metricWalletReadModeResolver != null
+                && metricWalletReadModeResolver.effectiveMode() != MetricWalletReadMode.V1;
+    }
+
     public List<MetricaWalletDto> getMetricWallets(double maxCapitalToUse, double maxPerWallet) {
         final long startNs = System.nanoTime();
 
         validateAllocationInputs(maxCapitalToUse, maxPerWallet);
+
+        if (v2ReadMode()) {
+            List<MetricaWalletDto> candidates = metricV2SnapshotStore == null
+                    ? new ArrayList<>()
+                    : new ArrayList<>(metricV2SnapshotStore.fullShadowCandidatesCachedOnly());
+            CapitalAllocator.allocate(candidates, maxCapitalToUse, maxPerWallet);
+            validateLimits(candidates, maxPerWallet, maxCapitalToUse);
+            syncDistributionIfEnabled(candidates, candidates, "metric_v2_full_cache");
+            return List.copyOf(candidates);
+        }
 
         HistoryResult history = getHistory(historyLimit);
 
@@ -590,7 +672,20 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
             log.debug("event=user_copy_allocation.sync_skipped reason=external_allocator_enabled source={}", historySource);
             return;
         }
-        if (!"cache".equals(historySource)) {
+        boolean metricV2Source = historySource != null && historySource.startsWith("metric_v2_");
+        if (metricV2Source && !metricV2ShadowAutoEnrollEnabled) {
+            log.info("event=user_copy_allocation.sync_skipped reason=metric_v2_shadow_auto_enroll_disabled source={}", historySource);
+            return;
+        }
+        if (metricV2Source && !"metric_v2_full_cache".equals(historySource)) {
+            log.warn("event=user_copy_allocation.sync_skipped reason=metric_v2_full_decision_required source={}", historySource);
+            return;
+        }
+        if (metricV2Source && (shadowCandidates == null || shadowCandidates.isEmpty())) {
+            log.warn("event=user_copy_allocation.sync_skipped reason=metric_v2_empty_full_cache source={} distributionInvalidated=false", historySource);
+            return;
+        }
+        if (!metricV2Source && !"cache".equals(historySource)) {
             log.warn("event=user_copy_allocation.sync_skipped reason=non_fresh_history source={}", historySource);
             return;
         }
@@ -608,6 +703,14 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
     @EventListener(ApplicationReadyEvent.class)
     public void primeHistoryCache() {
         try {
+            if (readsOrComparesV2() && metricV2SnapshotStore != null) {
+                metricV2SnapshotStore.refreshNow();
+            }
+            if (v2ReadMode()) {
+                log.info("event=metric_wallets.cache_primed source=metric_v2 fullCandidates={}",
+                        metricV2SnapshotStore == null ? 0 : metricV2SnapshotStore.fullShadowCandidatesCachedOnly().size());
+                return;
+            }
             HistorySnapshot snapshot = allPositionHistoryCache.get(historyLimit);
             CopyGuardWindowSnapshotIndex guardSnapshot = copyGuardSnapshotEnabled
                     ? copyGuardWindowSnapshotCache.get(historyLimit)
@@ -625,9 +728,16 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
         }
     }
 
-    @Scheduled(fixedDelayString = "${metric-wallet.history.cache.refresh-job:5m}")
+    @Scheduled(fixedDelayString = "${metric-wallet.v2.summary-refresh-after:${metric-wallet.history.cache.refresh-job:PT2M}}")
     public void refreshHistoryCacheJob() {
         try {
+            if (readsOrComparesV2() && metricV2SnapshotStore != null) {
+                metricV2SnapshotStore.refreshNow();
+            }
+            if (v2ReadMode()) {
+                log.debug("event=metric_wallets.cache_refresh_triggered source=metric_v2");
+                return;
+            }
             allPositionHistoryCache.refresh(historyLimit);
             if (copyGuardSnapshotEnabled) {
                 copyGuardWindowSnapshotCache.refresh(historyLimit);
@@ -845,6 +955,18 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
     }
 
     private HistoryResult getHistory(int limit) {
+        if (v2ReadMode()) {
+            List<MetricaWalletDto> values = metricV2SnapshotStore == null
+                    ? List.of()
+                    : metricV2SnapshotStore.fullShadowCandidatesCachedOnly();
+            HistorySnapshot snapshot = values.isEmpty()
+                    ? HistorySnapshot.empty()
+                    : HistorySnapshot.from(values, copyStrategyRuntimeRouter);
+            return new HistoryResult(
+                    snapshot,
+                    values.isEmpty() ? "metric_v2_empty" : "metric_v2_full_cache"
+            );
+        }
         try {
             HistorySnapshot snapshot = Optional.ofNullable(allPositionHistoryCache.get(limit)).orElse(HistorySnapshot.empty());
             if (!snapshot.isEmpty()) return new HistoryResult(snapshot, "cache");
@@ -894,6 +1016,16 @@ public class MetricWalletServiceImpl implements MetricWalletService, CopyStrateg
 
 
     private boolean passesCopySimulationGuard(MetricaWalletDto dto) {
+        if (v2ReadMode()) {
+            if (dto == null || metricV2SnapshotStore == null) return false;
+            String strategyCode = copyStrategyRuntimeRouter.strategyCodeOf(dto);
+            return metricV2SnapshotStore.evaluate(
+                    dto.getWallet() == null ? null : dto.getWallet().getIdWallet(),
+                    strategyCode,
+                    scopeTypeFromMetric(dto),
+                    scopeValueFromMetric(dto, strategyCode)
+            ).allowed();
+        }
         CopyStrategyGuardDecision decision = evaluateCopyGuard(dto);
         if (!decision.allowed()) {
             log.info(

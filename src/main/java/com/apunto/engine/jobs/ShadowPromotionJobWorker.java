@@ -16,7 +16,7 @@ public class ShadowPromotionJobWorker {
 
     private final ShadowPromotionService shadowPromotionService;
 
-    @Value("${copy.promotion.job.enabled:true}")
+    @Value("${copy.promotion.job.enabled:false}")
     private boolean enabled;
 
     @Scheduled(

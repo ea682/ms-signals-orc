@@ -55,6 +55,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class MicroLivePromotionServiceImplTest {
 
     @Test
+    void legacyBulkPromotionCannotCreateLiveWhenManualCertificationIsRequired() {
+        UserCopyAllocationEntity allocation = microLiveAllocation();
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        LivePromotionProperties properties = properties();
+        properties.setManualCertificationRequired(true);
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                allocationRepository(allocation, saved),
+                evidenceRepository(12L, 12L, 12L, 0L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits), properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations());
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(0, result.promoted());
+        assertTrue(allocation.isActive());
+        assertEquals("MICRO_LIVE", allocation.getExecutionMode());
+    }
+
+    @Test
     void genericRuntimeEventsCannotPromoteWhenNoOrderWasActuallySubmitted() {
         UserCopyAllocationEntity allocation = microLiveAllocation();
         AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
@@ -559,6 +581,7 @@ class MicroLivePromotionServiceImplTest {
     private static LivePromotionProperties properties() {
         LivePromotionProperties properties = new LivePromotionProperties();
         properties.setEnabled(true);
+        properties.setManualCertificationRequired(false);
         properties.setMinMicroDays(7);
         properties.setMinMicroOrders(2);
         properties.setMinSubmittedOrders(2);

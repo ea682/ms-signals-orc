@@ -8,4 +8,8 @@ public interface CopyOperationEventService {
     void record(CopyOperationEventRecordCommand command);
 
     UUID recordRequired(CopyOperationEventRecordCommand command);
+
+    UUID recordReconciliationRequired(CopyOperationEventRecordCommand command);
+
+    String findEventType(UUID eventId);
 }

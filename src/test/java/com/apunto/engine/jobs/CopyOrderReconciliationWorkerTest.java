@@ -188,6 +188,8 @@ class CopyOrderReconciliationWorkerTest {
             if ("bad".equals(dto.getClientOrderId())) throw new IllegalStateException("lookup failed");
             return Optional.of(response(dto, null));
         }
+        @Override public List<com.apunto.engine.dto.client.BinanceFuturesPositionClientDto> getPositions(
+                String apiKey, String secret, String traceId) { return List.of(); }
         private BinanceFuturesOrderClientResponse response(OperationDto dto, String forcedStatus) {
             BinanceFuturesOrderClientResponse response = new BinanceFuturesOrderClientResponse();
             response.setOrderId(77L);

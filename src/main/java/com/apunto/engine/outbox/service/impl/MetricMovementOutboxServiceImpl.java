@@ -168,8 +168,8 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
     }
 
     private List<String> lifecycleQualityFlags(OperationMovementEventEntity entity) {
-        if (entity != null && entity.getLifecycleQualityFlags() != null && !entity.getLifecycleQualityFlags().isEmpty()) {
-            return List.copyOf(entity.getLifecycleQualityFlags());
+        if (entity != null && entity.getLifecycleQualityFlags() != null && entity.getLifecycleQualityFlags().length > 0) {
+            return List.copyOf(java.util.Arrays.asList(entity.getLifecycleQualityFlags()));
         }
         List<String> flags = new ArrayList<>();
         String normalization = upper(entity == null ? null : entity.getNormalizationStatus());

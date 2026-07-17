@@ -1,5 +1,6 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.entity.CopyPromotionAuditEntity;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
@@ -105,6 +106,10 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
     public LivePromotionResult promoteMicroLiveToLive() {
         if (properties == null || !properties.isEnabled()) {
             log.info("event=copy.promotion.micro_to_live.skipped reason=PROMOTION_DISABLED");
+            return LivePromotionResult.empty();
+        }
+        if (properties.isManualCertificationRequired()) {
+            log.warn("event=copy.promotion.micro_to_live.skipped decision=BLOCK reasonCode=LIVE_MANUAL_CERTIFICATION_REQUIRED copyImpact=no_live_allocation_created");
             return LivePromotionResult.empty();
         }
 
@@ -457,13 +462,12 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
     }
 
     private static String profileKey(UserCopyAllocationEntity allocation) {
-        if (allocation.getStrategyKey() != null && !allocation.getStrategyKey().isBlank()) {
-            return allocation.getStrategyKey().trim();
-        }
-        return normalizeWallet(allocation.getWalletId()) + "|"
-                + normalizeStrategy(allocation.getCopyStrategyCode()) + "|"
-                + normalizeScopeType(allocation.getScopeType()) + "|"
-                + normalizeScopeValue(allocation.getScopeValue(), allocation.getCopyStrategyCode());
+        return MetricStrategyIdentity.canonicalKey(
+                allocation.getWalletId(),
+                allocation.getCopyStrategyCode(),
+                allocation.getScopeType(),
+                allocation.getScopeValue()
+        );
     }
 
     private UserCopyAllocationEntity liveFromMicro(
@@ -1052,13 +1056,12 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
     }
 
     private static String normalizeScopeType(String value) {
-        if (value == null || value.isBlank()) return "strategy";
-        return value.trim().toLowerCase(Locale.ROOT);
+        if (value == null || value.isBlank()) return "ALL";
+        return value.trim().toUpperCase(Locale.ROOT);
     }
 
     private static String normalizeScopeValue(String value, String strategy) {
-        if (value == null || value.isBlank()) return normalizeStrategy(strategy);
-        return value.trim();
+        return MetricStrategyIdentity.scopeValue(value, strategy);
     }
 
     private static String normalizeToken(String value) {

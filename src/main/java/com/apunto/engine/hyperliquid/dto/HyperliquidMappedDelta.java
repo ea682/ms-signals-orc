@@ -39,6 +39,17 @@ public record HyperliquidMappedDelta(
                 .fechaCreacion(source.getFechaCreacion())
                 .fechaCierre(source.getFechaCierre())
                 .operacionActiva(source.isOperacionActiva())
+                .sourceAccountEquityUsd(source.getSourceAccountEquityUsd())
+                .equityObservedAt(source.getEquityObservedAt())
+                .equitySource(source.getEquitySource())
+                .equityFreshnessMs(source.getEquityFreshnessMs())
+                .equityQuality(source.getEquityQuality())
+                .sourceSnapshotVersion(source.getSourceSnapshotVersion())
+                .sourceEventId(source.getSourceEventId())
+                .sourcePositionNotionalUsd(source.getSourcePositionNotionalUsd())
+                .sourcePortfolioPositions(source.getSourcePortfolioPositions())
+                .sourcePortfolioSnapshotVersion(source.getSourcePortfolioSnapshotVersion())
+                .sourcePortfolioComplete(source.getSourcePortfolioComplete())
                 .build();
         return new HyperliquidMappedDelta(
                 idempotencyKey,

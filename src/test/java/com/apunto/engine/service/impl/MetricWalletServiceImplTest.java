@@ -2,6 +2,7 @@ package com.apunto.engine.service.impl;
 import com.apunto.engine.client.MetricWalletsInfoClient;
 import com.apunto.engine.dto.client.CopyDecisionDto;
 import com.apunto.engine.dto.client.CopyGuardWindowSnapshotDto;
+import com.apunto.engine.dto.client.MetricStrategySnapshotDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.service.UserCopyAllocationService;
@@ -604,6 +605,42 @@ class MetricWalletServiceImplTest {
         assertEquals("STALE_COPY_GUARD_SNAPSHOT", decision.reason());
     }
 
+    @Test
+    void shouldKeepMetricV2ShadowAutoEnrollDisabledByDefault() throws Exception {
+        CountingAllocationService allocations = new CountingAllocationService();
+        MetricWalletServiceImpl service = service(
+                new FakeMetricClient(), allocations, 3, 30, "summary", false, true, false
+        );
+
+        invokeSyncDistribution(service, List.of(metricForHistory("0xabc")), "metric_v2_full_cache");
+
+        assertEquals(0, allocations.syncCalls);
+    }
+
+    @Test
+    void shouldAllowMetricV2ShadowAutoEnrollOnlyWhenExplicitlyEnabled() throws Exception {
+        CountingAllocationService allocations = new CountingAllocationService();
+        MetricWalletServiceImpl service = service(
+                new FakeMetricClient(), allocations, 3, 30, "summary", false, true, true
+        );
+
+        invokeSyncDistribution(service, List.of(metricForHistory("0xabc")), "metric_v2_full_cache");
+
+        assertEquals(1, allocations.syncCalls);
+    }
+
+    @Test
+    void shouldNotInvalidateAllocationsWhenMetricV2FullCacheIsEmpty() throws Exception {
+        CountingAllocationService allocations = new CountingAllocationService();
+        MetricWalletServiceImpl service = service(
+                new FakeMetricClient(), allocations, 3, 30, "summary", false, true, true
+        );
+
+        invokeSyncDistribution(service, List.of(), "metric_v2_full_cache");
+
+        assertEquals(0, allocations.syncCalls);
+    }
+
     private static MetricWalletServiceImpl service() {
         return service(new FakeMetricClient(), 3, 30, "summary");
     }
@@ -622,6 +659,17 @@ class MetricWalletServiceImplTest {
                                                    int joyasDayz,
                                                    String joyasSimulation,
                                                    boolean requireWindowData) {
+        return service(client, allocationService, joyasLimit, joyasDayz, joyasSimulation, requireWindowData, false, false);
+    }
+
+    private static MetricWalletServiceImpl service(MetricWalletsInfoClient client,
+                                                   UserCopyAllocationService allocationService,
+                                                   int joyasLimit,
+                                                   int joyasDayz,
+                                                   String joyasSimulation,
+                                                   boolean requireWindowData,
+                                                   boolean syncDistributionEnabled,
+                                                   boolean metricV2ShadowAutoEnrollEnabled) {
         return new MetricWalletServiceImpl(
                 client,
                 allocationService,
@@ -635,7 +683,8 @@ class MetricWalletServiceImplTest {
                 Duration.ofMillis(250),
                 0.90,
                 0.90,
-                false,
+                syncDistributionEnabled,
+                metricV2ShadowAutoEnrollEnabled,
                 "joyas",
                 joyasLimit,
                 joyasDayz,
@@ -655,6 +704,16 @@ class MetricWalletServiceImplTest {
                 true,
                 Duration.ofMinutes(10)
         );
+    }
+
+    private static void invokeSyncDistribution(MetricWalletServiceImpl service,
+                                               List<MetricaWalletDto> candidates,
+                                               String source) throws Exception {
+        Method method = MetricWalletServiceImpl.class.getDeclaredMethod(
+                "syncDistributionIfEnabled", List.class, List.class, String.class
+        );
+        method.setAccessible(true);
+        method.invoke(service, candidates, candidates, source);
     }
 
     private static Object loadSnapshot(MetricWalletServiceImpl service, Integer limit, Integer dayz) throws Exception {
@@ -824,12 +883,27 @@ class MetricWalletServiceImplTest {
         }
 
         @Override
+        public List<MetricStrategySnapshotDto> metricStrategySnapshots(int limit, int dayz, String simulation) {
+            return List.of();
+        }
+
+        @Override
         public List<CopyGuardWindowSnapshotDto> copyGuardWindows(int limit, int dayz, String mode, String windows) {
             return List.of();
         }
 
         @Override
+        public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindows(int limit, int dayz, String mode, String windows) {
+            return List.of();
+        }
+
+        @Override
         public CopyDecisionDto copyDecision(String walletId, String strategyCode, String scopeType, String scopeValue, String mode, String simulation, int minHistoryDays, int simulationLookbackDays, int maxFactsPerUnit, int timeoutMs, boolean debug) {
+            return null;
+        }
+
+        @Override
+        public MetricStrategySnapshotDto metricStrategyDecision(String walletId, String strategyCode, String scopeType, String scopeValue, String mode, String simulation, int minHistoryDays, int simulationLookbackDays, int maxFactsPerUnit, int timeoutMs, boolean debug) {
             return null;
         }
     }
@@ -869,6 +943,11 @@ class MetricWalletServiceImplTest {
         }
 
         @Override
+        public List<MetricStrategySnapshotDto> metricStrategySnapshots(int limit, int dayz, String simulation) {
+            return List.of();
+        }
+
+        @Override
         public List<CopyGuardWindowSnapshotDto> copyGuardWindows(int limit, int dayz, String mode, String windows) {
             copyGuardWindowsCalls++;
             lastLimit = limit;
@@ -879,7 +958,17 @@ class MetricWalletServiceImplTest {
         }
 
         @Override
+        public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindows(int limit, int dayz, String mode, String windows) {
+            return List.of();
+        }
+
+        @Override
         public CopyDecisionDto copyDecision(String walletId, String strategyCode, String scopeType, String scopeValue, String mode, String simulation, int minHistoryDays, int simulationLookbackDays, int maxFactsPerUnit, int timeoutMs, boolean debug) {
+            return null;
+        }
+
+        @Override
+        public MetricStrategySnapshotDto metricStrategyDecision(String walletId, String strategyCode, String scopeType, String scopeValue, String mode, String simulation, int minHistoryDays, int simulationLookbackDays, int maxFactsPerUnit, int timeoutMs, boolean debug) {
             return null;
         }
     }
@@ -915,6 +1004,15 @@ class MetricWalletServiceImplTest {
         @Override public Optional<UserCopyAllocationEntity> findActiveAllocation(UUID idUser, String walletId, String strategyCode) { return Optional.empty(); }
         @Override public Optional<UserCopyAllocationEntity> findOpenAllocation(UUID idUser, String walletId, String strategyCode) { return Optional.empty(); }
         @Override public void markGuardBlocked(UUID idUser, String walletId, String strategyCode, String targetStatus, String reason, OffsetDateTime cooldownUntil) {}
+    }
+
+    private static final class CountingAllocationService extends FakeAllocationService {
+        private int syncCalls;
+
+        @Override
+        public void syncDistribution(List<MetricaWalletDto> candidates) {
+            syncCalls++;
+        }
     }
 
     private static final class CacheOnlyAllocationService extends FakeAllocationService {

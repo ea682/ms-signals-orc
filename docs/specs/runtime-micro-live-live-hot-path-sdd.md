@@ -1,4 +1,10 @@
-# SDD - Runtime MICRO_LIVE/LIVE Hot Path
+# SDD - Runtime MICRO_LIVE/LIVE Hot Path (V2, Superseded)
+
+> Superseded on 2026-07-13 by
+> `copy-trading-proportional-portfolio-v3-sdd.md`. In particular, the fixed
+> USD 20 per-operation budget, global five-position limit, source-margin
+> exposure formula and USD 1,000 equity fallback below are historical rules
+> and MUST NOT be used by V3 runtime.
 
 ## Problema
 

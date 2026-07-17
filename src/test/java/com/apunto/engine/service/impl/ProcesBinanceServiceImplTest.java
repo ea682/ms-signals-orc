@@ -4,7 +4,9 @@ import com.apunto.engine.client.BinanceClient;
 import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.dto.client.BinanceFuturesMarketPriceClientDto;
 import com.apunto.engine.dto.client.BinanceFuturesOrderClientResponse;
+import com.apunto.engine.dto.client.BinanceFuturesPositionClientDto;
 import com.apunto.engine.dto.client.BinanceFuturesSymbolInfoClientDto;
+import com.apunto.engine.dto.client.BinanceOrderBookSnapshotClientDto;
 import com.apunto.engine.dto.client.CloseOperationClientRequest;
 import com.apunto.engine.dto.client.FuturesAssetBalanceClientResponse;
 import com.apunto.engine.dto.client.FuturesConvertToBnbClientRequest;
@@ -121,6 +123,27 @@ class ProcesBinanceServiceImplTest {
         assertNull(client.lastSymbolsApiKey);
         assertEquals(1, symbols.size());
         assertEquals("BTCUSDT", symbols.get(0).getSymbol());
+    }
+
+    @Test
+    void authoritativePositionsPreserveSignedQuantityAndPositionSide() {
+        CapturingBinanceClient client = new CapturingBinanceClient();
+        CapturingBinanceClient closeClient = new CapturingBinanceClient();
+        BinanceFuturesPositionClientDto position = new BinanceFuturesPositionClientDto();
+        position.setSymbol("BTCUSDT");
+        position.setPositionAmt("-0.125");
+        position.setPositionSide("SHORT");
+        position.setMarkPrice("65000");
+        client.positionsResponse = List.of(position);
+        ProcesBinanceServiceImpl service = new ProcesBinanceServiceImpl(client, closeClient, new ObjectMapper());
+
+        List<BinanceFuturesPositionClientDto> result =
+                service.getPositions("api-key", "secret", "trace-position");
+
+        assertTrue(client.positionsCalled);
+        assertEquals("trace-position", client.positionsTraceId);
+        assertEquals("-0.125", result.getFirst().getPositionAmt());
+        assertEquals("SHORT", result.getFirst().getPositionSide());
     }
 
     @Test
@@ -259,6 +282,9 @@ class ProcesBinanceServiceImplTest {
         private BinanceFuturesOrderClientResponse lookupResponse;
         private boolean orderIdLookupCalled;
         private Long lastLookupOrderId;
+        private boolean positionsCalled;
+        private String positionsTraceId;
+        private List<BinanceFuturesPositionClientDto> positionsResponse = List.of();
 
         @Override
         public ApiResponse<BinanceFuturesOrderClientResponse> openPosition(
@@ -373,6 +399,25 @@ class ProcesBinanceServiceImplTest {
                     .statusCode(200)
                     .data(price)
                     .build();
+        }
+
+        @Override
+        public ApiResponse<List<BinanceFuturesPositionClientDto>> positions(
+                String apiKey,
+                String secret,
+                String traceId
+        ) {
+            this.positionsCalled = true;
+            this.positionsTraceId = traceId;
+            return ApiResponse.<List<BinanceFuturesPositionClientDto>>builder()
+                    .statusCode(200)
+                    .data(positionsResponse)
+                    .build();
+        }
+
+        @Override
+        public ApiResponse<BinanceOrderBookSnapshotClientDto> orderBook(String symbol, int limit) {
+            throw new UnsupportedOperationException("not used");
         }
 
         @Override

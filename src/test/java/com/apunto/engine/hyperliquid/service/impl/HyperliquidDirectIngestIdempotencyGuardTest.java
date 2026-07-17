@@ -44,6 +44,19 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
     }
 
     @Test
+    void sameSourceIdentityWithReplicaDerivedPayloadDifferenceIsAcknowledgedAsDuplicate() {
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestIdempotencyGuard guard = guard(jdbc, registry, false);
+        HyperliquidMappedDelta delta = delta("same-source-key", "BTCUSDT");
+
+        assertTrue(guard.tryAcquire(delta, "replica-a-derived-state"));
+        assertFalse(guard.tryAcquire(delta, "replica-b-derived-state"));
+        assertEquals(1.0d, registry.find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
+                .tag("result", "replica_payload_divergence").counter().count());
+    }
+
+    @Test
     void expiredOrFailedLeaseCanBeReacquiredOnlyForSamePayload() {
         FakeJdbcTemplate jdbc = new FakeJdbcTemplate(2L);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
@@ -122,6 +135,9 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
         private final List<Long> acquireResults = new ArrayList<>();
         private int acquireIndex;
         private String storedFingerprint;
+        private String storedWallet;
+        private String storedSymbol;
+        private Long storedSourceTs;
         private String acquireSql;
         private RuntimeException failure;
 
@@ -136,6 +152,9 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
             long result = acquireIndex < acquireResults.size() ? acquireResults.get(acquireIndex++) : 0L;
             if (result > 0L && storedFingerprint == null && args != null && args.length > 8) {
                 storedFingerprint = String.valueOf(args[8]);
+                storedWallet = String.valueOf(args[3]);
+                storedSymbol = String.valueOf(args[4]);
+                storedSourceTs = args[7] instanceof Number number ? number.longValue() : null;
             }
             return requiredType.cast(result);
         }
@@ -146,9 +165,12 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
             try {
                 Class<?> claimType = Class.forName(
                         HyperliquidDirectIngestIdempotencyGuard.class.getName() + "$ExistingClaim");
-                Constructor<?> constructor = claimType.getDeclaredConstructor(String.class, String.class, boolean.class);
+                Constructor<?> constructor = claimType.getDeclaredConstructor(
+                        String.class, String.class, boolean.class, String.class, String.class, Long.class);
                 constructor.setAccessible(true);
-                return List.of((T) constructor.newInstance(storedFingerprint, "PROCESSED", false));
+                return List.of((T) constructor.newInstance(
+                        storedFingerprint, "PROCESSED", false,
+                        storedWallet, storedSymbol, storedSourceTs));
             } catch (ReflectiveOperationException ex) {
                 throw new AssertionError(ex);
             }
