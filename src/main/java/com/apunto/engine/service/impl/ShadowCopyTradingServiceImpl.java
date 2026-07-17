@@ -1,5 +1,6 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.CopyWalletProfileEntity;
@@ -414,6 +415,9 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         entity.setRankWithinStrategy(rankWithinStrategy(dto));
         entity.setGlobalRank(globalRank(dto));
         entity.setStrategyScore(strategyScoreDecimal(dto));
+        if (dto.getGenerationId() != null && !dto.getGenerationId().isBlank()) {
+            entity.setMetricGenerationId(dto.getGenerationId().trim());
+        }
         entity.setDecisionScore(decisionScore(dto));
         entity.setCopyGuardStatus(copyGuardStatus(dto));
         entity.setCopyGuardAction(copyGuardAction(dto));
@@ -518,6 +522,9 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
             }
             if (live.getStrategyKey() == null || live.getStrategyKey().isBlank()) {
                 live.setStrategyKey(shadow.getStrategyKey());
+            }
+            if (live.getMetricGenerationId() == null || live.getMetricGenerationId().isBlank()) {
+                live.setMetricGenerationId(shadow.getMetricGenerationId());
             }
             if (firstPromotion) {
                 log.info("event=shadow_promoted_to_live userId={} walletId={} strategyCode={} shadowAllocationId={} liveAllocationId={} strategyKey={} reasonCode=shadow_validated_for_live copyImpact=live_open_allowed",
@@ -1053,6 +1060,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .scopeType(allocation.getScopeType())
                 .scopeValue(allocation.getScopeValue())
                 .strategyKey(allocation.getStrategyKey())
+                .metricGenerationId(allocation.getMetricGenerationId())
                 .parsymbol(op.getParSymbol())
                 .typeOperation(typeOperation)
                 .eventType(eventType)
@@ -1976,6 +1984,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 .scopeType(allocation.getScopeType())
                 .scopeValue(allocation.getScopeValue())
                 .strategyKey(allocation.getStrategyKey())
+                .metricGenerationId(allocation.getMetricGenerationId())
                 .parsymbol(op.getParSymbol())
                 .typeOperation(previousSide)
                 .eventType(eventType)
@@ -2636,7 +2645,7 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 ? dto.getWallet().getCountOperationBreakdown().getScopeType()
                 : null;
         String fromJewel = dto != null && dto.getRealJewel() != null ? dto.getRealJewel().getScopeType() : null;
-        return normalizeScopeType(firstNonBlank(fromBreakdown, fromJewel, "strategy"));
+        return MetricStrategyIdentity.scopeType(firstNonBlank(fromBreakdown, fromJewel), strategyCode(dto));
     }
 
     private String scopeValue(MetricaWalletDto dto, String strategyCode) {
@@ -2644,17 +2653,17 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
                 ? dto.getWallet().getCountOperationBreakdown().getScopeValue()
                 : null;
         String fromJewel = dto != null && dto.getRealJewel() != null ? dto.getRealJewel().getScopeValue() : null;
-        return normalizeScopeValue(firstNonBlank(fromBreakdown, fromJewel, strategyCode), strategyCode);
+        return MetricStrategyIdentity.scopeValue(firstNonBlank(fromBreakdown, fromJewel), strategyCode);
     }
 
     private static String strategyKey(String walletId, String strategyCode, String scopeType, String scopeValue) {
-        return normalizeWallet(walletId) + "|" + normalizeStrategy(strategyCode) + "|" + normalizeScopeType(scopeType) + "|" + normalizeScopeValue(scopeValue, strategyCode);
+        return MetricStrategyIdentity.canonicalKey(walletId, strategyCode, scopeType, scopeValue);
     }
 
     private static String profileConfigHash(String strategyCode, String scopeType, String scopeValue) {
         String code = normalizeStrategy(strategyCode);
         String type = normalizeScopeType(scopeType);
-        if (!"TOP_SYMBOLS_ONLY".equals(code) && !"dynamic_symbol_set".equals(type)) {
+        if (!"TOP_SYMBOLS_ONLY".equals(code) && !"DYNAMIC_SYMBOL_SET".equals(type)) {
             return null;
         }
         String canonical = canonicalSymbolSet(scopeValue);
@@ -3008,13 +3017,12 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
     }
 
     private static String normalizeScopeType(String raw) {
-        if (raw == null || raw.isBlank()) return "strategy";
-        return raw.trim().toLowerCase(Locale.ROOT);
+        if (raw == null || raw.isBlank()) return "ALL";
+        return raw.trim().toUpperCase(Locale.ROOT);
     }
 
     private static String normalizeScopeValue(String raw, String strategyCode) {
-        if (raw == null || raw.isBlank()) return strategyCode == null ? "default" : strategyCode;
-        return raw.trim();
+        return MetricStrategyIdentity.scopeValue(raw, strategyCode);
     }
 
     private static String normalizeStatus(String raw) {

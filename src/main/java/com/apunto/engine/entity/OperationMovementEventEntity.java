@@ -16,7 +16,6 @@ import org.hibernate.type.SqlTypes;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
-import java.util.List;
 import java.util.UUID;
 
 @Entity
@@ -155,9 +154,8 @@ public class OperationMovementEventEntity {
     @Column(name = "notional_basis", length = 80)
     private String notionalBasis;
 
-    @JdbcTypeCode(SqlTypes.ARRAY)
-    @Column(name = "lifecycle_quality_flags", columnDefinition = "text[]")
-    private List<String> lifecycleQualityFlags;
+    @Column(name = "lifecycle_quality_flags")
+    private String[] lifecycleQualityFlags;
 
     @Column(name = "source_estimated")
     private Boolean sourceEstimated;

@@ -7,6 +7,7 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 
 @Data
 @Builder
@@ -45,7 +46,21 @@ public class OperationDto {
     private BigDecimal requestedMarginUsd;
     private BigDecimal requestedNotionalUsd;
     private BigDecimal referencePrice;
+    private Instant sourceObservedAt;
     private Boolean reservePosition;
+
+    /** Exact V3 LIVE certification context. It is metadata and is not forwarded to Binance. */
+    private BigDecimal targetAllocatedCapitalUsd;
+    private BigDecimal targetLeverage;
+    private String exchange;
+    private String quoteAsset;
+    private String strategyVersion;
+    private String sizingPolicyVersion;
+    private String symbolMappingVersion;
+    private String feeModelVersion;
+    private String fundingModelVersion;
+    private String slippageModelVersion;
+    private String liquidityModelVersion;
 
     private String apiKey;
     private String secret;

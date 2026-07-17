@@ -23,14 +23,16 @@ public class HyperliquidDeltaOperacionMapper {
             throw new IllegalArgumentException("Hyperliquid delta request is required");
         }
 
-        final String idempotencyKey = firstNonBlank(headerIdempotencyKey, request.idempotencyKey());
-        if (idempotencyKey == null) {
+        final String suppliedIdempotencyKey = firstNonBlank(headerIdempotencyKey, request.idempotencyKey());
+        if (suppliedIdempotencyKey == null) {
             throw new IllegalArgumentException("X-Idempotency-Key or idempotencyKey is required");
         }
 
         final String wallet = requireText(request.wallet(), "wallet is required").toLowerCase(Locale.ROOT);
         final String rawSymbol = requireText(request.symbol(), "symbol is required");
         final String symbol = toEngineSymbol(rawSymbol);
+        final String idempotencyKey = canonicalIdempotencyKey(
+                request, suppliedIdempotencyKey, wallet, symbol);
         final PositionSide side = mapSide(request.side());
         final String deltaType = requireText(request.deltaType(), "deltaType is required").toUpperCase(Locale.ROOT);
         final OperacionEvent.Tipo eventType = mapEventType(deltaType, request.status(), request.sizeQty());
@@ -60,6 +62,17 @@ public class HyperliquidDeltaOperacionMapper {
                 .fechaCreacion(eventTime)
                 .fechaCierre(active ? null : eventTime)
                 .operacionActiva(active)
+                .sourceAccountEquityUsd(request.sourceAccountEquityUsd())
+                .equityObservedAt(request.equityObservedAt())
+                .equitySource(request.equitySource())
+                .equityFreshnessMs(request.equityFreshnessMs())
+                .equityQuality(request.equityQuality())
+                .sourceSnapshotVersion(request.sourceSnapshotVersion())
+                .sourceEventId(request.sourceEventId())
+                .sourcePositionNotionalUsd(request.sourcePositionNotionalUsd())
+                .sourcePortfolioPositions(request.sourcePortfolioPositions())
+                .sourcePortfolioSnapshotVersion(request.sourcePortfolioSnapshotVersion())
+                .sourcePortfolioComplete(request.sourcePortfolioComplete())
                 .build();
 
         return new HyperliquidMappedDelta(
@@ -72,6 +85,38 @@ public class HyperliquidDeltaOperacionMapper {
                 new OperacionEvent(eventType, operacion, deltaType, idempotencyKey, positionKey(wallet, symbol, side.name())),
                 request
         );
+    }
+
+    private String canonicalIdempotencyKey(HyperliquidDeltaRequest request,
+                                           String supplied,
+                                           String wallet,
+                                           String symbol) {
+        String externalId = request.externalId();
+        if (externalId == null || externalId.isBlank()) {
+            return supplied;
+        }
+        String cleanExternalId = externalId.trim();
+        if (cleanExternalId.startsWith("snapshot-recovery-open|")) {
+            return "hyperliquid:recovery:" + wallet + ':' + symbol.toUpperCase(Locale.ROOT)
+                    + ':' + cleanExternalId;
+        }
+        String[] parts = cleanExternalId.split("\\|", 4);
+        if (parts.length != 4
+                || !parts[0].equalsIgnoreCase(wallet)
+                || !toEngineSymbol(parts[1]).equalsIgnoreCase(symbol)
+                || !isSourceDeltaType(parts[2])) {
+            return supplied;
+        }
+        return "hyperliquid:trade:" + wallet + ':' + symbol.toUpperCase(Locale.ROOT)
+                + ':' + parts[3].trim();
+    }
+
+    private boolean isSourceDeltaType(String value) {
+        if (value == null || value.isBlank()) return false;
+        return switch (value.trim().toUpperCase(Locale.ROOT)) {
+            case "OPEN", "CLOSE", "RESIZE", "FLIP", "UPDATE", "NO_CHANGE" -> true;
+            default -> false;
+        };
     }
 
     private OperacionEvent.Tipo mapEventType(String deltaType, String status, BigDecimal sizeQty) {

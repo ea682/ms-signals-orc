@@ -1,5 +1,6 @@
 package com.apunto.engine.entity;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
@@ -64,6 +65,9 @@ public class ShadowCopyOperationEventEntity {
 
     @Column(name = "strategy_key", nullable = false, length = 420)
     private String strategyKey;
+
+    @Column(name = "metric_generation_id", length = 80)
+    private String metricGenerationId;
 
     @Column(name = "parsymbol", nullable = false, length = 40)
     private String parsymbol;
@@ -142,8 +146,9 @@ public class ShadowCopyOperationEventEntity {
         if (dateCreation == null) dateCreation = now;
         if (feeUsd == null) feeUsd = BigDecimal.ZERO;
         if (slippageUsd == null) slippageUsd = BigDecimal.ZERO;
-        if (copyStrategyCode == null || copyStrategyCode.isBlank()) copyStrategyCode = "MOVEMENT_ALL";
-        if (scopeType == null || scopeType.isBlank()) scopeType = "strategy";
-        if (scopeValue == null || scopeValue.isBlank()) scopeValue = "default";
+        copyStrategyCode = MetricStrategyIdentity.strategyCode(copyStrategyCode);
+        scopeType = MetricStrategyIdentity.scopeType(scopeType, copyStrategyCode);
+        scopeValue = MetricStrategyIdentity.scopeValue(scopeValue, copyStrategyCode);
+        strategyKey = MetricStrategyIdentity.canonicalKey(idWalletOrigin, copyStrategyCode, scopeType, scopeValue);
     }
 }

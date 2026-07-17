@@ -1,5 +1,6 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.engine.shared.metric.MetricStrategyIdentity;
 import com.apunto.engine.dto.UserDetailDto;
 import com.apunto.engine.dto.client.MetricaWalletDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
@@ -327,7 +328,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 final CopySymbolResolution symbolResolution = symbolResolutionByAllocationKey.get(allocationKey);
                 CopyExecutionDecision decision = realExecutionByAllocationKey.get(allocationKey);
                 String resolvedExecutionMode = decision == null ? targetExecutionMode(dto) : decision.executionMode();
-                newDist.put(allocationKey, new Dist(walletId, strategyCode, strategySlug(dto), strategyLabel(dto), copyMode(dto), sourceEndpoint(dto), rankWithinStrategy(dto), globalRank(dto), strategyScore(dto), scopeType, scopeValue, strategyKey(walletId, strategyCode, scopeType, scopeValue), resolvedExecutionMode, scaledPct, score, symbolResolution));
+                newDist.put(allocationKey, new Dist(walletId, strategyCode, strategySlug(dto), strategyLabel(dto), copyMode(dto), sourceEndpoint(dto), rankWithinStrategy(dto), globalRank(dto), strategyScore(dto), scopeType, scopeValue, strategyKey(walletId, strategyCode, scopeType, scopeValue), dto.getGenerationId(), resolvedExecutionMode, scaledPct, score, symbolResolution));
             }
 
             final List<String> newWalletIdList = newDist.values().stream()
@@ -429,6 +430,9 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 entity.setScopeType(d.scopeType());
                 entity.setScopeValue(d.scopeValue());
                 entity.setStrategyKey(d.strategyKey());
+                if (d.generationId() != null && !d.generationId().isBlank()) {
+                    entity.setMetricGenerationId(d.generationId().trim());
+                }
                 entity.setSourceSymbol(d.sourceSymbol());
                 entity.setTargetSymbol(d.targetSymbol());
                 entity.setCapitalAsset(d.capitalAsset());
@@ -1383,7 +1387,13 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 ? dto.getWallet().getCountOperationBreakdown().getScopeType()
                 : null;
         String fromJewel = dto != null && dto.getRealJewel() != null ? dto.getRealJewel().getScopeType() : null;
-        return normalizeScopeType(firstNonBlank(fromBreakdown, fromJewel, "strategy"));
+        String strategy = firstNonBlank(
+                dto != null && dto.getWallet() != null && dto.getWallet().getCountOperationBreakdown() != null
+                        ? dto.getWallet().getCountOperationBreakdown().getStrategyCode() : null,
+                dto != null && dto.getRealJewel() != null ? dto.getRealJewel().getStrategyCode() : null,
+                dto != null && dto.getStrategy() != null ? dto.getStrategy().getStrategyCode() : null
+        );
+        return MetricStrategyIdentity.scopeType(firstNonBlank(fromBreakdown, fromJewel), strategy);
     }
 
     private static String scopeValue(MetricaWalletDto dto, String strategyCode) {
@@ -1391,11 +1401,11 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
                 ? dto.getWallet().getCountOperationBreakdown().getScopeValue()
                 : null;
         String fromJewel = dto != null && dto.getRealJewel() != null ? dto.getRealJewel().getScopeValue() : null;
-        return normalizeScopeValue(firstNonBlank(fromBreakdown, fromJewel, strategyCode), strategyCode);
+        return MetricStrategyIdentity.scopeValue(firstNonBlank(fromBreakdown, fromJewel), strategyCode);
     }
 
     private static String strategyKey(String walletId, String strategyCode, String scopeType, String scopeValue) {
-        return normalize(walletId) + "|" + normalizeStrategy(strategyCode) + "|" + normalizeScopeType(scopeType) + "|" + normalizeScopeValue(scopeValue, strategyCode);
+        return MetricStrategyIdentity.canonicalKey(walletId, strategyCode, scopeType, scopeValue);
     }
 
     private static String targetExecutionMode(MetricaWalletDto dto) {
@@ -1457,13 +1467,12 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
     }
 
     private static String normalizeScopeType(String s) {
-        if (s == null || s.isBlank()) return "strategy";
-        return s.trim().toLowerCase(java.util.Locale.ROOT);
+        if (s == null || s.isBlank()) return "ALL";
+        return s.trim().toUpperCase(java.util.Locale.ROOT);
     }
 
     private static String normalizeScopeValue(String s, String strategyCode) {
-        if (s == null || s.isBlank()) return normalizeStrategy(strategyCode);
-        return s.trim();
+        return MetricStrategyIdentity.scopeValue(s, strategyCode);
     }
 
     private static String capitalAssetForResolution(String value) {
@@ -1550,6 +1559,7 @@ public class UserCopyAllocationServiceImpl implements UserCopyAllocationService 
             String scopeType,
             String scopeValue,
             String strategyKey,
+            String generationId,
             String targetExecutionMode,
             BigDecimal pct,
             Integer score,

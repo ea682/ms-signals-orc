@@ -2,6 +2,9 @@ package com.apunto.engine.service.copy.dispatch;
 
 import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
+import com.apunto.engine.service.copy.certification.LiveEntryAuthorizationDecision;
+import com.apunto.engine.service.copy.certification.LiveEntryAuthorizationGate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import jakarta.annotation.PostConstruct;
@@ -19,6 +22,8 @@ public class CopyRealExecutionGate {
 
     @Value("${copy.new-dispatch.enabled:false}")
     private boolean newDispatchEnabled;
+    @Value("${copy.derisk-dispatch.enabled:true}")
+    private boolean deriskExecutionEnabled;
     @Value("${copy.micro-live.enabled:false}")
     private boolean microLiveEnabled;
     @Value("${copy.live.enabled:false}")
@@ -38,10 +43,13 @@ public class CopyRealExecutionGate {
     @Value("${copy.live.whitelist.strategy-codes:}")
     private String liveWhitelistStrategyCodes;
 
+    @Autowired(required = false)
+    private LiveEntryAuthorizationGate liveEntryAuthorizationGate;
+
     @PostConstruct
     void logEffectiveConfiguration() {
-        log.info("event=copy.real_execution_gate.config newDispatchEnabled={} microLiveEnabled={} liveEnabled={} liveDryRun={} liveCanaryEnabled={} whitelistUsers={} whitelistWallets={} whitelistSymbols={} whitelistAllocations={} whitelistStrategies={} reasonCode=EFFECTIVE_COPY_SWITCHES",
-                newDispatchEnabled, microLiveEnabled, liveEnabled, liveDryRun, liveCanaryEnabled,
+        log.info("event=copy.real_execution_gate.config newDispatchEnabled={} deriskExecutionEnabled={} microLiveEnabled={} liveEnabled={} liveDryRun={} liveCanaryEnabled={} whitelistUsers={} whitelistWallets={} whitelistSymbols={} whitelistAllocations={} whitelistStrategies={} reasonCode=EFFECTIVE_COPY_SWITCHES",
+                newDispatchEnabled, deriskExecutionEnabled, microLiveEnabled, liveEnabled, liveDryRun, liveCanaryEnabled,
                 parseWhitelist(liveWhitelistUserIds).size(), parseWhitelist(liveWhitelistWalletIds).size(),
                 parseWhitelist(liveWhitelistSymbols).size(), parseWhitelist(liveWhitelistAllocationIds).size(),
                 parseWhitelist(liveWhitelistStrategyCodes).size());
@@ -50,6 +58,14 @@ public class CopyRealExecutionGate {
     public Decision evaluate(OperationDto operation, UserCopyAllocationEntity allocation) {
         String mode = executionMode(allocation);
         boolean reduceOnly = operation != null && operation.isReduceOnly();
+        if (!"MICRO_LIVE".equals(mode) && !"LIVE".equals(mode)) {
+            return blocked(mode, "COPY_REAL_EXECUTION_MODE_UNKNOWN");
+        }
+        if (reduceOnly) {
+            return deriskExecutionEnabled
+                    ? allowed(mode, mode + "_DERISK_ALLOWED")
+                    : blocked(mode, "COPY_DERISK_DISPATCH_DISABLED");
+        }
         if (!newDispatchEnabled) {
             return blocked(mode, "COPY_NEW_DISPATCH_DISABLED");
         }
@@ -58,17 +74,11 @@ public class CopyRealExecutionGate {
                     ? allowed(mode, reduceOnly ? "MICRO_LIVE_REDUCTION_ALLOWED" : "MICRO_LIVE_ENABLED")
                     : blocked(mode, "MICRO_LIVE_DISABLED");
         }
-        if (!"LIVE".equals(mode)) {
-            return blocked(mode, "COPY_REAL_EXECUTION_MODE_UNKNOWN");
-        }
         if (!liveEnabled) {
             return blocked(mode, "LIVE_DISABLED");
         }
         if (liveDryRun) {
             return blocked(mode, "LIVE_DRY_RUN");
-        }
-        if (reduceOnly) {
-            return allowed(mode, "LIVE_REDUCTION_ALLOWED");
         }
         if (!liveCanaryEnabled) {
             return blocked(mode, "LIVE_CANARY_DISABLED");
@@ -76,7 +86,16 @@ public class CopyRealExecutionGate {
         if (!liveWhitelisted(operation, allocation)) {
             return blocked(mode, "LIVE_WHITELIST_BLOCKED");
         }
-        return allowed(mode, "LIVE_CANARY_WHITELIST_ALLOWED");
+        if (liveEntryAuthorizationGate == null) {
+            return blocked(mode, "LIVE_CERTIFICATION_UNAVAILABLE");
+        }
+        LiveEntryAuthorizationDecision certification = liveEntryAuthorizationGate.evaluate(operation, allocation);
+        if (certification == null || !certification.allowed()) {
+            return blocked(mode, certification == null
+                    ? "LIVE_CERTIFICATION_UNAVAILABLE"
+                    : certification.reasonCode());
+        }
+        return allowed(mode, "LIVE_CANARY_WHITELIST_CERTIFIED");
     }
 
     private boolean liveWhitelisted(OperationDto operation, UserCopyAllocationEntity allocation) {

@@ -444,7 +444,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .fundingPnlUsd(command.getFundingPnlUsd())
                 .executionPriceBasis(command.getExecutionPriceBasis())
                 .notionalBasis(command.getNotionalBasis())
-                .lifecycleQualityFlags(command.getLifecycleQualityFlags())
+                .lifecycleQualityFlags(toLifecycleQualityFlagArray(command.getLifecycleQualityFlags()))
                 .sourceEstimated(command.getSourceEstimated())
                 .walletVersion(command.getWalletVersion())
                 .snapshotVersion(command.getSnapshotVersion())
@@ -634,6 +634,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         }
         addIfMissing(flags, "POSITION_DELTA_NOT_FILL");
         return List.copyOf(flags);
+    }
+
+    private String[] toLifecycleQualityFlagArray(List<String> flags) {
+        return flags == null ? null : flags.toArray(String[]::new);
     }
 
     private void addIfMissing(List<String> values, String value) {

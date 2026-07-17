@@ -94,4 +94,13 @@ public class CopyOperationEntity {
 
     @Column(name = "price_status", length = 32)
     private String priceStatus;
+
+    @Column(name = "economic_cycle_id", columnDefinition = "uuid")
+    private UUID economicCycleId;
+
+    @Column(name = "cycle_sequence")
+    private Long cycleSequence;
+
+    @Column(name = "economic_data_status", nullable = false, length = 32)
+    private String economicDataStatus;
 }

@@ -1,5 +1,10 @@
 # SDD - Semantica de allocation_pct en SHADOW, MICRO_LIVE y LIVE
 
+> Nota de precedencia (2026-07-13):
+> `copy-trading-proportional-portfolio-v3-sdd.md` gobierna el sizing economico
+> V3. MICRO_LIVE usa 100 USDC totales a 5x, sin 20 USDC fijos ni maximo global
+> de cinco posiciones; los limites anteriores quedan solo como historia.
+
 ## 1. Estado del documento
 
 - Estado: especificacion aprobada para implementacion local.

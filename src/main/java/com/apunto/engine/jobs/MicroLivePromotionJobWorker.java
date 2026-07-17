@@ -16,7 +16,7 @@ public class MicroLivePromotionJobWorker {
 
     private final MicroLivePromotionService microLivePromotionService;
 
-    @Value("${copy.live-promotion.job.enabled:true}")
+    @Value("${copy.live-promotion.job.enabled:false}")
     private boolean enabled;
 
     @Scheduled(

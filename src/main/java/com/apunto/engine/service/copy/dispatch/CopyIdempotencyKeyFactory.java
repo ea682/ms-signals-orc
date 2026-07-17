@@ -15,13 +15,14 @@ public final class CopyIdempotencyKeyFactory {
         Objects.requireNonNull(identity, "identity is required");
         String sourceEventId = required(identity.sourceEventId(), "sourceEventId");
         String canonical = String.join("|",
-                "copy-dispatch-v1",
+                "copy-dispatch-v2",
                 normalize(identity.userId()),
                 identity.userCopyAllocationId() == null ? "legacy" : identity.userCopyAllocationId().toString(),
                 normalizeUpper(identity.executionMode()),
                 normalizeUpper(identity.strategyCode()),
                 normalizeUpper(identity.scopeType()),
                 normalizeUpper(identity.scopeValue()),
+                normalize(identity.generationId()),
                 sourceEventId,
                 normalizeUpper(identity.copyIntent()));
         return sha256(canonical);

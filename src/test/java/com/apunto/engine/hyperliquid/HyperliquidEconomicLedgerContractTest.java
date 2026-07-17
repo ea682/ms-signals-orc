@@ -4,16 +4,21 @@ import com.apunto.engine.dto.OperationMovementEventRecordCommand;
 import com.apunto.engine.entity.OperationMovementEventEntity;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
 import com.apunto.engine.outbox.dto.MetricMovementPersistedEvent;
+import jakarta.persistence.Column;
 import org.junit.jupiter.api.Test;
+import org.hibernate.annotations.JdbcTypeCode;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.lang.reflect.RecordComponent;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HyperliquidEconomicLedgerContractTest {
@@ -46,6 +51,18 @@ class HyperliquidEconomicLedgerContractTest {
             assertTrue(sql.contains(column), () -> "migration is missing " + column);
         }
         assertTrue(sql.contains("add column if not exists"));
+    }
+
+    @Test
+    void lifecycleQualityFlagsUsesImplicitNativePostgresArrayInsteadOfJsonElementMapping() throws NoSuchFieldException {
+        Field field = OperationMovementEventEntity.class.getDeclaredField("lifecycleQualityFlags");
+        JdbcTypeCode jdbcType = field.getAnnotation(JdbcTypeCode.class);
+        Column column = field.getAnnotation(Column.class);
+
+        assertEquals(String[].class, field.getType());
+        assertNull(jdbcType, "String[] uses the PostgreSQL dialect's native ARRAY mapping");
+        assertNotNull(column);
+        assertEquals("", column.columnDefinition(), "Flyway owns the PostgreSQL text[] DDL");
     }
 
     private void assertRecordFields(Class<?> type) {

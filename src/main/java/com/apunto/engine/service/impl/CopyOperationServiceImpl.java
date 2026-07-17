@@ -5,6 +5,7 @@ import com.apunto.engine.entity.CopyOperationEntity;
 import com.apunto.engine.mapper.CopyOperationMapper;
 import com.apunto.engine.repository.CopyOperationRepository;
 import com.apunto.engine.service.ActiveCopyOperationCache;
+import com.apunto.engine.service.CopyEconomicCycleService;
 import com.apunto.engine.service.CopyOperationService;
 import com.apunto.engine.shared.exception.CopyPersistenceConflictException;
 import lombok.RequiredArgsConstructor;
@@ -19,6 +20,7 @@ import java.math.BigDecimal;
 import java.util.Optional;
 import java.util.Map;
 import java.util.LinkedHashMap;
+import java.util.UUID;
 
 import static com.apunto.engine.entity.UserCopyAllocationEntity.normalizeExecutionMode;
 
@@ -30,6 +32,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
     private final CopyOperationRepository copyOperationRepository;
     private final CopyOperationMapper copyOperationMapper;
     private final ActiveCopyOperationCache activeCopyOperationCache;
+    private final CopyEconomicCycleService copyEconomicCycleService;
 
     @Transactional
     @Override
@@ -42,6 +45,9 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
         try {
             copyOperationRepository.saveAndFlush(entity);
+            attachNewEconomicCycle(operation, entity);
+            copyOperationRepository.saveAndFlush(entity);
+            applyPersistedIdentity(operation, entity);
             activeCopyOperationCache.markOpen(operation);
             log.info("event=copy_operation.insert_ok category=persistence reasonAlias=copy_created friendlyReason=copia_registrada explanation=la_copia_quedo_guardada_en_bd copyImpact=copy_tracked originId={} userId={} typeOperation={} wallet={} symbol={} orderId={}",
                     operation.getIdOrderOrigin(), operation.getIdUser(), operation.getTypeOperation(),
@@ -49,6 +55,12 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         } catch (DataIntegrityViolationException ex) {
             if (isUniqueViolation(ex)) {
                 final CopyOperationDto existing = findDuplicateOperation(operation).orElse(null);
+                if (existing != null) {
+                    operation.setIdOperation(existing.getIdOperation());
+                    operation.setEconomicCycleId(existing.getEconomicCycleId());
+                    operation.setCycleSequence(existing.getCycleSequence());
+                    operation.setEconomicDataStatus(existing.getEconomicDataStatus());
+                }
                 refreshActiveCacheAfterDuplicate(operation, existing, "copy_duplicate_detected");
                 if (existing != null && Objects.equals(existing.getIdOrden(), operation.getIdOrden())) {
                     log.info("event=copy_operation.insert_idempotent category=persistence reasonAlias=copy_already_registered_same_order friendlyReason=copia_ya_registrada explanation=el_insert_se_repitio_para_la_misma_orden_y_se_toma_como_idempotente copyImpact=no_new_db_row originId={} userId={} typeOperation={} wallet={} symbol={} orderId={} existingCopyId={} existingActive={}",
@@ -85,6 +97,13 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
         final BigDecimal sizeUsd = operation.getSiseUsd() == null ? BigDecimal.ZERO : operation.getSiseUsd();
         final BigDecimal sizePar = operation.getSizePar() == null ? BigDecimal.ZERO : operation.getSizePar();
+
+        UUID closedOperationId = operation.getIdOperation();
+        if (closedOperationId == null) {
+            closedOperationId = findOperationEntityForUpsert(operation)
+                    .map(CopyOperationEntity::getIdOperation)
+                    .orElse(null);
+        }
 
         int updated = 0;
         if (operation.getIdOperation() != null) {
@@ -126,6 +145,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
             return;
         }
 
+        copyEconomicCycleService.close(closedOperationId, operation.getSourceEventId(), operation.getDateClose());
         activeCopyOperationCache.markClosed(operation);
         log.info("event=copy_operation.close_ok originId={} userId={} allocationId={} strategy={} active=false updated={}",
                 operation.getIdOrderOrigin(), operation.getIdUser(), operation.getUserCopyAllocationId(), operation.getCopyStrategyCode(), updated);
@@ -140,6 +160,54 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
         CopyOperationEntity entity = copyOperationRepository.findByIdOrden(idOrden).orElse(null);
         return entity == null ? null : copyOperationMapper.toDto(entity);
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public CopyOperationDto findOperationById(UUID idOperation) {
+        if (idOperation == null) {
+            return null;
+        }
+        return copyOperationRepository.findById(idOperation)
+                .map(copyOperationMapper::toDto)
+                .orElse(null);
+    }
+
+    @Transactional
+    @Override
+    public CopyOperationDto updateExecutionPriceEvidence(UUID idOperation,
+                                                         BigDecimal price,
+                                                         String priceStatus,
+                                                         boolean closingPrice) {
+        if (idOperation == null || price == null || price.compareTo(BigDecimal.ZERO) <= 0) {
+            return null;
+        }
+        CopyOperationEntity entity = copyOperationRepository.findById(idOperation).orElse(null);
+        if (entity == null) {
+            return null;
+        }
+        if (closingPrice) {
+            entity.setPriceClose(price);
+        } else {
+            entity.setPriceEntry(price);
+            if (entity.isActive() && entity.getSizePar() != null) {
+                entity.setSiseUsd(entity.getSizePar().multiply(price));
+            }
+        }
+        if (priceStatus != null && !priceStatus.isBlank()) {
+            entity.setPriceStatus(priceStatus.trim().toUpperCase(java.util.Locale.ROOT));
+        }
+        CopyOperationEntity saved = copyOperationRepository.saveAndFlush(entity);
+        CopyOperationDto updated = copyOperationMapper.toDto(saved);
+        if (updated.isActive()) {
+            activeCopyOperationCache.markOpen(updated);
+        } else {
+            activeCopyOperationCache.markClosed(updated);
+        }
+        log.info("event=copy_operation.execution_price_upgraded copyOperationId={} priceField={} price={} priceStatus={} active={} decision=ECONOMIC_EVIDENCE_ONLY",
+                idOperation, closingPrice ? "price_close" : "price_entry", price,
+                updated.getPriceStatus(), updated.isActive());
+        return updated;
     }
 
     @Transactional(readOnly = true)
@@ -174,7 +242,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
             return null;
         }
 
-        return copyOperationRepository.findByIdOrderOriginAndIdUser(idOrderOrigin, idUser)
+        return copyOperationRepository.findFirstByIdOrderOriginAndIdUserAndActiveTrueOrderByDateCreationDesc(idOrderOrigin, idUser)
                 .map(copyOperationMapper::toDto)
                 .orElse(null);
     }
@@ -189,17 +257,45 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         }
         if (allocationId != null) {
             Optional<CopyOperationEntity> byAllocation = copyOperationRepository
-                    .findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(allocationId, idOrderOrigin, typeOperation);
+                    .findFirstByUserCopyAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrueOrderByDateCreationDesc(allocationId, idOrderOrigin, typeOperation);
             if (byAllocation.isPresent()) {
                 return copyOperationMapper.toDto(byAllocation.get());
             }
         }
         if (strategyCode != null && !strategyCode.isBlank()) {
             Optional<CopyOperationEntity> byStrategy = copyOperationRepository
-                    .findByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperation(idOrderOrigin, idUser, strategyCode, typeOperation);
+                    .findFirstByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperationAndActiveTrueOrderByDateCreationDesc(idOrderOrigin, idUser, strategyCode, typeOperation);
             if (byStrategy.isPresent()) {
                 return copyOperationMapper.toDto(byStrategy.get());
             }
+        }
+        return null;
+    }
+
+    @Transactional(readOnly = true)
+    @Override
+    public CopyOperationDto findLatestOperationForAllocation(String idOrderOrigin, String idUser,
+                                                              Long allocationId, String strategyCode,
+                                                              String typeOperation) {
+        if (idOrderOrigin == null || idOrderOrigin.isBlank()
+                || idUser == null || idUser.isBlank()
+                || typeOperation == null || typeOperation.isBlank()) {
+            return null;
+        }
+        if (allocationId != null) {
+            Optional<CopyOperationEntity> byAllocation = copyOperationRepository
+                    .findFirstByUserCopyAllocationIdAndIdOrderOriginAndTypeOperationOrderByDateCreationDesc(
+                            allocationId, idOrderOrigin, typeOperation);
+            if (byAllocation.isPresent()) {
+                return copyOperationMapper.toDto(byAllocation.get());
+            }
+        }
+        if (strategyCode != null && !strategyCode.isBlank()) {
+            return copyOperationRepository
+                    .findFirstByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperationOrderByDateCreationDesc(
+                            idOrderOrigin, idUser, strategyCode, typeOperation)
+                    .map(copyOperationMapper::toDto)
+                    .orElse(null);
         }
         return null;
     }
@@ -213,7 +309,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
             return null;
         }
 
-        return copyOperationRepository.findByIdOrderOriginAndIdUserAndTypeOperation(idOrderOrigin, idUser, typeOperation)
+        return copyOperationRepository.findFirstByIdOrderOriginAndIdUserAndTypeOperationAndActiveTrueOrderByDateCreationDesc(idOrderOrigin, idUser, typeOperation)
                 .map(copyOperationMapper::toDto)
                 .orElse(null);
     }
@@ -270,6 +366,11 @@ public class CopyOperationServiceImpl implements CopyOperationService {
 
         try {
             copyOperationRepository.saveAndFlush(entity);
+            if (created) {
+                attachNewEconomicCycle(operation, entity);
+                copyOperationRepository.saveAndFlush(entity);
+            }
+            applyPersistedIdentity(operation, entity);
         } catch (DataIntegrityViolationException ex) {
             if (isUniqueViolation(ex)) {
                 final CopyOperationEntity recovered = findOperationEntityForUpsert(operation).orElse(null);
@@ -286,6 +387,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
                 }
                 applyOperation(recovered, operation);
                 copyOperationRepository.saveAndFlush(recovered);
+                applyPersistedIdentity(operation, recovered);
                 log.info("event=copy_operation.upsert_recovered category=persistence reasonAlias=copy_conflict_recovered friendlyReason=copia_actualizada_tras_conflicto explanation=se_recargo_la_fila_existente_y_se_actualizo_sin_crear_duplicado copyImpact=copy_tracked originId={} userId={} typeOperation={} wallet={} symbol={} orderId={} copyId={} active={}",
                         operation.getIdOrderOrigin(), operation.getIdUser(), operation.getTypeOperation(),
                         operation.getIdWalletOrigin(), operation.getParsymbol(), operation.getIdOrden(),
@@ -360,6 +462,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         entity.setSourceEventId(operation.getSourceEventId());
         entity.setClientOrderId(operation.getClientOrderId());
         entity.setPriceStatus(operation.getPriceStatus());
+        entity.setEconomicDataStatus(normalizeEconomicDataStatus(operation.getEconomicDataStatus()));
 
         return entity;
     }
@@ -367,7 +470,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
     private Optional<CopyOperationEntity> findOperationEntityForUpsert(CopyOperationDto operation) {
         final String typeOperation = operation.getTypeOperation();
         if (operation.getUserCopyAllocationId() != null && typeOperation != null && !typeOperation.isBlank()) {
-            return copyOperationRepository.findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(
+            return copyOperationRepository.findFirstByUserCopyAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrueOrderByDateCreationDesc(
                             operation.getUserCopyAllocationId(),
                             operation.getIdOrderOrigin(),
                             typeOperation);
@@ -375,7 +478,7 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         if (operation.getCopyStrategyCode() != null && !operation.getCopyStrategyCode().isBlank()
                 && typeOperation != null && !typeOperation.isBlank()) {
             final Optional<CopyOperationEntity> byStrategy = copyOperationRepository
-                    .findByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperation(
+                    .findFirstByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperationAndActiveTrueOrderByDateCreationDesc(
                             operation.getIdOrderOrigin(),
                             operation.getIdUser(),
                             operation.getCopyStrategyCode(),
@@ -387,12 +490,12 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         }
         if (typeOperation != null && !typeOperation.isBlank()) {
             final Optional<CopyOperationEntity> byType = copyOperationRepository
-                    .findByIdOrderOriginAndIdUserAndTypeOperation(operation.getIdOrderOrigin(), operation.getIdUser(), typeOperation);
+                    .findFirstByIdOrderOriginAndIdUserAndTypeOperationAndActiveTrueOrderByDateCreationDesc(operation.getIdOrderOrigin(), operation.getIdUser(), typeOperation);
             if (byType.isPresent()) {
                 return byType;
             }
         }
-        return copyOperationRepository.findByIdOrderOriginAndIdUser(operation.getIdOrderOrigin(), operation.getIdUser());
+        return copyOperationRepository.findFirstByIdOrderOriginAndIdUserAndActiveTrueOrderByDateCreationDesc(operation.getIdOrderOrigin(), operation.getIdUser());
     }
 
     private Optional<CopyOperationDto> findDuplicateOperation(CopyOperationDto operation) {
@@ -457,6 +560,34 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         entity.setSourceEventId(operation.getSourceEventId());
         entity.setClientOrderId(operation.getClientOrderId());
         entity.setPriceStatus(operation.getPriceStatus());
+        if (operation.getEconomicDataStatus() != null) {
+            entity.setEconomicDataStatus(normalizeEconomicDataStatus(operation.getEconomicDataStatus()));
+        }
+    }
+
+    private void attachNewEconomicCycle(CopyOperationDto operation, CopyOperationEntity entity) {
+        CopyEconomicCycleService.CycleIdentity cycle = copyEconomicCycleService.open(operation, entity.getIdOperation());
+        entity.setEconomicCycleId(cycle.cycleId());
+        entity.setCycleSequence(cycle.cycleSequence());
+        entity.setEconomicDataStatus(normalizeEconomicDataStatus(operation.getEconomicDataStatus()));
+    }
+
+    private void applyPersistedIdentity(CopyOperationDto operation, CopyOperationEntity entity) {
+        operation.setIdOperation(entity.getIdOperation());
+        operation.setEconomicCycleId(entity.getEconomicCycleId());
+        operation.setCycleSequence(entity.getCycleSequence());
+        operation.setEconomicDataStatus(entity.getEconomicDataStatus());
+    }
+
+    private String normalizeEconomicDataStatus(String value) {
+        if (value == null || value.isBlank()) {
+            return "PENDING_RECONCILIATION";
+        }
+        String normalized = value.trim().toUpperCase(java.util.Locale.ROOT);
+        return switch (normalized) {
+            case "KNOWN", "UNAVAILABLE" -> normalized;
+            default -> "PENDING_RECONCILIATION";
+        };
     }
 
     private boolean isUniqueViolation(DataIntegrityViolationException ex) {

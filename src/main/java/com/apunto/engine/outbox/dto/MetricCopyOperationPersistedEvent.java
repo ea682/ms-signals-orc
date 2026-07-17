@@ -1,14 +1,17 @@
 package com.apunto.engine.outbox.dto;
 
+import com.apunto.engine.dto.client.BinanceExecutionFillClientDto;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.UUID;
+import java.util.List;
 
 public record MetricCopyOperationPersistedEvent(
         String eventVersion,
         UUID idEvent,
         UUID idOperation,
         String idOrderOrigin,
+        String sourceEventId,
         String idUser,
         String wallet,
         String symbol,
@@ -31,6 +34,56 @@ public record MetricCopyOperationPersistedEvent(
         String source,
         String reasonCode,
         OffsetDateTime eventTime,
-        OffsetDateTime dateCreation
+        OffsetDateTime dateCreation,
+        UUID economicCycleId,
+        UUID dispatchIntentId,
+        Long userCopyAllocationId,
+        String copyStrategyCode,
+        String scopeType,
+        String scopeValue,
+        String strategyKey,
+        String generationId,
+        String executionMode,
+        String decision,
+        String decisionReason,
+        String priceStatus,
+        List<String> tradeIds,
+        List<BinanceExecutionFillClientDto> individualFills,
+        BigDecimal averageFillPrice,
+        BigDecimal entryPrice,
+        BigDecimal exitPrice,
+        BigDecimal entryFee,
+        BigDecimal exitFee,
+        BigDecimal totalFees,
+        BigDecimal fundingPaid,
+        BigDecimal fundingReceived,
+        BigDecimal netFunding,
+        BigDecimal grossRealizedPnl,
+        BigDecimal netRealizedPnl,
+        BigDecimal unrealizedPnl,
+        BigDecimal expectedPrice,
+        BigDecimal actualPrice,
+        BigDecimal slippageBps,
+        BigDecimal slippageUsd,
+        OffsetDateTime submittedAt,
+        OffsetDateTime acceptedAt,
+        OffsetDateTime filledAt,
+        OffsetDateTime persistedAt,
+        Long sourceToSubmitLatencyMs,
+        Long submitToFillLatencyMs,
+        Long endToEndLatencyMs,
+        String economicDataStatus,
+        String strategyVersion,
+        String sizingPolicyVersion,
+        String symbolMappingVersion,
+        String feeModelVersion,
+        String fundingModelVersion,
+        String slippageModelVersion,
+        String liquidityModelVersion,
+        BigDecimal calibrationCapitalUsd,
+        BigDecimal targetLeverage,
+        BigDecimal calibrationTargetNotionalUsd,
+        String copyAction,
+        String notionalBand
 ) {
 }

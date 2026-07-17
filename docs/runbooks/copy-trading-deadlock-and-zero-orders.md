@@ -7,15 +7,17 @@ Procedimiento para SHADOW, MICRO_LIVE y LIVE. No ejecutar ordenes reales durante
 ## 1. Predeploy
 
 1. Mantener `COPY_NEW_DISPATCH_ENABLED=false`, `COPY_LIVE_ENABLED=false` y `COPY_LIVE_DRY_RUN=true`.
-2. Confirmar que los limites efectivos MICRO_LIVE sean exactamente:
+2. Confirmar que la politica economica MICRO_LIVE V3 sea exactamente:
 
 ```text
 COPY_MICRO_LIVE_TOTAL_CAPITAL_USD=100
-COPY_MICRO_LIVE_MAX_MARGIN_PER_OPERATION_USD=20
-COPY_MICRO_LIVE_MAX_CONCURRENT_POSITIONS=5
+COPY_MICRO_LIVE_TARGET_LEVERAGE=5
+fixedPerOperation=absent
+globalMaxPositions=absent
 ```
 
-El servicio falla al iniciar si difieren. LIVE no usa estos topes.
+Un `userMaxConcurrentPositions` nullable puede limitar una allocation cuando el
+usuario lo configura. LIVE no usa el presupuesto MICRO_LIVE.
 
 3. Verificar presupuesto de conexiones: replicas de signals x Hikari max + otros servicios < `max_connections` con reserva operativa.
 4. Tomar backup/logical snapshot segun politica de plataforma.
@@ -95,7 +97,7 @@ Interpretacion rapida:
 |---|---|
 | `eligibleUsers=0` + reasons | eligibility/guard/configuracion |
 | `submittedTasks>0`, sin intent | camino legacy o fallo antes del claim durable |
-| intent `REJECTED` | revisar `last_error_code`, incluido limite 100/20/5 |
+| intent `REJECTED` | revisar `last_error_code`, capital total, filtros Binance y limite opcional del usuario |
 | intent `RECONCILING` | resultado ambiguo; esperar worker, no resend |
 | intent `MANUAL_REVIEW` | reconciliacion agotada; intervencion humana |
 | intent `PERSISTENCE_PENDING` | Binance respondio, falta ledger local |
@@ -107,10 +109,11 @@ Interpretacion rapida:
 2. Dejar una sola cuenta/cartera canary aprobada con saldo disponible >=100 USDC; pausar nuevas entradas del resto de allocations MICRO_LIVE.
 3. Activar `COPY_NEW_DISPATCH_ENABLED=true` y `COPY_MICRO_LIVE_ENABLED=true`.
 4. Observar un ciclo OPEN -> fill/reconciliacion -> REDUCE/CLOSE.
-5. Confirmar margen por orden <=20, total user+wallet abierto+reservado <=100 y posiciones <=5.
+5. Confirmar total user+wallet abierto+reservado <=100, sizing proporcional y ausencia de monto fijo por orden.
 6. Confirmar que dos estrategias de la misma wallet consumen el mismo presupuesto.
-7. Confirmar cero duplicados y cero ambiguos sin resolver.
-8. No promover a LIVE mientras readiness tenga cero submitted/ACK/fill/close, error, duplicado, reconciliacion pendiente, slippage insuficiente o guard no final.
+7. Si existe `userMaxConcurrentPositions`, confirmar que se aplica solo a esa allocation; sin valor, no hay limite global.
+8. Confirmar cero duplicados y cero ambiguos sin resolver.
+9. No promover a LIVE mientras readiness tenga cero submitted/ACK/fill/close, error, duplicado, reconciliacion pendiente, slippage insuficiente o guard no final.
 
 ## 5. Deadlock
 

@@ -1,5 +1,10 @@
 # SDD: Integridad y performance del camino real de copy trading
 
+> Nota de precedencia (2026-07-13): los contratos de performance, intents y
+> reconciliacion siguen vigentes. Cualquier monto fijo por operacion o limite
+> global de posiciones fue sustituido por
+> `copy-trading-proportional-portfolio-v3-sdd.md`.
+
 Estado: aprobado para implementacion incremental
 Fecha: 2026-07-10
 Servicios: `ms-signals-orc`, `ms-binance-engine`
@@ -407,9 +412,24 @@ sha256(v1|user|allocation|mode|strategy|scopeType|scopeValue|
        sourceEventIdentity|copyIntent)
 ```
 
-El request hash incluye symbol, side, positionSide, orderType, qty, margin,
-notional, referencePrice, leverage, reduceOnly, configureSettings y
-clientOrderId. BigDecimal se canoniza con `stripTrailingZeros().toPlainString()`.
+El request hash representa exclusivamente la orden ejecutable y la politica
+inmutable del primer claim: symbol, side, positionSide, orderType, qty,
+orderPrice, timeInForce, leverage, userMaxConcurrentPositions,
+reservePosition, reduceOnly, configureSettings y clientOrderId. BigDecimal se
+canoniza con `stripTrailingZeros().toPlainString()`.
+
+`requestedMarginUsd`, `requestedNotionalUsd` y `referencePrice` son evidencia
+economica derivada para presupuesto, auditoria y reconciliacion. En una orden
+MARKET pueden variar entre replays aunque la orden Binance sea exactamente la
+misma, por lo que no forman parte del request hash. El intent durable conserva
+los valores calculados en el primer claim y un replay nunca vuelve a reservar
+presupuesto ni autoriza un segundo send.
+
+Un cambio en qty, precio LIMIT, lado, tipo, leverage o politica de posiciones
+continua siendo `BLOCK_PAYLOAD_MISMATCH`. Un cambio aislado de precio de mercado,
+margen o notional estimado debe reutilizar/reconciliar el intent existente de
+acuerdo con su estado durable, sin generar conflicto y sin reenviar una orden
+terminal.
 
 El clientOrderId se deriva de la key, es estable en restart y cumple limite de
 36 caracteres. No se cambia para un replay.

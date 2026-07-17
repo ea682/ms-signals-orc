@@ -1,5 +1,9 @@
 # SDD - Reliability del runtime SHADOW, MICRO_LIVE y LIVE
 
+> Nota de precedencia (2026-07-13): los hallazgos de reliability siguen siendo
+> referencia, pero sus reglas economicas fijas fueron sustituidas por
+> `copy-trading-proportional-portfolio-v3-sdd.md` y no son instrucciones V3.
+
 Fecha de investigacion: 2026-07-11
 
 Commit investigado de `ms-signals-orc`:

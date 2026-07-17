@@ -19,12 +19,12 @@ import com.apunto.engine.service.ShadowCopyTradingService;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.copy.CopyAllocationSafetyPolicy;
 import com.apunto.engine.shared.exception.EngineException;
 import com.apunto.engine.shared.exception.ValidationException;
 import com.apunto.engine.shared.util.CopySymbolIdentity;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
@@ -58,14 +58,9 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private final TradingMetrics tradingMetrics;
     private final OperationMovementEventService operationMovementEventService;
     private final CopyStrategyRuntimeRouter copyStrategyRuntimeRouter;
+    private final CopyAllocationSafetyPolicy copyAllocationSafetyPolicy;
     private final MetricWalletService metricWalletService;
     private final ShadowCopyTradingService shadowCopyTradingService;
-
-    @Value("${operation.job.ingest.filter-by-wallet-allocation:${copy.job.ingest.filter-by-wallet-allocation:true}}")
-    private boolean filterByWalletAllocation;
-
-    @Value("${operation.job.ingest.fallback-all-users-on-empty-allocation:${copy.job.ingest.fallback-all-users-on-empty-allocation:false}}")
-    private boolean fallbackAllUsersOnEmptyAllocation;
 
     @Override
     public int ingest(OperacionEvent event) {
@@ -114,7 +109,7 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                     eligibleUsers.size(),
                     userIdsCsv(eligibleUsers),
                     enqueued,
-                    filterByWalletAllocation);
+                    copyAllocationSafetyPolicy.requiresWalletAllocation());
             return enqueued;
 
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
@@ -273,12 +268,12 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
     private List<UserDetailDto> resolveEligibleUsers(OperacionDto operation, CopyJobAction action, HyperliquidDeltaType deltaType, List<UserDetailDto> usersCached) {
         String walletId = operation == null ? null : operation.getIdCuenta();
         String side = operation == null || operation.getTipoOperacion() == null ? null : operation.getTipoOperacion().name();
-        if (!filterByWalletAllocation) {
+        if (!copyAllocationSafetyPolicy.requiresWalletAllocation()) {
             return usersCached;
         }
         if (walletId == null || walletId.isBlank()) {
             log.warn("event=copy.execution.user_filter_skipped reason=wallet_missing usersCached={}", usersCached.size());
-            return fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
+            return copyAllocationSafetyPolicy.allowsAllUsersFallback() ? usersCached : List.of();
         }
 
         final List<UserCopyAllocationEntity> activeAllocations = userCopyAllocationService.getActiveAllocationsByWallet(walletId);
@@ -292,8 +287,8 @@ public class OperacionEventIngestServiceImpl implements OperacionEventIngestServ
                 .collect(Collectors.toUnmodifiableSet());
         if (activeUserIds.isEmpty()) {
             log.info("event=copy.execution.user_filter wallet={} activeAllocationUsers=0 usersCached={} eligibleUsers=0 eligibleUserIds=\"\" fallbackAllUsers={}",
-                    walletId, usersCached.size(), fallbackAllUsersOnEmptyAllocation);
-            return fallbackAllUsersOnEmptyAllocation ? usersCached : List.of();
+                    walletId, usersCached.size(), copyAllocationSafetyPolicy.allowsAllUsersFallback());
+            return copyAllocationSafetyPolicy.allowsAllUsersFallback() ? usersCached : List.of();
         }
 
         final List<UserDetailDto> eligible = usersCached.stream()

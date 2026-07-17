@@ -15,10 +15,13 @@ import com.apunto.engine.service.ActiveCopyOperationCache;
 import com.apunto.engine.service.UserCopyAllocationService;
 import com.apunto.engine.service.UserDetailCachedService;
 import com.apunto.engine.service.copy.CopyRuntimeGuardPolicy;
+import com.apunto.engine.service.copy.CopyAllocationSafetyPolicy;
 import com.apunto.engine.service.copy.CopyStrategyGuardDecision;
 import com.apunto.engine.service.copy.CopyStrategyGuardRuntimeCache;
 import com.apunto.engine.service.copy.CopyStrategyRuntimeRouter;
+import com.apunto.engine.service.metric.MetricWalletReadModeResolver;
 import com.apunto.engine.shared.enums.PositionSide;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -151,6 +154,62 @@ class HyperliquidCopyCandidateResolverTest {
         assertEquals("MICRO_LIVE_SYMBOL_NOT_ALLOWED", result.reasonCode());
     }
 
+    @Test
+    void metricFailureNeverBlocksCloseOrResizeOfAnExistingCopy() {
+        UUID userId = UUID.randomUUID();
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        FakeActiveCopyOperationCache activeCopies = new FakeActiveCopyOperationCache(Set.of(userId.toString()));
+        HyperliquidCopyCandidateResolver resolver = new HyperliquidCopyCandidateResolver(
+                new FakeUserDetailCachedService(List.of(user(userId))),
+                new FakeAllocationService(List.of()),
+                activeCopies,
+                new CopyStrategyRuntimeRouter(),
+                new FakeGuardRuntimeCache(CopyStrategyGuardDecision.blocked(
+                        "METRIC_V2_CACHE_MISSING",
+                        "metric service unavailable"
+                )),
+                new CopyRuntimeGuardPolicy(),
+                allocationSafety("V2", true, false),
+                meters
+        );
+
+        HyperliquidCopyCandidateResolver.CandidateUsers close = resolver.resolve(
+                mapped(PositionSide.LONG, "CLOSE", "SOLUSDT"),
+                CopyJobAction.CLOSE
+        );
+        HyperliquidCopyCandidateResolver.CandidateUsers resize = resolver.resolve(
+                mapped(PositionSide.LONG, "RESIZE", "SOLUSDT"),
+                CopyJobAction.OPEN
+        );
+
+        assertEquals(1, close.eligibleUsers().size());
+        assertEquals(1, resize.eligibleUsers().size());
+        assertEquals(1.0, meters.get("signals.metric_v2.close.allowed_on_metric_failure.total")
+                .tag("reason", "metric_not_required").counter().count());
+    }
+
+    @Test
+    void v2RejectsAllUsersFallbackEvenWhenBothLegacyFlagsAreUnsafe() {
+        UUID userId = UUID.randomUUID();
+        HyperliquidCopyCandidateResolver resolver = new HyperliquidCopyCandidateResolver(
+                new FakeUserDetailCachedService(List.of(user(userId))),
+                new FakeAllocationService(List.of()),
+                new FakeActiveCopyOperationCache(),
+                new CopyStrategyRuntimeRouter(),
+                new FakeGuardRuntimeCache(CopyStrategyGuardDecision.allow()),
+                new CopyRuntimeGuardPolicy(),
+                allocationSafety("V2", false, true),
+                new SimpleMeterRegistry()
+        );
+
+        HyperliquidCopyCandidateResolver.CandidateUsers result = resolver.resolve(
+                mapped(PositionSide.LONG, "OPEN", "SOLUSDT"),
+                CopyJobAction.OPEN
+        );
+
+        assertTrue(result.eligibleUsers().isEmpty());
+    }
+
     private static HyperliquidCopyCandidateResolver resolver(
             List<UserDetailDto> users,
             List<UserCopyAllocationEntity> allocations,
@@ -163,7 +222,20 @@ class HyperliquidCopyCandidateResolverTest {
                 new CopyStrategyRuntimeRouter(),
                 new FakeGuardRuntimeCache(guardDecision),
                 new CopyRuntimeGuardPolicy(),
+                allocationSafety("V2", true, false),
                 new io.micrometer.core.instrument.simple.SimpleMeterRegistry()
+        );
+    }
+
+    private static CopyAllocationSafetyPolicy allocationSafety(
+            String readMode,
+            boolean filterByWalletAllocation,
+            boolean fallbackAllUsers
+    ) {
+        return new CopyAllocationSafetyPolicy(
+                new MetricWalletReadModeResolver(readMode),
+                filterByWalletAllocation,
+                fallbackAllUsers
         );
     }
 
@@ -310,6 +382,16 @@ class HyperliquidCopyCandidateResolverTest {
     }
 
     private static final class FakeActiveCopyOperationCache implements ActiveCopyOperationCache {
+        private final Set<String> activeUsers;
+
+        private FakeActiveCopyOperationCache() {
+            this(Set.of());
+        }
+
+        private FakeActiveCopyOperationCache(Set<String> activeUsers) {
+            this.activeUsers = activeUsers;
+        }
+
         @Override public boolean isActive(String originId, String userId) { return false; }
         @Override public boolean isActive(String originId, String userId, Long allocationId, String strategyCode, String symbol, String typeOperation) { return false; }
         @Override public boolean isKnown(String originId, String userId) { return false; }
@@ -319,10 +401,10 @@ class HyperliquidCopyCandidateResolverTest {
         @Override public List<CopyOperationDto> activeOperations(String originId, String userId) { return List.of(); }
         @Override public List<CopyOperationDto> activeOperationsByUserAndWallet(String userId, String walletId) { return List.of(); }
         @Override public List<CopyOperationDto> activeOperationsByUser(String userId) { return List.of(); }
-        @Override public Set<String> activeUserIds(String originId) { return Set.of(); }
+        @Override public Set<String> activeUserIds(String originId) { return activeUsers; }
         @Override public Set<String> activeUserIdsByWallet(String walletId) { return Set.of(); }
-        @Override public Set<String> activeUserIdsByWalletAndSymbol(String walletId, String symbol) { return Set.of(); }
-        @Override public Set<String> activeUserIdsByWalletAndBaseSymbol(String walletId, String symbol) { return Set.of(); }
+        @Override public Set<String> activeUserIdsByWalletAndSymbol(String walletId, String symbol) { return activeUsers; }
+        @Override public Set<String> activeUserIdsByWalletAndBaseSymbol(String walletId, String symbol) { return activeUsers; }
         @Override public String traceId(String originId, String userId, String walletId, String symbol) { return "trace"; }
         @Override public String traceId(String originId, String userId, String walletId, String symbol, Long allocationId, String strategyCode) { return "trace"; }
         @Override public void markPendingOpen(String originId, String userId, String walletId, String symbol, String typeOperation, String traceId) {}

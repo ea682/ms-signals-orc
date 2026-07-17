@@ -124,6 +124,14 @@ class CopyRuntimeGuardPolicyTest {
         assertEquals("NEGATIVE_3MO_MANUAL_REVIEW", decision.reasonCode());
     }
 
+    @Test
+    void missingRuntimeGuardFailsClosedForNewExposure() {
+        CopyRuntimeGuardPolicy.Decision decision = policy.decide(active("LIVE"), null);
+
+        assertFalse(decision.allowed());
+        assertEquals("RUNTIME_GUARD_NOT_AVAILABLE", decision.reasonCode());
+    }
+
     private static UserCopyAllocationEntity promoted(String mode) {
         UserCopyAllocationEntity allocation = active(mode);
         allocation.setLinkedShadowAllocationId(18L);

@@ -1,5 +1,9 @@
 # SDD - Reliability SHADOW, MICRO_LIVE y LIVE
 
+> Nota de precedencia (2026-07-13): los controles de reliability conservan su
+> valor, pero el presupuesto fijo por orden y el maximo global de posiciones
+> fueron sustituidos por `copy-trading-proportional-portfolio-v3-sdd.md`.
+
 Estado: implementado y validado localmente (`FIXED_LOCAL_ONLY`)
 Fecha: 2026-07-11
 Repositorios inspeccionados:

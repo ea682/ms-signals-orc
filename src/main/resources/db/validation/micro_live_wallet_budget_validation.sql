@@ -56,11 +56,41 @@ SELECT coalesce(a.id_user, p.id_user) AS id_user,
 FROM active a
 FULL OUTER JOIN pending p
   ON p.id_user = a.id_user AND p.wallet_id = a.wallet_id
-WHERE coalesce(a.used_margin_usdc, 0) + coalesce(p.pending_margin_usdc, 0) > 100
-   OR coalesce(a.open_positions, 0) + coalesce(p.pending_positions, 0) > 5;
+WHERE coalesce(a.used_margin_usdc, 0) + coalesce(p.pending_margin_usdc, 0) > 100;
 
-SELECT id, id_user, wallet_id, user_copy_allocation_id, requested_margin_usd
-FROM futuros_operaciones.copy_dispatch_intent
-WHERE execution_mode = 'MICRO_LIVE'
-  AND reduce_only = false
-  AND requested_margin_usd > 20;
+-- Position count is constrained only when the user configured an explicit
+-- allocation limit. V3 has no global five-position threshold and no fixed
+-- per-order margin threshold.
+WITH active_positions AS (
+    SELECT user_copy_allocation_id,
+           count(*) AS open_positions
+    FROM futuros_operaciones.copy_operation
+    WHERE execution_mode = 'MICRO_LIVE'
+      AND is_active = true
+      AND coalesce(is_shadow, false) = false
+      AND user_copy_allocation_id IS NOT NULL
+    GROUP BY user_copy_allocation_id
+), pending_positions AS (
+    SELECT user_copy_allocation_id,
+           coalesce(sum(reserved_position_count), 0) AS reserved_positions
+    FROM futuros_operaciones.copy_dispatch_intent
+    WHERE execution_mode = 'MICRO_LIVE'
+      AND reservation_status = 'PENDING'
+      AND user_copy_allocation_id IS NOT NULL
+    GROUP BY user_copy_allocation_id
+)
+SELECT allocation.id AS user_copy_allocation_id,
+       allocation.id_user,
+       allocation.wallet_id,
+       allocation.user_max_concurrent_positions,
+       coalesce(active.open_positions, 0) AS open_positions,
+       coalesce(pending.reserved_positions, 0) AS reserved_positions
+FROM futuros_operaciones.user_copy_allocation allocation
+LEFT JOIN active_positions active
+  ON active.user_copy_allocation_id = allocation.id
+LEFT JOIN pending_positions pending
+  ON pending.user_copy_allocation_id = allocation.id
+WHERE allocation.execution_mode = 'MICRO_LIVE'
+  AND allocation.user_max_concurrent_positions IS NOT NULL
+  AND coalesce(active.open_positions, 0) + coalesce(pending.reserved_positions, 0)
+      > allocation.user_max_concurrent_positions;

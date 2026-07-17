@@ -18,13 +18,17 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     List<CopyOperationEntity> findAllByIdOrderOrigin(String idOrderOrigin);
 
-    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
+    Optional<CopyOperationEntity> findFirstByIdOrderOriginAndIdUserAndActiveTrueOrderByDateCreationDesc(String idOrderOrigin, String idUser);
 
-    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndTypeOperation(String idOrderOrigin, String idUser, String typeOperation);
+    Optional<CopyOperationEntity> findFirstByIdOrderOriginAndIdUserAndTypeOperationAndActiveTrueOrderByDateCreationDesc(String idOrderOrigin, String idUser, String typeOperation);
 
-    Optional<CopyOperationEntity> findByUserCopyAllocationIdAndIdOrderOriginAndTypeOperation(Long userCopyAllocationId, String idOrderOrigin, String typeOperation);
+    Optional<CopyOperationEntity> findFirstByUserCopyAllocationIdAndIdOrderOriginAndTypeOperationAndActiveTrueOrderByDateCreationDesc(Long userCopyAllocationId, String idOrderOrigin, String typeOperation);
 
-    Optional<CopyOperationEntity> findByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperation(String idOrderOrigin, String idUser, String copyStrategyCode, String typeOperation);
+    Optional<CopyOperationEntity> findFirstByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperationAndActiveTrueOrderByDateCreationDesc(String idOrderOrigin, String idUser, String copyStrategyCode, String typeOperation);
+
+    Optional<CopyOperationEntity> findFirstByUserCopyAllocationIdAndIdOrderOriginAndTypeOperationOrderByDateCreationDesc(Long userCopyAllocationId, String idOrderOrigin, String typeOperation);
+
+    Optional<CopyOperationEntity> findFirstByIdOrderOriginAndIdUserAndCopyStrategyCodeAndTypeOperationOrderByDateCreationDesc(String idOrderOrigin, String idUser, String copyStrategyCode, String typeOperation);
 
     boolean existsByIdOrderOriginAndIdUser(String idOrderOrigin, String idUser);
 

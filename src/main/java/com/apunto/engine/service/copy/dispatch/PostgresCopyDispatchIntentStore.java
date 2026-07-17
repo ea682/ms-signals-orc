@@ -31,33 +31,32 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
     private static final BigDecimal FIXED_MICRO_LIVE_TOTAL_USD = new BigDecimal("100");
-    private static final BigDecimal FIXED_MICRO_LIVE_OPERATION_USD = new BigDecimal("20");
-    private static final int FIXED_MICRO_LIVE_POSITIONS = 5;
+    private static final BigDecimal FIXED_MICRO_LIVE_LEVERAGE = new BigDecimal("5");
     private final CopyDispatchIntentRepository repository;
     private final EntityManager entityManager;
     private final ObjectMapper objectMapper;
     private final MeterRegistry meterRegistry;
+    private final CopyDispatchPayloadConflictRecorder payloadConflictRecorder;
 
-    @Value("${copy.micro-live.max-margin-per-operation-usd:20}")
-    private BigDecimal maxMarginPerOrderUsd;
     @Value("${copy.micro-live.total-capital-usd:${copy.micro-live.max-capital-usd:100}}")
     private BigDecimal maxTotalMarginUsd;
-    @Value("${copy.micro-live.max-concurrent-positions:5}")
-    private int maxConcurrentPositions;
-
+    @Value("${copy.micro-live.target-leverage:5}")
+    private BigDecimal targetLeverage;
     @PostConstruct
-    void validateFixedMicroLiveLimits() {
-        requireFixedMicroLiveLimits(maxTotalMarginUsd, maxMarginPerOrderUsd, maxConcurrentPositions);
+    void validateV3MicroLivePolicy() {
+        requireV3MicroLivePolicy(maxTotalMarginUsd, targetLeverage, null, null);
     }
 
-    static void requireFixedMicroLiveLimits(BigDecimal totalMarginUsd,
-                                            BigDecimal marginPerOperationUsd,
-                                            int concurrentPositions) {
+    static void requireV3MicroLivePolicy(BigDecimal totalMarginUsd,
+                                         BigDecimal leverage,
+                                         BigDecimal legacyMarginPerOperationUsd,
+                                         Integer legacyGlobalPositions) {
         if (totalMarginUsd == null || totalMarginUsd.compareTo(FIXED_MICRO_LIVE_TOTAL_USD) != 0
-                || marginPerOperationUsd == null || marginPerOperationUsd.compareTo(FIXED_MICRO_LIVE_OPERATION_USD) != 0
-                || concurrentPositions != FIXED_MICRO_LIVE_POSITIONS) {
+                || leverage == null || leverage.compareTo(FIXED_MICRO_LIVE_LEVERAGE) != 0
+                || legacyMarginPerOperationUsd != null
+                || legacyGlobalPositions != null) {
             throw new IllegalStateException(
-                    "MICRO_LIVE limits must be exactly total=100 USDC, perOperation=20 USDC, positions=5");
+                    "MICRO_LIVE V3 must use total=100 USDC and leverage=5 without fixed per-operation/global-position limits");
         }
     }
 
@@ -90,12 +89,14 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         int inserted = repository.insertIfAbsent(
                 candidateId, request.idempotencyKey(), identity.userId(), identity.userCopyAllocationId(),
                 realMode(identity.executionMode()), trim(normalizedWalletId(request.walletId()), 180), trim(identity.strategyCode(), 64),
-                trim(identity.scopeType(), 32), trim(identity.scopeValue(), 180), trim(identity.sourceEventId(), 600),
+                trim(identity.scopeType(), 32), trim(identity.scopeValue(), 180), trim(identity.generationId(), 80),
+                trim(identity.sourceEventId(), 600),
                 trim(request.operation().getOriginId(), 120), trim(request.sourceEventType(), 40),
                 trim(identity.copyIntent(), 40), trim(request.symbol(), 40), trim(request.side(), 12),
                 trim(request.positionSide(), 12), request.reduceOnly(), request.requestedQty(),
                 nonNegative(request.requestedMarginUsd()), nonNegative(request.requestedNotionalUsd()),
-                request.referencePrice(), request.requestedLeverage(), request.reservePosition() ? 1 : 0,
+                trim(request.notionalBand(), 32), request.referencePrice(), request.requestedLeverage(), request.userMaxConcurrentPositions(),
+                request.reservePosition() ? 1 : 0,
                 trim(request.operation().getClientOrderId(), 36), request.requestHash(), now);
 
         CopyDispatchIntentEntity intent = repository.findByIdempotencyKey(request.idempotencyKey())
@@ -110,7 +111,8 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
 
         if (requiresMicroLiveBudget) {
             BudgetSnapshot snapshot = budgetSnapshot(request);
-            MicroLiveBudgetPolicy policy = new MicroLiveBudgetPolicy(maxMarginPerOrderUsd, maxTotalMarginUsd, maxConcurrentPositions);
+            MicroLiveBudgetPolicy policy = new MicroLiveBudgetPolicy(
+                    maxTotalMarginUsd, request.userMaxConcurrentPositions());
             BudgetDecision decision = policy.evaluate(snapshot, request.requestedMarginUsd(), request.reservePosition());
             BigDecimal requestedMarginUsd = nonNegative(request.requestedMarginUsd());
             BigDecimal committedMarginUsd = snapshot.usedMarginUsd().add(snapshot.reservedPendingMarginUsd());
@@ -119,14 +121,15 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
             BigDecimal walletRemainingMarginUsd = maxTotalMarginUsd.subtract(marginAfterDecisionUsd).max(ZERO);
             String budgetDecision = decision.allowed() ? "ALLOW" : "BLOCK";
             String budgetResult = decision.allowed() ? "RESERVED" : "REJECTED";
-            log.info("event=copy.budget.evaluated reasonCode={} decision={} result={} executionMode=MICRO_LIVE stage=BUDGET_RESERVATION userId={} walletId={} strategyCode={} allocationId={} sourceEventId={} idempotencyKey={} clientOrderId={} requestedMarginUsd={} reservedMarginUsd={} walletOpenMarginUsd={} walletPendingMarginUsd={} walletRemainingMarginUsd={} openPositionCount={} pendingPositionCount={} maxWalletMarginUsd={} maxMarginPerOperationUsd={} maxConcurrentPositions={} lockWaitMs={} projectedMarginUsd={} projectedPositionCount={} microLiveBudgetLockAcquired=true",
+            log.info("event=copy.budget.evaluated policyVersion=proportional-portfolio-v3 reasonCode={} decision={} result={} executionMode=MICRO_LIVE stage=BUDGET_RESERVATION userId={} walletId={} strategyCode={} allocationId={} sourceEventId={} idempotencyKey={} clientOrderId={} requestedMarginUsd={} reservedMarginUsd={} walletOpenMarginUsd={} walletPendingMarginUsd={} walletRemainingMarginUsd={} openPositionCount={} pendingPositionCount={} maxWalletMarginUsd={} userMaxConcurrentPositions={} targetLeverage={} lockWaitMs={} projectedMarginUsd={} projectedPositionCount={} microLiveBudgetLockAcquired=true",
                     decision.reasonCode(), budgetDecision, budgetResult,
                     identity.userId(), normalizedWalletId(request.walletId()), identity.strategyCode(),
                     identity.userCopyAllocationId(), identity.sourceEventId(), request.idempotencyKey(),
                     safe(request.operation().getClientOrderId()), requestedMarginUsd, reservedMarginUsd,
                     snapshot.usedMarginUsd(), snapshot.reservedPendingMarginUsd(), walletRemainingMarginUsd,
                     snapshot.openPositions(), snapshot.reservedPositions(), maxTotalMarginUsd,
-                    maxMarginPerOrderUsd, maxConcurrentPositions, budgetLockWaitMs, decision.projectedMarginUsd(),
+                    request.userMaxConcurrentPositions(), targetLeverage, budgetLockWaitMs,
+                    decision.projectedMarginUsd(),
                     decision.projectedPositions());
             if (decision.allowed()) {
                 log.info("event=copy.budget.reserved reasonCode={} decision=ALLOW result=RESERVED executionMode=MICRO_LIVE userId={} walletId={} strategyCode={} allocationId={} sourceEventId={} idempotencyKey={} requestedMarginUsd={} reservedMarginUsd={} walletRemainingMarginUsd={}",
@@ -148,6 +151,7 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
                 meterRegistry.counter("copy_reservation_rejected", "execution_mode", "micro_live",
                         "result", "rejected").increment();
                 meterRegistry.counter("copy_budget_reject_total", "reason", safeTag(decision.reasonCode())).increment();
+                meterRegistry.counter("signals.portfolio.capacity_limit.total").increment();
                 meterRegistry.counter("copy_dispatch_total", "mode", "micro_live", "result", "rejected",
                         "reason", safeTag(decision.reasonCode())).increment();
                 recordClaim(started, intent.getExecutionMode(), "reservation_rejected");
@@ -339,11 +343,22 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
     private CopyDispatchPermit duplicatePermit(CopyDispatchIntentEntity intent, CopyDispatchRequest request) {
         String status = intent.getStatus();
         if (!Objects.equals(intent.getRequestHash(), request.requestHash())) {
-            log.error("event=copy.dispatch.intent.conflict idempotencyKey={} existingIntentId={} existingStatus={} decision=BLOCK_PAYLOAD_MISMATCH",
-                    intent.getIdempotencyKey(), intent.getId(), status);
-            meterRegistry.counter("copy_dispatch_payload_conflict", "execution_mode", safeTag(intent.getExecutionMode()),
-                    "result", "blocked").increment();
-            return CopyDispatchPermit.conflict(intent.getId(), status);
+            boolean legacyDerivedDrift = CopyDispatchRequestFingerprint.matchesLegacyMarketWithDerivedEconomicsDrift(
+                    intent, request, new CopyIdempotencyKeyFactory());
+            if (legacyDerivedDrift) {
+                log.info("event=copy.dispatch.intent.legacy_fingerprint_compatible idempotencyKey={} existingIntentId={} existingStatus={} decision=RESOLVE_EXISTING reasonCode=DERIVED_ECONOMICS_DRIFT copyImpact=NO_DUPLICATE_ORDER",
+                        intent.getIdempotencyKey(), intent.getId(), status);
+                meterRegistry.counter("copy_dispatch_legacy_fingerprint_compatible",
+                        "execution_mode", safeTag(intent.getExecutionMode()), "result", "resolved").increment();
+            } else {
+                CopyDispatchPayloadConflictRecord conflict = payloadConflictRecorder.record(intent, request);
+                log.error("event=copy.dispatch.intent.conflict conflictId={} idempotencyKey={} existingIntentId={} existingStatus={} manualReviewRequired={} changedFields={} decision=BLOCK_PAYLOAD_MISMATCH",
+                        conflict.id(), intent.getIdempotencyKey(), intent.getId(), status,
+                        conflict.manualReviewRequired(), conflict.fieldDiff().keySet());
+                meterRegistry.counter("copy_dispatch_payload_conflict", "execution_mode", safeTag(intent.getExecutionMode()),
+                        "result", "blocked").increment();
+                return CopyDispatchPermit.conflict(intent.getId(), status);
+            }
         }
         if ("PERSISTED".equals(status)
                 || (intent.getCopyOperationId() != null && !"PERSISTENCE_PENDING".equals(status))) {
@@ -443,6 +458,11 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
                 && (request.walletId() == null || request.walletId().isBlank())) {
             throw new SkipExecutionException("COPY_WALLET_REQUIRED_FOR_MICRO_LIVE_BUDGET",
                     "Wallet durable requerida para reservar el presupuesto MICRO_LIVE", null);
+        }
+        if (request.userMaxConcurrentPositions() != null
+                && request.userMaxConcurrentPositions() <= 0) {
+            throw new SkipExecutionException("COPY_USER_POSITION_LIMIT_INVALID",
+                    "userMaxConcurrentPositions debe ser positivo o null", null);
         }
         String normalizedWallet = normalizedWalletId(request.walletId());
         if (normalizedWallet != null && normalizedWallet.length() > 180) {
