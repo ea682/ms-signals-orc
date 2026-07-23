@@ -5,7 +5,7 @@ import com.apunto.engine.dto.client.FuturesAssetBalanceClientResponse;
 import com.apunto.engine.entity.UserApiKeyEntity;
 import com.apunto.engine.repository.UserApiKeyRepository;
 import com.apunto.engine.shared.dto.ApiResponse;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,7 +14,6 @@ import java.util.Locale;
 import java.util.UUID;
 
 @Service
-@RequiredArgsConstructor
 public class ExecutionAccountIsolationVerifier {
 
     private static final String EXCHANGE = "BINANCE";
@@ -22,6 +21,13 @@ public class ExecutionAccountIsolationVerifier {
 
     private final UserApiKeyRepository repository;
     private final BinanceClient binanceClient;
+
+    public ExecutionAccountIsolationVerifier(
+            UserApiKeyRepository repository,
+            @Qualifier("binanceInfoClient") BinanceClient binanceClient) {
+        this.repository = repository;
+        this.binanceClient = binanceClient;
+    }
 
     @Transactional
     public ExecutionAccountIsolationDecision verify(UUID userId, UserApiKeyEntity selected) {

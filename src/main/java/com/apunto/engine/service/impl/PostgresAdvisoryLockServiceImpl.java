@@ -6,6 +6,7 @@ import com.apunto.engine.shared.exception.ErrorCode;
 import com.apunto.engine.shared.exception.SkipExecutionException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import io.micrometer.core.instrument.Metrics;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
@@ -29,6 +30,7 @@ public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
 
     @Override
     public <T> T withLock(String key, Duration maxWait, Supplier<T> action) {
+        final long waitStartedNs = System.nanoTime();
         if (key == null || key.isBlank()) {
             throw new SkipExecutionException(
                     "lock_key_blank",
@@ -50,6 +52,12 @@ public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
         while (true) {
             try (Connection con = dataSource.getConnection()) {
                 if (tryLock(con, key)) {
+                    Metrics.timer(
+                            "position_lock_wait_duration",
+                            "result", "acquired"
+                    ).record(
+                            System.nanoTime() - waitStartedNs,
+                            java.util.concurrent.TimeUnit.NANOSECONDS);
                     try {
                         return action.get();
                     } finally {
@@ -57,10 +65,22 @@ public class PostgresAdvisoryLockServiceImpl implements DistributedLockService {
                     }
                 }
             } catch (SQLException e) {
+                Metrics.timer(
+                        "position_lock_wait_duration",
+                        "result", "error"
+                ).record(
+                        System.nanoTime() - waitStartedNs,
+                        java.util.concurrent.TimeUnit.NANOSECONDS);
                 throw new EngineException(ErrorCode.EXTERNAL_SERVICE_ERROR, "DB lock error: " + e.getMessage());
             }
 
             if (System.currentTimeMillis() >= deadline) {
+                Metrics.timer(
+                        "position_lock_wait_duration",
+                        "result", "timeout"
+                ).record(
+                        System.nanoTime() - waitStartedNs,
+                        java.util.concurrent.TimeUnit.NANOSECONDS);
                 throw new SkipExecutionException(
                         "lock_timeout",
                         "Timeout esperando advisory lock",

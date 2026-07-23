@@ -380,6 +380,11 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                         laneIndex, markFailedEx.getClass().getSimpleName(), safeLog(markFailedEx.getMessage()));
             }
             meterRegistry.counter("signals.hyperliquid.direct_ingest.worker_uncaught.total", "deltaType", safeTag(mapped == null ? null : mapped.deltaType())).increment();
+            meterRegistry.counter(
+                    "worker_failures_total",
+                    "worker", "direct_ingest",
+                    "delta_type", safeTag(mapped == null ? null : mapped.deltaType())
+            ).increment();
             log.error("event=hyperliquid.direct_ingest.worker_uncaught reasonCode=direct_ingest_worker_uncaught laneIndex={} dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDepth={} activeWorkers={} expectedWorkers={} action=keep_worker_alive",
                     laneIndex,
                     task == null ? "NA" : safeLog(task.dedupeKey()),
@@ -793,6 +798,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                         ? null
                         : mapped.request().economicEventKind())
         ).increment();
+        meterRegistry.counter(
+                "estimated_flip_blocked_total",
+                "reason", safeTag(decision.reason())
+        ).increment();
         meterRegistry.timer(
                 "signals.hyperliquid.direct_ingest.process.duration",
                 Tags.of("result", "blocked", "deltaType", "FLIP")
@@ -871,6 +880,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private void registerMetrics() {
         Gauge.builder("signals.hyperliquid.direct_ingest.queue.depth", this, svc -> svc.queueDepth())
                 .description("Hyperliquid direct ingest queue depth")
+                .register(meterRegistry);
+        Gauge.builder("worker_queue_depth", this, svc -> svc.queueDepth())
+                .tag("worker", "direct_ingest")
+                .description("Semantic pipeline worker queue depth")
                 .register(meterRegistry);
         Gauge.builder("signals.hyperliquid.direct_ingest.workers.active", activeWorkers, a -> a.get())
                 .description("Hyperliquid direct ingest active worker loops")

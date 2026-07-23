@@ -4035,6 +4035,12 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (!eventTypeContradictsMath(originalEventType, computed)) {
             return;
         }
+        meterRegistry.counter(
+                "semantic_classification_corrected_total",
+                "flow", "live",
+                "computed_delta_type",
+                computed.name().toLowerCase(Locale.ROOT)
+        ).increment();
         BigDecimal deltaQty = previousQty == null || resultingQty == null ? null : resultingQty.subtract(previousQty);
         log.info("event=copy_position.classification.corrected flow=live originalEventType={} computedDeltaType={} reasonCode=EVENT_TYPE_CONTRADICTS_POSITION_MATH warningCode=EVENT_TYPE_CONTRADICTS_POSITION_MATH previousQty={} resultingQty={} deltaQty={} symbol={} walletId={} profileKey={} strategyCode={} side={} originId={} orderId={} correctionApplied=true confidence=POSITION_MATH",
                 originalEventType,

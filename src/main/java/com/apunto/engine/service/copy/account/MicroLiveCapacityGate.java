@@ -7,6 +7,7 @@ import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.shared.dto.ApiResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,7 +26,7 @@ public class MicroLiveCapacityGate {
     private final MicroLiveCapacitySnapshotStore snapshotStore;
 
     @Autowired
-    public MicroLiveCapacityGate(BinanceClient binanceClient,
+    public MicroLiveCapacityGate(@Qualifier("binanceInfoClient") BinanceClient binanceClient,
                                  UserCopyAllocationRepository allocationRepository,
                                  MicroLiveCapacityProperties properties,
                                  MicroLiveCapacitySnapshotStore snapshotStore) {
