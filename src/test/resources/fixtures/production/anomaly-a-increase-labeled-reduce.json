@@ -1,0 +1,21 @@
+{
+  "fixtureId": "signals-20260722-anomaly-a-001",
+  "source": "logs-signals.txt.gz",
+  "observedAtUtc": "2026-07-22T17:20:14.607Z",
+  "traceId": "trace_sanitized_a001",
+  "wallet": "wallet_sanitized_a001",
+  "originId": "origin_sanitized_a001",
+  "symbol": "DOGEUSDT",
+  "side": "LONG",
+  "originalEventType": "INCREASE",
+  "originalDeltaType": "RESIZE",
+  "previousSizeQty": 25080.000000000000,
+  "resultingSizeQty": 24397.0,
+  "deltaSizeQty": -683.000000000000,
+  "executionPrice": 0.073125,
+  "averageEntryPrice": 0.073194515027,
+  "ledgerEventType": "REDUCE",
+  "observedShadowIntent": "INCREASE",
+  "observedReasonCode": "SHADOW_POSITION_REDUCED",
+  "expectedFinalEventType": "REDUCE"
+}

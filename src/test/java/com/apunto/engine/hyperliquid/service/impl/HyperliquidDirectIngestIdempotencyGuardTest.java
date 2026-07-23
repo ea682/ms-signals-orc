@@ -10,11 +10,15 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
 import java.lang.reflect.Constructor;
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -44,6 +48,39 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
     }
 
     @Test
+    void sameAuthoritativeTidWithDifferentPayloadIsConflictNotReplicaDuplicate() throws Exception {
+        var objectMapper = new ObjectMapper().findAndRegisterModules();
+        var fixture = objectMapper.readTree(getClass().getResourceAsStream(
+                "/fixtures/production/anomaly-e-zero-hash-identity.json"));
+        var firstNode = fixture.path("first").deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) firstNode)
+                .put("economicEventKind", "USER_FILL")
+                .put("sourceEstimated", false);
+        var firstRequest = objectMapper.treeToValue(
+                firstNode,
+                com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest.class);
+        var conflictingNode = fixture.path("first").deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) conflictingNode)
+                .put("sizeQty", 360082.0)
+                .put("notionalUsd", 148400.594660)
+                .put("economicEventKind", "USER_FILL")
+                .put("sourceEstimated", false);
+        var conflictingRequest = objectMapper.treeToValue(
+                conflictingNode,
+                com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest.class);
+        HyperliquidMappedDelta first = authoritative(firstRequest);
+        HyperliquidMappedDelta conflicting = authoritative(conflictingRequest);
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
+        HyperliquidDirectIngestIdempotencyGuard guard =
+                guard(jdbc, new SimpleMeterRegistry(), false);
+
+        assertTrue(guard.tryAcquire(first, "same-authoritative-tid"));
+        assertThrows(
+                HyperliquidDirectIngestDedupeException.class,
+                () -> guard.tryAcquire(conflicting, "same-authoritative-tid"));
+    }
+
+    @Test
     void sameSourceIdentityWithReplicaDerivedPayloadDifferenceIsAcknowledgedAsDuplicate() {
         FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
@@ -54,6 +91,22 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
         assertFalse(guard.tryAcquire(delta, "replica-b-derived-state"));
         assertEquals(1.0d, registry.find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
                 .tag("result", "replica_payload_divergence").counter().count());
+        assertEquals(1.0d, registry.find("replica_payload_divergence_total")
+                .tag("delta_type", "open").counter().count());
+    }
+
+    @Test
+    void sameEconomicPayloadWithReplicaLocalEventIdsIsHealthyDuplicate() {
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestIdempotencyGuard guard = guard(jdbc, registry, false);
+
+        assertTrue(guard.tryAcquire(deltaWithEventId("replica-a-event"), "same-economic-payload"));
+        assertFalse(guard.tryAcquire(deltaWithEventId("replica-b-event"), "same-economic-payload"));
+        var duplicate = registry.find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
+                .tag("result", "duplicate").counter();
+        assertNotNull(duplicate, "replica-local eventId must not create a semantic divergence");
+        assertEquals(1.0d, duplicate.count());
     }
 
     @Test
@@ -128,6 +181,71 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
                 "OPEN",
                 null,
                 null
+        );
+    }
+
+    private static HyperliquidMappedDelta deltaWithEventId(String eventId) {
+        var request = new com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest(
+                eventId,
+                "same-source-key",
+                "HYPERLIQUID_POSITION_RESIZED",
+                "RESIZE",
+                "hyperliquid",
+                "0xabc",
+                "account-1",
+                "HYPEUSDT",
+                "LONG",
+                "OPEN",
+                new BigDecimal("72.67"),
+                new BigDecimal("72.67"),
+                new BigDecimal("4214.86"),
+                new BigDecimal("1404.953333333333333333"),
+                new BigDecimal("58"),
+                new BigDecimal("58"),
+                new BigDecimal("3"),
+                new BigDecimal("4214.86"),
+                new BigDecimal("4214.86"),
+                null,
+                null,
+                null,
+                null,
+                new BigDecimal("58"),
+                null,
+                "RECOVERED",
+                "production_replica_divergence",
+                1784740813038L,
+                Instant.parse("2026-07-22T17:20:13.446Z"),
+                Instant.parse("2026-07-22T17:20:13.447Z"),
+                57L,
+                318L,
+                "wallet|HYPEUSDT|RESIZE|1784740813038|HYPE|867848868617277|hash",
+                "trade-sanitized-b001",
+                true
+        );
+        return new HyperliquidMappedDelta(
+                "same-source-key",
+                "hyperliquid-position:0xabc:HYPEUSDT:LONG",
+                "0xabc",
+                "HYPEUSDT",
+                "LONG",
+                "RESIZE",
+                null,
+                request
+        );
+    }
+
+    private static HyperliquidMappedDelta authoritative(
+            com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest request
+    ) {
+        return new HyperliquidMappedDelta(
+                "hyperliquid:trade:wallet_sanitized_e001:23131303191059",
+                "hyperliquid-position:wallet_sanitized_e001:ONDOUSDT:SHORT",
+                request.wallet(),
+                request.symbol(),
+                request.side(),
+                request.deltaType(),
+                null,
+                request
         );
     }
 
