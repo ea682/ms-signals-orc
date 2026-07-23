@@ -56,6 +56,8 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
     private final OperationMovementEventService operationMovementEventService;
     private final ShadowCopyTradingService shadowCopyTradingService;
     private final MeterRegistry meterRegistry;
+    private final HyperliquidFlipExecutionBasisPolicy flipExecutionBasisPolicy =
+            new HyperliquidFlipExecutionBasisPolicy();
     private final int laneCount;
     private final BlockingQueue<QueuedDelta>[] lanes;
     private final AtomicBoolean[] laneWorkerSlots;
@@ -407,6 +409,12 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         HyperliquidMappedDelta mapped = task.mappedDelta();
         HyperliquidMappedDelta copyReady = mapped;
         try (MDC.MDCCloseable ignored = MDC.putCloseable("traceId", originTraceId(mapped))) {
+            HyperliquidFlipExecutionBasisPolicy.Decision flipBasis =
+                    flipExecutionBasisPolicy.evaluate(mapped);
+            if (flipBasis.flip() && !flipBasis.allowed()) {
+                blockFlipWithoutExecutionBasis(task, mapped, flipBasis, startedNs);
+                return;
+            }
             copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
             MDC.put("traceId", originTraceId(copyReady));
             ShadowEnqueueResult shadowEnqueue = enqueueShadowBeforeLive(copyReady, task.acceptedNs());
@@ -764,6 +772,45 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     safeLog(mappedDelta.idempotencyKey()), storeFailure.getClass().getSimpleName(), safeLog(storeFailure.getMessage()), storeFailure);
             return false;
         }
+    }
+
+    private void blockFlipWithoutExecutionBasis(
+            QueuedDelta task,
+            HyperliquidMappedDelta mapped,
+            HyperliquidFlipExecutionBasisPolicy.Decision decision,
+            long startedNs
+    ) {
+        String reasonCode = HyperliquidFlipExecutionBasisPolicy.MISSING_REASON_CODE;
+        HyperliquidDirectCopyDispatchResult blocked = HyperliquidDirectCopyDispatchResult.ok(
+                0, 0, 1, 0, false, reasonCode);
+        operationMovementEventService.recordAsync(mapped, blocked, reasonCode);
+        idempotencyGuard.markProcessed(mapped, reasonCode);
+        processed.incrementAndGet();
+        meterRegistry.counter(
+                "flip_previous_close_missing_total",
+                "reason", safeTag(decision.reason()),
+                "economic_kind", safeTag(mapped.request() == null
+                        ? null
+                        : mapped.request().economicEventKind())
+        ).increment();
+        meterRegistry.timer(
+                "signals.hyperliquid.direct_ingest.process.duration",
+                Tags.of("result", "blocked", "deltaType", "FLIP")
+        ).record(Duration.ofNanos(System.nanoTime() - startedNs));
+        log.warn("event=hyperliquid.direct_ingest.flip_blocked reasonCode={} decision=NO_SHADOW_NO_LIVE auditLedger=true retryable=false copyImpact=FAIL_CLOSED originImpact=NO_NEW_LIFECYCLE idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} economicEventKind={} sourceEstimated={} basisReason={} queueDelayMs={} elapsedMs={} queueDepth={}",
+                reasonCode,
+                safeLog(mapped.idempotencyKey()),
+                safeLog(mapped.positionKey()),
+                safeLog(mapped.wallet()),
+                safeLog(mapped.symbol()),
+                safeLog(mapped.side()),
+                safeLog(mapped.deltaType()),
+                safeLog(mapped.request() == null ? null : mapped.request().economicEventKind()),
+                mapped.request() == null ? null : mapped.request().sourceEstimated(),
+                safeLog(decision.reason()),
+                elapsedMs(task.acceptedNs()),
+                elapsedMs(startedNs),
+                queueDepth());
     }
 
     private String originTraceId(HyperliquidMappedDelta mappedDelta) {

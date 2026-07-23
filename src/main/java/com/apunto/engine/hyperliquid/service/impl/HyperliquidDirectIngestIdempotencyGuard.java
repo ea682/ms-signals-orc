@@ -189,6 +189,11 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 if (existing.payloadFingerprint() != null
                         && !existing.payloadFingerprint().isBlank()
                         && !existing.payloadFingerprint().equals(payloadFingerprint)) {
+                    if (isAuthoritativeUserFill(mappedDelta)) {
+                        markPayloadConflict(
+                                idempotencyKey, mappedDelta, dedupeKey,
+                                existing, payloadFingerprint);
+                    }
                     if (sameImmutableSourceIdentity(existing, mappedDelta)) {
                         markReplicaPayloadDivergence(
                                 idempotencyKey, mappedDelta, dedupeKey, existing, payloadFingerprint);
@@ -315,6 +320,17 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 && java.util.Objects.equals(existing.sourceTs(), sourceTs(incoming));
     }
 
+    private boolean isAuthoritativeUserFill(HyperliquidMappedDelta mappedDelta) {
+        if (mappedDelta == null || mappedDelta.request() == null) {
+            return false;
+        }
+        var request = mappedDelta.request();
+        return "USER_FILL".equalsIgnoreCase(request.economicEventKind())
+                && Boolean.FALSE.equals(request.sourceEstimated())
+                && request.sourceSequence() != null
+                && request.sourceSequence() > 0L;
+    }
+
     private void markReplicaPayloadDivergence(
             String idempotencyKey,
             HyperliquidMappedDelta mappedDelta,
@@ -329,6 +345,10 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                     safe(idempotencyKey), auditFailure.getClass().getSimpleName(), safeLog(auditFailure.getMessage()));
         }
         recordDedupeMetric("replica_payload_divergence");
+        meterRegistry.counter(
+                "replica_payload_divergence_total",
+                "delta_type", safeMetricTag(mappedDelta.deltaType())
+        ).increment();
         log.warn("event=hyperliquid.direct_ingest.replica_payload_divergence reasonCode=REPLICA_DERIVED_PAYLOAD_DIVERGENCE decision=NOOP_HTTP_ACK expected=false shouldAlert=true retryable=false copyImpact=NO_DUPLICATE_ORDER idempotencyKey={} dedupeKey={} positionKey={} wallet={} symbol={} side={} deltaType={} sourceTs={} existingStatus={} leaseExpired={} existingFingerprint={} incomingFingerprint={} recommendedAction=COMPARE_HYPERLIQUID_REPLICA_LOCAL_STATE",
                 safe(idempotencyKey), safe(dedupeKey), safe(mappedDelta.positionKey()),
                 safe(mappedDelta.wallet()), safe(mappedDelta.symbol()), safe(mappedDelta.side()),
@@ -439,7 +459,6 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 canonicalText(mappedDelta.side()),
                 canonicalText(mappedDelta.deltaType()),
                 canonicalValue(sourceTs(mappedDelta)),
-                canonicalText(request == null ? null : request.eventId()),
                 canonicalText(request == null ? null : request.eventType()),
                 canonicalText(request == null ? null : request.status()),
                 canonicalDecimal(request == null ? null : request.sizeQty()),
@@ -473,6 +492,12 @@ public class HyperliquidDirectIngestIdempotencyGuard {
 
     private static String canonicalValue(Object value) {
         return value == null ? "<null>" : value.toString();
+    }
+
+    private static String safeMetricTag(String value) {
+        return value == null || value.isBlank()
+                ? "unknown"
+                : value.trim().toLowerCase(Locale.ROOT);
     }
 
     private String safeReason(String reasonCode, String fallback) {

@@ -4,7 +4,10 @@ import com.apunto.engine.dto.OperacionDto;
 import com.apunto.engine.events.OperacionEvent;
 import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
+import com.apunto.engine.hyperliquid.identity.HyperliquidSourceTradeIdentity;
 import com.apunto.engine.shared.enums.PositionSide;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -17,6 +20,16 @@ import java.util.UUID;
 public class HyperliquidDeltaOperacionMapper {
 
     private static final BigDecimal ZERO = BigDecimal.ZERO;
+    private final MeterRegistry meterRegistry;
+
+    public HyperliquidDeltaOperacionMapper() {
+        this.meterRegistry = null;
+    }
+
+    @Autowired
+    public HyperliquidDeltaOperacionMapper(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
 
     public HyperliquidMappedDelta map(HyperliquidDeltaRequest request, String headerIdempotencyKey) {
         if (request == null) {
@@ -100,6 +113,15 @@ public class HyperliquidDeltaOperacionMapper {
             return "hyperliquid:recovery:" + wallet + ':' + symbol.toUpperCase(Locale.ROOT)
                     + ':' + cleanExternalId;
         }
+        HyperliquidSourceTradeIdentity.Evidence sourceTrade =
+                HyperliquidSourceTradeIdentity.fromExternalId(
+                        cleanExternalId, wallet, symbol);
+        if (sourceTrade.zeroHash()) {
+            recordZeroHashIdentity();
+        }
+        if (sourceTrade.tid() != null) {
+            return "hyperliquid:trade:" + wallet + ':' + sourceTrade.tid();
+        }
         String[] parts = cleanExternalId.split("\\|", 4);
         if (parts.length != 4
                 || !parts[0].equalsIgnoreCase(wallet)
@@ -109,6 +131,15 @@ public class HyperliquidDeltaOperacionMapper {
         }
         return "hyperliquid:trade:" + wallet + ':' + symbol.toUpperCase(Locale.ROOT)
                 + ':' + parts[3].trim();
+    }
+
+    private void recordZeroHashIdentity() {
+        if (meterRegistry != null) {
+            meterRegistry.counter(
+                    "zero_hash_identity_total",
+                    "source", "direct_ingest"
+            ).increment();
+        }
     }
 
     private boolean isSourceDeltaType(String value) {
