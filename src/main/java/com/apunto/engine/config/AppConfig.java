@@ -6,6 +6,7 @@ import com.apunto.engine.service.copy.certification.LiveCertificationRuntimeProp
 import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
 import com.apunto.engine.service.copy.readiness.ShadowLiveReadinessProperties;
+import com.apunto.engine.service.copy.dispatch.B2bRealMoneyGuardProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
@@ -17,6 +18,7 @@ import org.springframework.context.annotation.Configuration;
         ShadowPromotionProperties.class,
         ShadowCoverageWindowProperties.class,
         LivePromotionProperties.class,
-        LiveCertificationRuntimeProperties.class
+        LiveCertificationRuntimeProperties.class,
+        B2bRealMoneyGuardProperties.class
 })
 public class AppConfig { }

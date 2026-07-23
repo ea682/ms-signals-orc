@@ -32,3 +32,8 @@ build/
 ### VS Code ###
 .vscode/
 .env.audit
+.env.prod
+.env.b2b
+.env.execution-accounts
+.b2b-run-state.json
+.b2b-evidence/

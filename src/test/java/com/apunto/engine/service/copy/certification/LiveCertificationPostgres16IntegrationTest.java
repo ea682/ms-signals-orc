@@ -8,6 +8,7 @@ import com.apunto.engine.service.copy.dispatch.CopyDispatchPayloadConflictRecord
 import com.apunto.engine.service.copy.dispatch.CopyDispatchPayloadSnapshotFactory;
 import com.apunto.engine.service.copy.dispatch.CopyDispatchRequest;
 import com.apunto.engine.service.copy.dispatch.PostgresCopyDispatchPayloadConflictStore;
+import com.apunto.engine.testsupport.ProductionBaselinePostgres;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -15,14 +16,10 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
@@ -33,6 +30,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class LiveCertificationPostgres16IntegrationTest {
 
     private static final UUID USER_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
+    private static final UUID MICRO_ACCOUNT_ID = UUID.fromString("22222222-2222-2222-2222-222222222223");
+    private static final UUID LIVE_ACCOUNT_ID = UUID.fromString("22222222-2222-2222-2222-222222222224");
     private static PostgreSQLContainer<?> postgres;
     private static HikariDataSource dataSource;
     private static JdbcTemplate jdbc;
@@ -51,6 +50,7 @@ class LiveCertificationPostgres16IntegrationTest {
             } catch (RuntimeException unavailable) {
                 Assumptions.assumeTrue(false, "Docker unavailable for PostgreSQL certification test");
             }
+            ProductionBaselinePostgres.restoreAndMigrate(postgres);
             config.setJdbcUrl(postgres.getJdbcUrl());
             config.setUsername(postgres.getUsername());
             config.setPassword(postgres.getPassword());
@@ -59,24 +59,13 @@ class LiveCertificationPostgres16IntegrationTest {
             config.setUsername(System.getProperty("copy.postgres.test.username", "postgres"));
             config.setPassword(System.getProperty("copy.postgres.test.password", ""));
         }
+        config.setSchema("futuros_operaciones");
         dataSource = new HikariDataSource(config);
         jdbc = new JdbcTemplate(dataSource);
+        seedExecutionAccounts();
         Integer version = jdbc.queryForObject("show server_version_num", Integer.class);
         assertTrue(version != null && version >= 160000,
                 "integration test requires PostgreSQL 16 or newer");
-        createRuntimePrerequisites();
-        ResourceDatabasePopulator migration = new ResourceDatabasePopulator(new ClassPathResource(
-                "db/migration/V202607130003__copy_simulation_certification_v3.sql"));
-        migration.execute(dataSource);
-        migration.execute(dataSource);
-        ResourceDatabasePopulator conflictMigration = new ResourceDatabasePopulator(new ClassPathResource(
-                "db/migration/V202607130004__copy_dispatch_payload_conflict_v3.sql"));
-        conflictMigration.execute(dataSource);
-        conflictMigration.execute(dataSource);
-        ResourceDatabasePopulator positionLimitMigration = new ResourceDatabasePopulator(new ClassPathResource(
-                "db/migration/V202607130005__copy_dispatch_user_position_limit_snapshot_v3.sql"));
-        positionLimitMigration.execute(dataSource);
-        positionLimitMigration.execute(dataSource);
     }
 
     @AfterAll
@@ -86,7 +75,7 @@ class LiveCertificationPostgres16IntegrationTest {
     }
 
     @Test
-    void manualCertificationAdoptionActivationAndHotGateUseTheSameAllocation() {
+    void certificationClosesMicroAndActivatesANewAdoptedLiveAllocation() {
         ObjectMapper mapper = new ObjectMapper();
         PostgresLiveCertificationCatalogStore catalogStore =
                 new PostgresLiveCertificationCatalogStore(jdbc, mapper);
@@ -114,18 +103,24 @@ class LiveCertificationPostgres16IntegrationTest {
                         created.certification().id(), 0L,
                         LiveCertificationStatus.MICRO_LIVE_VALIDATING,
                         LiveCertificationStatus.LIVE_APPROVED, false,
-                        "integration-operator", "approved", Map.of("ticket", "CERT-1"),
+                        "integration-operator", "approved", Map.of(
+                                "ticket", "CERT-1",
+                                "automaticPolicyPassed", true,
+                                "realMicroLiveEvidence", true,
+                                "validMicroLiveTests", 1),
                         "pg-approve-1"));
         assertTrue(approved.applied());
 
-        Long allocationId = insertMicroLiveAllocation();
+        Long microAllocationId = insertMicroLiveAllocation();
+        Long liveAllocationId = insertPendingLiveAllocation(created.certification().id());
+        assertTrue(!microAllocationId.equals(liveAllocationId));
         PostgresLiveUserAdoptionStore adoptionStore = new PostgresLiveUserAdoptionStore(jdbc, mapper);
         LiveUserAdoptionApplicationService adoptionService = new LiveUserAdoptionApplicationService(
                 catalogStore,
                 new LiveUserAdoptionPersistenceService(new LiveUserAdoptionValidator(), adoptionStore));
         OffsetDateTime now = OffsetDateTime.now();
         LiveUserAdoptionResult adoption = adoptionService.validateAndPersist(new LiveUserAdoptionCommand(
-                created.certification().id(), USER_ID, allocationId,
+                created.certification().id(), USER_ID, liveAllocationId,
                 new BigDecimal("300"), new BigDecimal("100"), new BigDecimal("5"), "USDC",
                 "ISOLATED", "ISOLATED", true, true, true,
                 now.minusSeconds(1), now.plusMinutes(10)));
@@ -135,15 +130,24 @@ class LiveCertificationPostgres16IntegrationTest {
         ManualLiveAllocationActivationService activationService =
                 new ManualLiveAllocationActivationService(new PostgresLiveAllocationActivationStore(jdbc));
         LiveAllocationActivationResult activation = activationService.activate(
-                new LiveAllocationActivationCommand(allocationId, created.certification().id(),
+                new LiveAllocationActivationCommand(liveAllocationId, created.certification().id(),
                         "integration-operator", "activate", "pg-activate-1"));
-        assertTrue(activation.activated());
-        assertEquals("LIVE", jdbc.queryForObject(
-                "select execution_mode from futuros_operaciones.user_copy_allocation where id = ?",
-                String.class, allocationId));
+        assertTrue(activation.activated(), activation.reasonCode());
+        assertEquals("LIVE|active|true", jdbc.queryForObject("""
+                select execution_mode || '|' || lower(status) || '|' || is_active
+                from futuros_operaciones.user_copy_allocation where id = ?
+                """, String.class, liveAllocationId));
+        assertEquals("MICRO_LIVE|closed|false", jdbc.queryForObject("""
+                select execution_mode || '|' || lower(status) || '|' || is_active
+                from futuros_operaciones.user_copy_allocation where id = ?
+                """, String.class, microAllocationId));
+        assertEquals(liveAllocationId, jdbc.queryForObject("""
+                select allocation_id from futuros_operaciones.user_live_certification_adoption
+                where certification_id = ? and user_id = ?
+                """, Long.class, created.certification().id(), USER_ID));
 
         LiveEntryAuthorizationRequest request = new LiveEntryAuthorizationRequest(
-                USER_ID, allocationId, "0xa445", "MOVEMENT_ALL", "copy-strategy-v3", "ALL", "ALL",
+                USER_ID, liveAllocationId, "0xa445", "MOVEMENT_ALL", "copy-strategy-v3", "ALL", "ALL",
                 new BigDecimal("100"), new BigDecimal("5"), "BINANCE", "USDC",
                 "proportional-portfolio-v3", "binance-symbol-map-v3", "binance-fee-v3",
                 "binance-funding-v3", "binance-slippage-v3", "order-book-liquidity-v3");
@@ -163,8 +167,12 @@ class LiveCertificationPostgres16IntegrationTest {
         String key = "b".repeat(64);
         jdbc.update("""
                 INSERT INTO futuros_operaciones.copy_dispatch_intent (
-                    id, idempotency_key, request_hash, status, reservation_status, updated_at
-                ) VALUES (?, ?, 'old-hash', 'NEW', 'PENDING', now())
+                    id, idempotency_key, id_user, execution_mode, source_event_id,
+                    copy_intent, symbol, client_order_id, request_hash, status,
+                    reservation_status, created_at, updated_at
+                ) VALUES (?, ?, 'user-1', 'LIVE', 'event-conflict',
+                          'OPEN', 'BTCUSDC', 'ct_existing', 'old-hash', 'NEW',
+                          'PENDING', now(), now())
                 """, intentId, key);
         CopyDispatchIntentEntity intent = CopyDispatchIntentEntity.builder()
                 .id(intentId).idempotencyKey(key).idUser("user-1").userCopyAllocationId(55L)
@@ -211,53 +219,73 @@ class LiveCertificationPostgres16IntegrationTest {
         return jdbc.queryForObject("""
                 INSERT INTO futuros_operaciones.user_copy_allocation (
                     id_user, wallet_id, copy_strategy_code, scope_type, scope_value,
-                    execution_mode, status, is_active, updated_at
-                ) VALUES (?, '0xa445', 'MOVEMENT_ALL', 'ALL', 'ALL', 'MICRO_LIVE', 'active', TRUE, now())
+                    execution_mode, status, is_active, score, strategy_key,
+                    sizing_mode, allocation_pct_source, exchange_account_id,
+                    reserved_capital_usd, updated_at
+                ) VALUES (?, '0xa445', 'MOVEMENT_ALL', 'ALL', 'ALL', 'MICRO_LIVE',
+                          'active', TRUE, 90, '0xa445|MOVEMENT_ALL|ALL|ALL',
+                          'FIXED_CAPITAL', 'FIXED_MICRO_BUDGET', ?, 100, now())
                 RETURNING id
-                """, Long.class, USER_ID);
+                """, Long.class, USER_ID, MICRO_ACCOUNT_ID);
     }
 
-    private static void createRuntimePrerequisites() throws Exception {
-        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
-            statement.execute("create schema futuros_operaciones");
-            statement.execute("""
-                    create table futuros_operaciones.user_copy_allocation (
-                        id bigserial primary key,
-                        id_user uuid not null,
-                        wallet_id varchar(128) not null,
-                        copy_strategy_code varchar(64) not null,
-                        scope_type varchar(32) not null,
-                        scope_value varchar(160) not null,
-                        execution_mode varchar(16) not null,
-                        status varchar(40) not null,
-                        is_active boolean not null,
-                        ends_at timestamptz,
-                        status_reason varchar(160),
-                        status_updated_at timestamptz,
-                        updated_at timestamptz not null
-                    )
-                    """);
-            statement.execute("""
-                    create table futuros_operaciones.copy_operation (
-                        id_operation uuid primary key,
-                        user_copy_allocation_id bigint,
-                        is_active boolean not null
-                    )
-                    """);
-            statement.execute("""
-                    create table futuros_operaciones.copy_dispatch_intent (
-                        id uuid primary key,
-                        idempotency_key varchar(64),
-                        request_hash varchar(64),
-                        user_copy_allocation_id bigint,
-                        status varchar(32) not null,
-                        reservation_status varchar(24) not null,
-                        last_error_code varchar(80),
-                        last_error_detail varchar(1000),
-                        next_reconciliation_at timestamptz,
-                        updated_at timestamptz not null
-                    )
-                    """);
-        }
+    private static Long insertPendingLiveAllocation(UUID certificationId) {
+        return jdbc.queryForObject("""
+                INSERT INTO futuros_operaciones.user_copy_allocation (
+                    id_user, wallet_id, allocation_pct, score, copy_strategy_code,
+                    scope_type, scope_value, strategy_key, execution_mode, status,
+                    is_active, sizing_mode, allocation_pct_source, allocation_pct_source_id,
+                    allocation_pct_calculated_at, allocation_pct_valid_until,
+                    wallet_total_allocation_pct, leverage_override, capital_asset,
+                    resolved_quote_asset, live_certification_id, updated_at, activation_at
+                    , exchange_account_id
+                ) VALUES (?, '0xa445', 0.10, 90, 'MOVEMENT_ALL', 'ALL', 'ALL',
+                          '0xa445|MOVEMENT_ALL|ALL|ALL', 'LIVE', 'paused', TRUE,
+                          'PERCENTAGE', 'SIGNALS_CURRENT_LIVE_DISTRIBUTION', ?,
+                          now(), now() + interval '10 minutes', 0.10, 5, 'USDC', 'USDC',
+                          ?, now(), now(), ?)
+                RETURNING id
+                """, Long.class, USER_ID, UUID.randomUUID(), certificationId, LIVE_ACCOUNT_ID);
     }
+
+    private static void seedExecutionAccounts() {
+        jdbc.update("""
+                INSERT INTO futuros_operaciones.users (id, email)
+                VALUES (?, 'live-certification@example.test')
+                ON CONFLICT (id) DO NOTHING
+                """, USER_ID);
+        jdbc.update("""
+                INSERT INTO futuros_operaciones.user_api_keys (
+                    id_user_api_keys, user_id, exchange, api_key, api_secret, label,
+                    account_purpose, active
+                ) VALUES (?, ?, 'BINANCE', 'micro-key', 'micro-secret', 'MICRO_LIVE',
+                          'MICRO_LIVE', true)
+                ON CONFLICT DO NOTHING
+                """, MICRO_ACCOUNT_ID, USER_ID);
+        jdbc.update("""
+                INSERT INTO futuros_operaciones.user_api_keys (
+                    id_user_api_keys, user_id, exchange, api_key, api_secret, label,
+                    account_purpose, active
+                ) VALUES (?, ?, 'BINANCE', 'live-key', 'live-secret', 'LIVE', 'LIVE', true)
+                ON CONFLICT DO NOTHING
+                """, LIVE_ACCOUNT_ID, USER_ID);
+        jdbc.update("""
+                INSERT INTO futuros_operaciones.micro_live_account_capacity (
+                    execution_account_id, asset, authoritative_equity_usd, available_balance_usd,
+                    safety_buffer_usd, eligible_capital_usd, budget_per_allocation_usd,
+                    theoretical_capacity, effective_capacity, configured_max,
+                    reserved_recertification_slots, observed_at, valid_until
+                ) VALUES (?, 'USDC', 500, 500, 0, 500, 100, 5, 5, 0, 0,
+                          now(), now() + interval '5 minutes')
+                ON CONFLICT (execution_account_id) DO UPDATE SET
+                    authoritative_equity_usd = excluded.authoritative_equity_usd,
+                    available_balance_usd = excluded.available_balance_usd,
+                    eligible_capital_usd = excluded.eligible_capital_usd,
+                    theoretical_capacity = excluded.theoretical_capacity,
+                    effective_capacity = excluded.effective_capacity,
+                    observed_at = excluded.observed_at,
+                    valid_until = excluded.valid_until
+                """, MICRO_ACCOUNT_ID);
+    }
+
 }

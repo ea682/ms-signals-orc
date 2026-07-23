@@ -43,6 +43,25 @@ public class CopyEconomicCycleEntity {
     @Column(name = "user_copy_allocation_id")
     private Long userCopyAllocationId;
 
+    @Column(name = "exchange_account_id", columnDefinition = "uuid")
+    private UUID exchangeAccountId;
+
+    @Column(name = "source_position_cycle_id", columnDefinition = "uuid")
+    private UUID sourcePositionCycleId;
+
+    @Column(name = "fixed_leverage", precision = 12, scale = 4)
+    private BigDecimal fixedLeverage;
+
+    @Column(name = "fixed_margin_mode", length = 24)
+    private String fixedMarginMode;
+
+    @Column(name = "fixed_position_mode", length = 24)
+    private String fixedPositionMode;
+
+    @Builder.Default
+    @Column(name = "virtual_owned_qty", precision = 38, scale = 18, nullable = false)
+    private BigDecimal virtualOwnedQty = BigDecimal.ZERO;
+
     @Column(name = "copy_strategy_code", length = 64)
     private String copyStrategyCode;
 

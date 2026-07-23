@@ -1,5 +1,6 @@
 package com.apunto.engine.entity;
 
+import com.apunto.engine.service.copy.account.ExecutionAccountPurpose;
 import jakarta.persistence.*;
 import lombok.Data;
 import org.hibernate.annotations.CreationTimestamp;
@@ -36,6 +37,19 @@ public class UserApiKeyEntity {
 
     @Column(name = "label", length = 100)
     private String label;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "account_purpose", length = 24)
+    private ExecutionAccountPurpose accountPurpose;
+
+    @Column(name = "active", nullable = false)
+    private boolean active = true;
+
+    @Column(name = "exchange_account_ref", length = 128)
+    private String exchangeAccountRef;
+
+    @Column(name = "identity_verified_at")
+    private OffsetDateTime identityVerifiedAt;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)

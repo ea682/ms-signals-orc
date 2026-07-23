@@ -8,12 +8,16 @@ import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 @Repository
 public interface CopyOperationEventRepository extends JpaRepository<CopyOperationEventEntity, UUID> {
     Optional<CopyOperationEventEntity> findByClientOrderId(String clientOrderId);
+
+    List<CopyOperationEventEntity> findAllByUserCopyAllocationIdAndEconomicCycleIdOrderByEventTimeAscDateCreationAsc(
+            Long userCopyAllocationId, UUID economicCycleId);
 
     @Query(value = "select pg_advisory_xact_lock(hashtextextended(cast(:lockKey as text), 0))", nativeQuery = true)
     Object lockDispatchProgress(@Param("lockKey") String lockKey);

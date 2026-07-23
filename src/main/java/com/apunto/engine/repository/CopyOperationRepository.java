@@ -38,9 +38,13 @@ public interface CopyOperationRepository extends JpaRepository<CopyOperationEnti
 
     List<CopyOperationEntity> findAllByIdUserAndIdWalletOriginAndActiveTrue(String idUser, String walletId);
 
+    List<CopyOperationEntity> findAllByIdUserAndActiveTrue(String idUser);
+
     List<CopyOperationEntity> findAllByIdOrderOriginAndIdUserAndActiveTrue(String idOrderOrigin, String idUser);
 
     List<CopyOperationEntity> findAllByActiveTrue();
+
+    long countByUserCopyAllocationIdAndActiveTrue(Long userCopyAllocationId);
 
     @Query(value = """
             SELECT DISTINCT UPPER(c.parsymbol)

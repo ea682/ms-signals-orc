@@ -400,6 +400,28 @@ class CopyDispatchCoordinatorTest {
     }
 
     @Test
+    void runtimeFilterRejectionIsPersistedAndNeverReachesBinanceGateway() {
+        FakeStore store = new FakeStore();
+        FakeGateway gateway = new FakeGateway(filled("100"));
+        CopyOrderRuntimePreflight preflight = request ->
+                CopyOrderRuntimePreflightDecision.blocked("BINANCE_NOTIONAL_BELOW_MIN", false);
+        CopyDispatchCoordinator coordinator = new CopyDispatchCoordinator(
+                store, gateway, new BinanceOrderExecutionNormalizer(), new CopyIdempotencyKeyFactory(),
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+                new com.apunto.engine.service.copy.calibration.CopyNotionalBandPolicy(
+                        new BigDecimal("100"), new BigDecimal("1000"), new BigDecimal("10000")),
+                preflight);
+
+        SkipExecutionException rejected = assertThrows(SkipExecutionException.class,
+                () -> coordinator.dispatch(open("evt-filter-hot-path"),
+                        allocation(505L, "MOVEMENT_ALL", "MICRO_LIVE"), new BigDecimal("100"), "trace"));
+
+        assertEquals("BINANCE_NOTIONAL_BELOW_MIN", rejected.getReasonCode());
+        assertEquals("BINANCE_NOTIONAL_BELOW_MIN", store.lastRejectedReason());
+        assertEquals(0, gateway.calls.get());
+    }
+
+    @Test
     void openWithoutMetricGenerationFailsClosedBeforeClaim() {
         FakeStore store = new FakeStore();
         FakeGateway gateway = new FakeGateway(filled("100"));

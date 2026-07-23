@@ -88,7 +88,10 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         UUID candidateId = UUID.randomUUID();
         int inserted = repository.insertIfAbsent(
                 candidateId, request.idempotencyKey(), identity.userId(), identity.userCopyAllocationId(),
-                realMode(identity.executionMode()), trim(normalizedWalletId(request.walletId()), 180), trim(identity.strategyCode(), 64),
+                realMode(identity.executionMode()), request.operation().getExchangeAccountId(),
+                request.operation().getSourcePositionCycleId(), trim(request.operation().getFixedMarginMode(), 24),
+                trim(request.operation().getFixedPositionMode(), 24),
+                trim(normalizedWalletId(request.walletId()), 180), trim(identity.strategyCode(), 64),
                 trim(identity.scopeType(), 32), trim(identity.scopeValue(), 180), trim(identity.generationId(), 80),
                 trim(identity.sourceEventId(), 600),
                 trim(request.operation().getOriginId(), 120), trim(request.sourceEventType(), 40),
@@ -454,6 +457,17 @@ public class PostgresCopyDispatchIntentStore implements CopyDispatchIntentStore 
         if (request == null || request.identity() == null) throw new IllegalArgumentException("copy dispatch request is required");
         if (request.identity().userId() == null || request.identity().userId().isBlank()) throw new IllegalArgumentException("userId is required");
         if (request.identity().userCopyAllocationId() == null) throw new SkipExecutionException("COPY_ALLOCATION_REQUIRED_FOR_REAL_DISPATCH", "Allocation durable requerida para MICRO_LIVE/LIVE", null);
+        if (request.operation() == null || request.operation().getExchangeAccountId() == null) {
+            throw new SkipExecutionException(
+                    "MICRO_LIVE".equals(realMode(request.identity().executionMode()))
+                            ? "MICRO_LIVE_EXECUTION_ACCOUNT_MISSING"
+                            : "LIVE_EXECUTION_ACCOUNT_MISSING",
+                    "exchangeAccountId durable es obligatorio para dispatch real", null);
+        }
+        if (!realMode(request.identity().executionMode()).equals(request.operation().getAccountPurpose())) {
+            throw new SkipExecutionException("EXECUTION_ACCOUNT_PURPOSE_MISMATCH",
+                    "accountPurpose no coincide con executionMode", null);
+        }
         if ("MICRO_LIVE".equals(realMode(request.identity().executionMode()))
                 && (request.walletId() == null || request.walletId().isBlank())) {
             throw new SkipExecutionException("COPY_WALLET_REQUIRED_FOR_MICRO_LIVE_BUDGET",

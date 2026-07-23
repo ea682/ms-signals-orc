@@ -30,4 +30,14 @@ class LiveCertificationMigrationContractTest {
         assertFalse(sql.contains("ALTER TABLE user_copy_allocation"));
         assertFalse(sql.contains("REFERENCES strategy_live_certification(id) ON DELETE CASCADE"));
     }
+
+    @Test
+    void lifecycleMigrationRemovesTheLegacyCrossModeUniquenessIndex() throws Exception {
+        String sql = Files.readString(Path.of(
+                "src/main/resources/db/migration/V202607180001__copy_allocation_mode_open_uniqueness.sql"));
+
+        assertTrue(sql.contains("DROP INDEX IF EXISTS futuros_operaciones.ux_user_copy_allocation_user_wallet_strategy_open"));
+        assertTrue(sql.contains("execution_mode"));
+        assertTrue(sql.contains("WHERE ends_at IS NULL"));
+    }
 }

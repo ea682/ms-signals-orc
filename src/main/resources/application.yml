@@ -123,6 +123,7 @@ binance:
     recent-lookback-days: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_LOOKBACK_DAYS:14}
     max-symbols-per-allocation: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_MAX_SYMBOLS_PER_ALLOCATION:20}
     margin-type: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_MARGIN_TYPE:CROSSED}
+    position-mode: ${BINANCE_TRADING_CONFIG_PRECONFIGURE_POSITION_MODE:ONE_WAY}
   dispatch:
     delay-ms: ${BINANCE_DISPATCH_DELAY_MS:0}
     pool-size: ${BINANCE_DISPATCH_POOL_SIZE:8}
@@ -133,6 +134,20 @@ binance:
     require-trading-status: ${BINANCE_SYMBOLS_REQUIRE_TRADING_STATUS:true}
 
 copy:
+  b2b-real-money:
+    enabled: ${COPY_B2B_REAL_MONEY_ENABLED:false}
+    explicit-acknowledgement: ${COPY_B2B_REAL_MONEY_EXPLICIT_ACKNOWLEDGEMENT:}
+    emergency-stop: ${COPY_B2B_REAL_MONEY_EMERGENCY_STOP:true}
+    manual-positions-verified: ${COPY_B2B_REAL_MONEY_MANUAL_POSITIONS_VERIFIED:false}
+    test-user-id: ${COPY_B2B_REAL_MONEY_TEST_USER_ID:}
+    allowed-symbols: ${COPY_B2B_REAL_MONEY_ALLOWED_SYMBOLS:BTCUSDC,ETHUSDC}
+    client-order-id-prefix: ${COPY_B2B_REAL_MONEY_CLIENT_ORDER_ID_PREFIX:codex-b2b-}
+    max-total-margin-usd: ${COPY_B2B_REAL_MONEY_MAX_TOTAL_MARGIN_USD:10}
+    max-notional-usd: ${COPY_B2B_REAL_MONEY_MAX_NOTIONAL_USD:50}
+    max-leverage: ${COPY_B2B_REAL_MONEY_MAX_LEVERAGE:5}
+    max-orders: ${COPY_B2B_REAL_MONEY_MAX_ORDERS:8}
+    micro-live-execution-account-id: ${COPY_B2B_MICRO_LIVE_EXECUTION_ACCOUNT_ID:}
+    live-execution-account-id: ${COPY_B2B_LIVE_EXECUTION_ACCOUNT_ID:}
   new-dispatch:
     enabled: ${COPY_NEW_DISPATCH_ENABLED:false}
   live:
@@ -159,6 +174,24 @@ copy:
     total-capital-usd: ${COPY_MICRO_LIVE_TOTAL_CAPITAL_USD:100}
     target-leverage: ${COPY_MICRO_LIVE_TARGET_LEVERAGE:5}
     margin-buffer-pct: ${COPY_MICRO_LIVE_MARGIN_BUFFER_PCT:0.03}
+    capacity:
+      budget-per-allocation-usdc: ${MICRO_LIVE_BUDGET_PER_ALLOCATION_USDC:${COPY_MICRO_LIVE_RESERVED_CAPITAL_USD:100}}
+      safety-buffer-usdc: ${MICRO_LIVE_CAPACITY_SAFETY_BUFFER_USDC:0}
+      max-concurrent-allocations: ${MICRO_LIVE_MAX_CONCURRENT_ALLOCATIONS:0}
+      reserved-recertification-slots: ${MICRO_LIVE_RESERVED_RECERTIFICATION_SLOTS:0}
+      preemption-policy: ${MICRO_LIVE_RECERTIFICATION_PREEMPTION_POLICY:IDLE_ONLY}
+      snapshot-ttl-seconds: ${MICRO_LIVE_CAPACITY_SNAPSHOT_TTL_SECONDS:300}
+    recertification:
+      enabled: ${MICRO_LIVE_RECERTIFICATION_JOB_ENABLED:false}
+      initial-delay-ms: ${MICRO_LIVE_RECERTIFICATION_INITIAL_DELAY_MS:30000}
+      fixed-delay-ms: ${MICRO_LIVE_RECERTIFICATION_FIXED_DELAY_MS:15000}
+      batch-size: ${MICRO_LIVE_RECERTIFICATION_BATCH_SIZE:20}
+  live-adoption:
+    validity: ${COPY_LIVE_ADOPTION_VALIDITY:24h}
+    reconciliation:
+      enabled: ${COPY_LIVE_ADOPTION_RECONCILIATION_ENABLED:false}
+      initial-delay-ms: ${COPY_LIVE_ADOPTION_RECONCILIATION_INITIAL_DELAY_MS:15000}
+      fixed-delay-ms: ${COPY_LIVE_ADOPTION_RECONCILIATION_FIXED_DELAY_MS:60000}
   source-equity:
     max-age-ms: ${COPY_SOURCE_EQUITY_MAX_AGE_MS:30000}
   target-position-authority:
@@ -200,7 +233,7 @@ copy:
     copy-decision-timeout-ms: ${COPY_PROMOTION_COPY_DECISION_TIMEOUT_MS:55000}
     coverage:
       rolling-enabled: ${SHADOW_PROMOTION_COVERAGE_ROLLING_ENABLED:true}
-      mode: ${SHADOW_COVERAGE_MODE:AUDIT}
+      mode: ${SHADOW_COVERAGE_MODE:ROLLING}
       window-days: ${SHADOW_PROMOTION_COVERAGE_WINDOW_DAYS:14}
       max-events: ${SHADOW_PROMOTION_COVERAGE_MAX_EVENTS:500}
       min-evaluable-events: ${SHADOW_PROMOTION_COVERAGE_MIN_EVENTS:100}
@@ -211,7 +244,7 @@ copy:
       fixed-delay-ms: ${COPY_PROMOTION_JOB_FIXED_DELAY_MS:120000}
   live-promotion:
     enabled: ${COPY_LIVE_PROMOTION_ENABLED:false}
-    manual-certification-required: ${COPY_LIVE_PROMOTION_MANUAL_CERTIFICATION_REQUIRED:true}
+    manual-certification-required: ${COPY_LIVE_PROMOTION_MANUAL_CERTIFICATION_REQUIRED:false}
     candidate-limit: ${COPY_LIVE_PROMOTION_CANDIDATE_LIMIT:100}
     min-micro-days: ${COPY_LIVE_PROMOTION_MIN_MICRO_DAYS:7}
     min-micro-orders: ${COPY_LIVE_PROMOTION_MIN_MICRO_ORDERS:10}
@@ -223,8 +256,6 @@ copy:
     max-reconciliation-pending: ${COPY_LIVE_PROMOTION_MAX_RECONCILIATION_PENDING:0}
     max-duplicate-count: ${COPY_LIVE_PROMOTION_MAX_DUPLICATE_COUNT:0}
     max-unresolved-ambiguous-timeouts: ${COPY_LIVE_PROMOTION_MAX_UNRESOLVED_AMBIGUOUS_TIMEOUTS:0}
-    min-slippage-samples: ${COPY_LIVE_PROMOTION_MIN_SLIPPAGE_SAMPLES:3}
-    max-adverse-slippage-p95-bps: ${COPY_LIVE_PROMOTION_MAX_ADVERSE_SLIPPAGE_P95_BPS:10}
     max-drawdown-usd: ${COPY_LIVE_PROMOTION_MAX_DRAWDOWN_USD:20}
     max-error-rate-pct: ${COPY_LIVE_PROMOTION_MAX_ERROR_RATE_PCT:5}
     require-positive-net-pnl: ${COPY_LIVE_PROMOTION_REQUIRE_POSITIVE_NET_PNL:false}

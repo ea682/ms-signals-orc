@@ -4,6 +4,7 @@ import com.apunto.engine.service.ShadowPromotionService;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -23,6 +24,7 @@ public class ShadowPromotionJobWorker {
             initialDelayString = "${copy.promotion.job.initial-delay-ms:30000}",
             fixedDelayString = "${copy.promotion.job.fixed-delay-ms:120000}"
     )
+    @SchedulerLock(name = "copy-shadow-promotion", lockAtMostFor = "PT10M", lockAtLeastFor = "PT1S")
     public void promoteShadowToMicroLive() {
         if (!enabled) {
             return;

@@ -11,5 +11,9 @@ public interface LiveAllocationActivationStore {
     long countNonTerminalIntents(Long allocationId);
     Optional<LiveActivationAuthorization> findAuthorization(Long allocationId, UUID certificationId);
     boolean activate(Long allocationId, String actor, String reason, OffsetDateTime activatedAt);
+    default boolean activatePendingLive(Long allocationId, String actor, String reason,
+                                        OffsetDateTime activatedAt) {
+        return false;
+    }
     void appendAudit(LiveAllocationActivationAudit audit);
 }

@@ -26,6 +26,7 @@ public class CopyBudgetResolver {
     public static final String BLOCKED_SOURCE_EQUITY_INVALID = "BLOCKED_SOURCE_EQUITY_INVALID";
     public static final String BLOCKED_SOURCE_EQUITY_STALE = "BLOCKED_SOURCE_EQUITY_STALE";
     public static final String BLOCKED_SOURCE_SNAPSHOT_MISMATCH = "BLOCKED_SOURCE_SNAPSHOT_MISMATCH";
+    public static final String BLOCKED_SOURCE_POSITION_MARGIN_MISSING = "BLOCKED_SOURCE_POSITION_MARGIN_MISSING";
     public static final String BLOCKED_SOURCE_POSITION_NOTIONAL_MISSING = "BLOCKED_SOURCE_POSITION_NOTIONAL_MISSING";
 
     /** @deprecated Use the specific V3 equity/notional reasons. */
@@ -155,16 +156,17 @@ public class CopyBudgetResolver {
                     BLOCKED_SOURCE_EQUITY_INVALID, usesAllocationPct, capitalAsset, leverage, request,
                     openMargin, remainingMargin, ZERO, ZERO, ZERO);
         }
-        BigDecimal sourceNotional = nullable(request.sourcePositionNotionalUsd());
-        if (sourceNotional == null || sourceNotional.compareTo(BigDecimal.ZERO) <= 0) {
+        BigDecimal sourceMargin = nullable(request.sourcePositionMarginUsd());
+        if (sourceMargin == null || sourceMargin.compareTo(BigDecimal.ZERO) <= 0) {
             return decision(false, executionMode, budgetMode, targetCapital, accountCapital, allocationPct,
-                    BLOCKED_SOURCE_POSITION_NOTIONAL_MISSING, usesAllocationPct, capitalAsset, leverage, request,
+                    BLOCKED_SOURCE_POSITION_MARGIN_MISSING, usesAllocationPct, capitalAsset, leverage, request,
                     openMargin, remainingMargin, ZERO, ZERO, ZERO);
         }
 
-        BigDecimal exposure = sourceNotional.abs().divide(equity, SCALE, RoundingMode.DOWN);
-        BigDecimal targetNotional = targetCapital.multiply(exposure).setScale(SCALE, RoundingMode.DOWN);
-        BigDecimal targetMargin = targetNotional.divide(leverage, SCALE, RoundingMode.DOWN);
+        BigDecimal exposure = sourceMargin.abs().divide(equity, SCALE, RoundingMode.DOWN)
+                .min(BigDecimal.ONE.setScale(SCALE, RoundingMode.DOWN));
+        BigDecimal targetMargin = targetCapital.multiply(exposure).setScale(SCALE, RoundingMode.DOWN);
+        BigDecimal targetNotional = targetMargin.multiply(leverage).setScale(SCALE, RoundingMode.DOWN);
         return decision(targetNotional.compareTo(BigDecimal.ZERO) > 0, executionMode, budgetMode,
                 targetCapital, accountCapital, allocationPct, successReason, usesAllocationPct,
                 capitalAsset, leverage, request, openMargin, remainingMargin,
@@ -215,11 +217,11 @@ public class CopyBudgetResolver {
 
     private static void logResolved(CopyBudgetRequest request, CopyBudgetDecision decision) {
         log.info(
-                "event=copy.budget.resolved policyVersion=proportional-portfolio-v3 userId={} detailUserId={} walletId={} allocationId={} executionMode={} strategyCode={} budgetMode={} allocatedCapitalUsd={} copyMarginUsd={} copyNotionalUsd={} sourceAccountEquityUsd={} sourcePositionNotionalUsd={} sourceExposureRatio={} leverage={} openMarginUsd={} remainingMarginUsd={} reasonCode={} decision={}",
+                "event=copy.budget.resolved policyVersion=proportional-portfolio-v3 userId={} detailUserId={} walletId={} allocationId={} executionMode={} strategyCode={} budgetMode={} allocatedCapitalUsd={} copyMarginUsd={} copyNotionalUsd={} sourceAccountEquityUsd={} sourcePositionMarginUsd={} sourcePositionNotionalUsd={} sourceCapitalUsageRatio={} leverage={} openMarginUsd={} remainingMarginUsd={} reasonCode={} decision={}",
                 request.userId(), request.detailUserId(), safe(request.walletId()), request.userCopyAllocationId(),
                 decision.executionMode(), safe(request.copyStrategyCode()), decision.budgetMode(),
                 decision.budgetUsd(), decision.copyMarginUsd(), decision.copyNotionalUsd(),
-                decision.sourceAccountEquityUsd(), decision.sourcePositionNotionalUsd(),
+                decision.sourceAccountEquityUsd(), decision.sourcePositionMarginUsd(), decision.sourcePositionNotionalUsd(),
                 decision.sourceExposurePct(), decision.leverage(), decision.openMarginUsedUsd(),
                 decision.remainingMarginUsd(), decision.reasonCode(), decision.allowed() ? "ALLOW" : "BLOCK"
         );

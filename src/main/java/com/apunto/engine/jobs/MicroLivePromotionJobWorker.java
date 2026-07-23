@@ -4,6 +4,7 @@ import com.apunto.engine.service.MicroLivePromotionService;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import net.javacrumbs.shedlock.spring.annotation.SchedulerLock;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -23,6 +24,7 @@ public class MicroLivePromotionJobWorker {
             initialDelayString = "${copy.live-promotion.job.initial-delay-ms:45000}",
             fixedDelayString = "${copy.live-promotion.job.fixed-delay-ms:300000}"
     )
+    @SchedulerLock(name = "copy-micro-live-promotion", lockAtMostFor = "PT15M", lockAtLeastFor = "PT1S")
     public void promoteMicroLiveToLive() {
         if (!enabled) {
             return;

@@ -26,6 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PostgresCopyDispatchIntentPayloadConflictTest {
 
+    private static final UUID ACCOUNT_ID = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1");
+    private static final UUID SOURCE_CYCLE_ID = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2");
+
     @Test
     void differentHashIsAuditedAndNeverAuthorizedForSend() {
         CopyDispatchIntentEntity existing = existing();
@@ -105,13 +108,16 @@ class PostgresCopyDispatchIntentPayloadConflictTest {
                 .idOrderOrigin("origin-1").symbol("BTCUSDC").side("BUY").positionSide("LONG")
                 .reduceOnly(false).requestedQty(BigDecimal.ONE).requestedMarginUsd(new BigDecimal("20"))
                 .requestedNotionalUsd(new BigDecimal("100")).referencePrice(new BigDecimal("100"))
+                .exchangeAccountId(ACCOUNT_ID).sourcePositionCycleId(SOURCE_CYCLE_ID)
                 .requestedLeverage(5).clientOrderId("ct_existing").requestHash("old-hash")
                 .status("NEW").createdAt(OffsetDateTime.now()).updatedAt(OffsetDateTime.now()).build();
     }
 
     private CopyDispatchRequest incoming(String key) {
         OperationDto operation = OperationDto.builder().originId("origin-1").symbol("BTCUSDC")
-                .quantity("2").clientOrderId("ct_incoming").userId("user-1").walletId("0xabc").build();
+                .quantity("2").clientOrderId("ct_incoming").userId("user-1").walletId("0xabc")
+                .exchangeAccountId(ACCOUNT_ID).accountPurpose("LIVE")
+                .sourcePositionCycleId(SOURCE_CYCLE_ID).build();
         return new CopyDispatchRequest(key,
                 new CopyDispatchIdentity("user-1", 55L, "LIVE", "MOVEMENT_ALL",
                         "ALL", "ALL", "event-1", "OPEN"),
@@ -135,7 +141,9 @@ class PostgresCopyDispatchIntentPayloadConflictTest {
         return OperationDto.builder().originId("origin-1").symbol("BTCUSDC")
                 .side(Side.BUY).positionSide(PositionSide.LONG).type(OrderType.MARKET)
                 .quantity(qty).leverage(5).reduceOnly(false).configureAccountSettings(false)
-                .clientOrderId("ct_existing").userId("user-1").walletId("0xabc").build();
+                .clientOrderId("ct_existing").userId("user-1").walletId("0xabc")
+                .exchangeAccountId(ACCOUNT_ID).accountPurpose("LIVE")
+                .sourcePositionCycleId(SOURCE_CYCLE_ID).build();
     }
 
     private String legacyHash(OperationDto operation, CopyDispatchIntentEntity existing) {
