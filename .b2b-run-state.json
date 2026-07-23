@@ -1,0 +1,15 @@
+﻿{
+    "runId":  "830669fe-865f-468a-9109-4093fbf6044b",
+    "startedAt":  "2026-07-23T02:35:43.0714475+00:00",
+    "updatedAt":  "2026-07-23T02:35:43.1446595+00:00",
+    "status":  "PREFLIGHT_ONLY",
+    "symbol":  "ETHUSDC",
+    "currentPurpose":  null,
+    "pendingOrder":  null,
+    "orders":  [
+
+               ],
+    "localPolicyBlocks":  [
+
+                          ]
+}

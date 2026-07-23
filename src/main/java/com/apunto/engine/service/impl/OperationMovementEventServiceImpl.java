@@ -63,6 +63,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public class OperationMovementEventServiceImpl implements OperationMovementEventService {
 
     private static final String SOURCE_DIRECT_INGEST = "hyperliquid_direct_ingest";
+    private static final String SOURCE_DIRECT_INGEST_AUDIT_ONLY =
+            "hyperliquid_direct_ingest_audit_only";
     private static final String SOURCE_COPY_JOB_INGEST = "copy_job_ingest";
     private static final String SOURCE_OPERATION_EVENT_INGEST = "operation_event_ingest";
     private static final BigDecimal ZERO = BigDecimal.ZERO;
@@ -299,6 +301,36 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         String deltaType = firstNonBlank(mappedDelta.deltaType(), event.getDeltaType(), req == null ? null : req.deltaType(), "UNKNOWN");
         String traceId = currentOrOriginTraceId(op.getIdOperacion(), firstNonBlank(mappedDelta.wallet(), op.getIdCuenta()), firstNonBlank(mappedDelta.symbol(), op.getParSymbol()));
         String effectiveReasonCode = firstNonBlank(reasonCode, dispatchResult == null ? null : dispatchResult.reasonCode());
+        boolean blockedFlip = "FLIP_EXECUTION_BASIS_MISSING".equalsIgnoreCase(
+                effectiveReasonCode);
+        boolean estimatedPositionDelta = isEstimatedPositionDelta(req);
+        boolean positionDeltaClosingWithoutPnl = estimatedPositionDelta
+                && req != null
+                && req.effectiveCloseQty() != null
+                && req.effectiveCloseQty().compareTo(ZERO) > 0;
+        String movementSource = blockedFlip
+                ? SOURCE_DIRECT_INGEST_AUDIT_ONLY
+                : SOURCE_DIRECT_INGEST;
+        if (positionDeltaClosingWithoutPnl) {
+            meterRegistry.counter(
+                    "position_delta_without_pnl_total",
+                    "delta_type", safeTag(deltaType)
+            ).increment();
+            if (req.effectiveRealizedPnlUsd() != null) {
+                log.warn("event=position_delta.pnl_blocked reasonCode=POSITION_DELTA_PNL_NOT_AUTHORITATIVE decision=DROP_ESTIMATE_KEEP_AUDIT economicEventKind={} sourceEstimated={} deltaType={} symbol={} sourceSequence={} observedPnl={} expectedPnlSource=USER_FILL",
+                        safe(req.economicEventKind()), req.sourceEstimated(),
+                        safe(deltaType), safe(mappedDelta.symbol()),
+                        req.sourceSequence(), req.effectiveRealizedPnlUsd());
+            }
+        }
+        if (req != null
+                && "AGGREGATED_POSITION_DELTA".equalsIgnoreCase(
+                req.normalizationStatus())) {
+            meterRegistry.counter(
+                    "aggregated_position_delta_total",
+                    "delta_type", safeTag(deltaType)
+            ).increment();
+        }
 
         return OperationMovementEventRecordCommand.builder()
                 .idOrderOrigin(op.getIdOperacion())
@@ -331,9 +363,19 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .effectiveCloseQty(req == null ? null : req.effectiveCloseQty())
                 .effectiveEntryPrice(req == null ? null : req.effectiveEntryPrice())
                 .effectiveExitPrice(req == null ? null : req.effectiveExitPrice())
-                .effectiveRealizedPnlUsd(req == null ? null : req.effectiveRealizedPnlUsd())
-                .normalizationStatus(req == null ? null : req.normalizationStatus())
-                .normalizationReason(req == null ? null : req.normalizationReason())
+                .effectiveRealizedPnlUsd(blockedFlip || estimatedPositionDelta
+                        ? null
+                        : req == null ? null : req.effectiveRealizedPnlUsd())
+                .normalizationStatus(blockedFlip
+                        ? "FLIP_EXECUTION_BASIS_MISSING"
+                        : positionDeltaClosingWithoutPnl
+                        ? "PARTIAL_RECOVERY"
+                        : req == null ? null : req.normalizationStatus())
+                .normalizationReason(blockedFlip
+                        ? "authoritative_user_fill_required_for_flip"
+                        : positionDeltaClosingWithoutPnl
+                        ? "closed_notional_recovered_user_fill_pnl_unavailable"
+                        : req == null ? null : req.normalizationReason())
                 .economicEventKind(firstNonBlank(req == null ? null : req.economicEventKind(), "POSITION_DELTA"))
                 .economicEventVersion(firstNonNull(req == null ? null : req.economicEventVersion(), 2))
                 .sourceEventId(firstNonBlank(req == null ? null : req.sourceEventId(), mappedDelta.idempotencyKey()))
@@ -342,7 +384,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .fundingPnlUsd(req == null ? null : req.fundingPnlUsd())
                 .executionPriceBasis(firstNonBlank(req == null ? null : req.executionPriceBasis(), "PUBLIC_TRIGGER_TRADE_PX"))
                 .notionalBasis(firstNonBlank(req == null ? null : req.notionalBasis(), "POSITION_SNAPSHOT"))
-                .lifecycleQualityFlags(economicQualityFlags(req))
+                .lifecycleQualityFlags(economicQualityFlags(req, blockedFlip))
                 .sourceEstimated(firstNonNull(req == null ? null : req.sourceEstimated(), req == null ? null : req.estimated(), true))
                 .walletVersion(req == null ? null : req.walletVersion())
                 .snapshotVersion(req == null ? null : req.snapshotVersion())
@@ -351,14 +393,18 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 .publishedAt(publishedAt)
                 .eventTime(eventTime)
                 .traceId(traceId)
-                .source(SOURCE_DIRECT_INGEST)
+                .source(movementSource)
                 .reasonCode(effectiveReasonCode)
                 .copyEligibleUsers(dispatchResult == null ? null : dispatchResult.eligibleUsers())
                 .copySubmittedTasks(dispatchResult == null ? null : dispatchResult.submittedTasks())
                 .copyBusinessSkipped(dispatchResult == null ? null : dispatchResult.businessSkipped())
                 .copyFallbackJobs(dispatchResult == null ? null : dispatchResult.fallbackJobs())
                 .copyFallbackUsed(dispatchResult == null ? null : dispatchResult.fallbackUsed())
-                .raw(rawFromMapped(mappedDelta, dispatchResult, effectiveReasonCode))
+                .raw(rawFromMapped(
+                        mappedDelta,
+                        dispatchResult,
+                        effectiveReasonCode,
+                        movementSource))
                 .build();
     }
 
@@ -415,7 +461,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
             deltaSize = resultingSize.subtract(previousSize);
         }
         String eventType = classifyEvent(command, previousSize, resultingSize, deltaSize);
-        BigDecimal realizedPnl = firstNonNull(command.getEffectiveRealizedPnlUsd(), command.getRealizedPnlUsd());
+        boolean estimatedPositionDelta = isEstimatedPositionDelta(command);
+        BigDecimal realizedPnl = estimatedPositionDelta
+                ? null
+                : firstNonNull(command.getEffectiveRealizedPnlUsd(), command.getRealizedPnlUsd());
         if (realizedPnl == null && !sourcePnlEstimationForbidden(command)) {
             realizedPnl = estimateRealizedPnl(command, previous, eventType, deltaSize);
         }
@@ -604,7 +653,9 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 && leverage.compareTo(ZERO) > 0) {
             closedMargin = closedNotional.divide(leverage, CALC_SCALE, RoundingMode.HALF_UP).stripTrailingZeros();
         }
-        BigDecimal effectiveRealizedPnl = firstNonNull(command.getEffectiveRealizedPnlUsd(), realizedPnl);
+        BigDecimal effectiveRealizedPnl = isEstimatedPositionDelta(command)
+                ? null
+                : firstNonNull(command.getEffectiveRealizedPnlUsd(), realizedPnl);
         String status = firstNonBlank(command.getNormalizationStatus(), derivedNormalizationStatus(eventType, closedNotional, effectiveRealizedPnl));
         String reason = firstNonBlank(command.getNormalizationReason(), derivedNormalizationReason(eventType, closedNotional, effectiveRealizedPnl));
         return new NormalizedMovementValues(
@@ -623,12 +674,21 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
 
     private boolean sourcePnlEstimationForbidden(OperationMovementEventRecordCommand command) {
         String status = normalizeUpper(command == null ? null : command.getNormalizationStatus(), null);
-        return "NOT_CLOSING".equals(status)
+        return isEstimatedPositionDelta(command)
+                || "NOT_CLOSING".equals(status)
                 || "AGGREGATED_POSITION_DELTA".equals(status)
-                || "SEMANTIC_CONFLICT".equals(status);
+                || "SEMANTIC_CONFLICT".equals(status)
+                || "FLIP_EXECUTION_BASIS_MISSING".equals(status);
     }
 
     private List<String> economicQualityFlags(HyperliquidDeltaRequest request) {
+        return economicQualityFlags(request, false);
+    }
+
+    private List<String> economicQualityFlags(
+            HyperliquidDeltaRequest request,
+            boolean blockedFlip
+    ) {
         List<String> flags = new ArrayList<>();
         if (request != null && request.lifecycleQualityFlags() != null) {
             request.lifecycleQualityFlags().stream()
@@ -650,8 +710,41 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         ))) {
             addIfMissing(flags, "SOURCE_ESTIMATED");
         }
-        addIfMissing(flags, "POSITION_DELTA_NOT_FILL");
+        if (!isAuthoritativeUserFill(request)) {
+            addIfMissing(flags, "POSITION_DELTA_NOT_FILL");
+        }
+        if (blockedFlip) {
+            addIfMissing(flags, "FLIP_EXECUTION_BASIS_MISSING");
+            addIfMissing(flags, "AUDIT_ONLY_NO_ECONOMIC_LEGS");
+        }
         return List.copyOf(flags);
+    }
+
+    private boolean isEstimatedPositionDelta(HyperliquidDeltaRequest request) {
+        if (request == null) {
+            return false;
+        }
+        String kind = normalizeUpper(request.economicEventKind(), null);
+        return !"USER_FILL".equals(kind)
+                && (kind == null
+                || "POSITION_DELTA".equals(kind)
+                || Boolean.TRUE.equals(request.sourceEstimated()));
+    }
+
+    private boolean isEstimatedPositionDelta(OperationMovementEventRecordCommand command) {
+        if (command == null) {
+            return false;
+        }
+        return "POSITION_DELTA".equalsIgnoreCase(command.getEconomicEventKind())
+                && !Boolean.FALSE.equals(command.getSourceEstimated());
+    }
+
+    private boolean isAuthoritativeUserFill(HyperliquidDeltaRequest request) {
+        return request != null
+                && "USER_FILL".equalsIgnoreCase(request.economicEventKind())
+                && Boolean.FALSE.equals(request.sourceEstimated())
+                && request.sourceSequence() != null
+                && request.sourceSequence() > 0L;
     }
 
     private String[] toLifecycleQualityFlagArray(List<String> flags) {
@@ -738,13 +831,18 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 && StringUtils.hasText(command.getDeltaType());
     }
 
-    private JsonNode rawFromMapped(HyperliquidMappedDelta mappedDelta, HyperliquidDirectCopyDispatchResult dispatchResult, String reasonCode) {
+    private JsonNode rawFromMapped(
+            HyperliquidMappedDelta mappedDelta,
+            HyperliquidDirectCopyDispatchResult dispatchResult,
+            String reasonCode,
+            String movementSource
+    ) {
         LinkedHashMap<String, Object> raw = new LinkedHashMap<>();
         raw.put("kind", "hyperliquid_direct_delta");
-        raw.put("source", SOURCE_DIRECT_INGEST);
-        raw.put("sourceCategory", sourceCategory(SOURCE_DIRECT_INGEST));
-        raw.put("metricEligible", metricEligible(SOURCE_DIRECT_INGEST));
-        raw.put("metricDecisionUse", metricDecisionUse(SOURCE_DIRECT_INGEST));
+        raw.put("source", movementSource);
+        raw.put("sourceCategory", sourceCategory(movementSource));
+        raw.put("metricEligible", metricEligible(movementSource));
+        raw.put("metricDecisionUse", metricDecisionUse(movementSource));
         raw.put("movementKeySchema", "canonical-v2-sha256");
         raw.put("idempotencyKeyAuditOnly", true);
         raw.put("idempotencyKey", mappedDelta.idempotencyKey());

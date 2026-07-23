@@ -96,7 +96,11 @@ public class HyperliquidOriginPositionStoreService {
     private final AtomicInteger recentQueueDelayIndex = new AtomicInteger(0);
     private final long[] recentQueueDelaysMs = new long[1024];
     private final ConcurrentMap<String, UUID> activeOriginIds = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, HyperliquidOriginBaselinePolicy.Decision> pendingOriginBaselines = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Object> positionLocks = new ConcurrentHashMap<>();
+    private final HyperliquidOriginBaselinePolicy originBaselinePolicy = new HyperliquidOriginBaselinePolicy();
+    private final HyperliquidFlipExecutionBasisPolicy flipExecutionBasisPolicy =
+            new HyperliquidFlipExecutionBasisPolicy();
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -197,6 +201,33 @@ public class HyperliquidOriginPositionStoreService {
         if (!enabled || mapped == null) {
             return;
         }
+        HyperliquidFlipExecutionBasisPolicy.Decision flipBasis =
+                flipExecutionBasisPolicy.evaluate(mapped);
+        if (flipBasis.flip() && !flipBasis.allowed()) {
+            skipped.incrementAndGet();
+            meterRegistry.counter(
+                    "flip_previous_close_missing_total",
+                    "reason", safeTag(flipBasis.reason()),
+                    "economic_kind", safeTag(mapped.request() == null
+                            ? null
+                            : mapped.request().economicEventKind())
+            ).increment();
+            meterRegistry.counter(
+                    "signals.hyperliquid.origin_store.skipped.total",
+                    "reason", "flip_execution_basis_missing"
+            ).increment();
+            log.warn("event=hyperliquid.origin_store.flip_blocked reasonCode=FLIP_EXECUTION_BASIS_MISSING decision=NO_NEW_LIFECYCLE economicEvent=false pnlBasis=NONE originId={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} basisReason={} queueDepth={}",
+                    originId(mapped),
+                    safeLog(mapped.idempotencyKey()),
+                    safeLog(mapped.positionKey()),
+                    safeLog(mapped.wallet()),
+                    safeLog(mapped.symbol()),
+                    safeLog(mapped.side()),
+                    safeLog(mapped.deltaType()),
+                    safeLog(flipBasis.reason()),
+                    queue.size());
+            return;
+        }
         if (shouldSkipLateAdjustment(mapped)) {
             skipped.incrementAndGet();
             meterRegistry.counter("signals.hyperliquid.origin_store.skipped.total", "reason", "late_adjustment_without_active_origin").increment();
@@ -251,6 +282,39 @@ public class HyperliquidOriginPositionStoreService {
         }
 
         if (deltaType.canStartCopyLifecycle() || deltaType == HyperliquidDeltaType.FLIP) {
+            if (deltaType == HyperliquidDeltaType.FLIP) {
+                HyperliquidFlipExecutionBasisPolicy.Decision flipBasis =
+                        flipExecutionBasisPolicy.evaluate(mapped);
+                if (!flipBasis.allowed()) {
+                    UUID fallback = originId(mapped) == null
+                            ? fallbackLifecycleId(mapped)
+                            : originId(mapped);
+                    log.warn("event=hyperliquid.origin_store.flip_bind_blocked reasonCode=FLIP_EXECUTION_BASIS_MISSING decision=NO_NEW_LIFECYCLE economicEvent=false pnlBasis=NONE originId={} positionKey={} wallet={} symbol={} side={} basisReason={}",
+                            fallback,
+                            safeLog(mapped.positionKey()),
+                            safeLog(mapped.wallet()),
+                            safeLog(mapped.symbol()),
+                            safeLog(mapped.side()),
+                            safeLog(flipBasis.reason()));
+                    return fallback;
+                }
+                if (!hasActiveOppositeOrigin(mapped)) {
+                    meterRegistry.counter(
+                            "flip_previous_close_missing_total",
+                            "reason", "previous_origin_missing",
+                            "economic_kind", safeTag(mapped.request() == null
+                                    ? null
+                                    : mapped.request().economicEventKind())
+                    ).increment();
+                    throw new HyperliquidOriginLifecycleException(
+                            "Authoritative FLIP has no active previous origin",
+                            Map.of(
+                                    "reason", "flip_previous_origin_missing",
+                                    "positionKey", firstNonBlank(mapped.positionKey(), "NA")
+                            )
+                    );
+                }
+            }
             UUID lifecycleId = activeOriginIds.computeIfAbsent(key, ignored -> UUID.randomUUID());
             if (deltaType == HyperliquidDeltaType.FLIP) {
                 log.info("event=hyperliquid.origin_store.flip_lifecycle_start category=origin_position reasonCode=flip_starts_new_side reasonAlias=flip_starts_new_side friendlyReason=flip_inicia_nuevo_lado explanation=el_FLIP_se_persiste_como_nueva_posicion_y_cierra_el_lado_anterior_si_existe copyImpact=origin_state_consistent originId={} positionKey={} wallet={} symbol={} side={} deltaType={} {}",
@@ -270,9 +334,33 @@ public class HyperliquidOriginPositionStoreService {
                 cacheRecoveredLifecycle(key, databaseOriginId, mapped, "db_open_position");
                 return databaseOriginId;
             }
+            HyperliquidOriginBaselinePolicy.Decision baseline = originBaselinePolicy.evaluate(mapped);
+            meterRegistry.counter(
+                    "late_adjustment_without_origin_total",
+                    "baseline_status", baseline.valid() ? "valid" : "invalid",
+                    "reason", safeTag(baseline.reason())
+            ).increment();
+            if (baseline.valid()) {
+                UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
+                UUID baselineOriginId = activeOriginIds.putIfAbsent(key, fallback);
+                UUID resolvedOriginId = baselineOriginId == null ? fallback : baselineOriginId;
+                pendingOriginBaselines.putIfAbsent(key, baseline);
+                log.info("event=hyperliquid.origin_store.origin_baseline_accepted category=origin_position action=baseline_enqueue reasonCode=ORIGIN_BASELINE_SOURCE_SNAPSHOT_VALID baselineKind={} economicEvent=false pnlBasis=NONE originId={} positionKey={} wallet={} symbol={} side={} deltaType={} snapshotVersion={} sourceTs={} activeCacheSize={}",
+                        baseline.baselineKind(),
+                        resolvedOriginId,
+                        safeLog(mapped.positionKey()),
+                        safeLog(mapped.wallet()),
+                        safeLog(mapped.symbol()),
+                        safeLog(mapped.side()),
+                        safeLog(mapped.deltaType()),
+                        baseline.snapshotVersion(),
+                        baseline.sourceTs(),
+                        activeOriginIds.size());
+                return resolvedOriginId;
+            }
             UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
-            log.info("event=hyperliquid.origin_store.lifecycle_missing category=origin_position action=adjustment_skip reasonCode=late_adjustment_without_active_origin reasonAlias=adjustment_without_active_origin friendlyReason=ajuste_sin_posicion_original_activa explanation=ajuste_recibido_sin_posicion_original_activa_no_es_demora_de_websocket copyImpact=no_copy_order originId={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} {}",
-                    fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()), skipLateAdjustments,
+            log.info("event=hyperliquid.origin_store.lifecycle_missing category=origin_position action=adjustment_skip reasonCode=late_adjustment_without_active_origin reasonAlias=adjustment_without_active_origin friendlyReason=ajuste_sin_posicion_original_activa explanation=ajuste_recibido_sin_posicion_original_activa_y_snapshot_no_valido copyImpact=no_copy_order originId={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} baselineReason={} {}",
+                    fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()), skipLateAdjustments, safeLog(baseline.reason()),
                     CopyLogAdvice.fields("late_adjustment_without_active_origin", CopyLogAdvice.context(null, null, null, null, queue.size(), null, activeOriginIds.size(), "origin_store_bind")));
             return fallback;
         }
@@ -282,6 +370,43 @@ public class HyperliquidOriginPositionStoreService {
                 fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()),
                 CopyLogAdvice.fields("delta_not_lifecycle_start", CopyLogAdvice.context(null, null, null, null, queue.size(), null, activeOriginIds.size(), "origin_store_bind")));
         return fallback;
+    }
+
+    private boolean hasActiveOppositeOrigin(HyperliquidMappedDelta mapped) {
+        if (mapped == null || mapped.event() == null || mapped.event().getOperacion() == null) {
+            return false;
+        }
+        OperacionDto operation = mapped.event().getOperacion();
+        com.apunto.engine.shared.enums.PositionSide previousSide =
+                opposite(operation.getTipoOperacion());
+        String previousKey = positionKey(
+                firstNonBlank(operation.getIdCuenta(), mapped.wallet()),
+                firstNonBlank(operation.getParSymbol(), mapped.symbol()),
+                previousSide == null ? null : previousSide.name());
+        if (previousKey != null && activeOriginIds.containsKey(previousKey)) {
+            return true;
+        }
+        if (previousSide == null) {
+            return false;
+        }
+        try {
+            return repository.findLatestActiveByPlatformAccountSymbolSide(
+                    PLATFORM,
+                    lower(firstNonBlank(operation.getIdCuenta(), mapped.wallet())),
+                    firstNonBlank(operation.getParSymbol(), mapped.symbol()),
+                    previousSide.name(),
+                    PositionStatus.OPEN.name()
+            ).isPresent();
+        } catch (DataAccessException | IllegalArgumentException | IllegalStateException ex) {
+            log.warn("event=hyperliquid.origin_store.flip_previous_lookup_failed reasonCode=FLIP_PREVIOUS_ORIGIN_LOOKUP_FAILED decision=FAIL_CLOSED positionKey={} wallet={} symbol={} side={} errClass={} errMsg=\"{}\"",
+                    safeLog(mapped.positionKey()),
+                    safeLog(mapped.wallet()),
+                    safeLog(mapped.symbol()),
+                    safeLog(mapped.side()),
+                    ex.getClass().getSimpleName(),
+                    safeLog(ex.getMessage()));
+            return false;
+        }
     }
 
     private void cacheRecoveredLifecycle(String key, UUID originId, HyperliquidMappedDelta mapped, String source) {
@@ -643,7 +768,7 @@ public class HyperliquidOriginPositionStoreService {
                 }
                 closeOppositeSideWhenFlip(mapped, operation, priceReference);
                 boolean closing = isClosing(mapped);
-                applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing);
+                applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing, null);
                 applyStatusFields(entity, mapped.event(), operation, priceReference);
                 FuturesPositionEntity saved = repository.saveAndFlush(entity);
                 if (saved.getStatus() != PositionStatus.OPEN) {
@@ -932,7 +1057,10 @@ public class HyperliquidOriginPositionStoreService {
 
         closeOppositeSideWhenFlip(mapped, operation, priceReference);
 
-        applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing);
+        HyperliquidOriginBaselinePolicy.Decision pendingBaseline = pendingOriginBaselines.get(mapped.positionKey());
+        boolean baselineHydration = created && pendingBaseline != null && pendingBaseline.valid();
+        applyCommonFields(entity, mapped, operation, priceReference, dispatchResult, closing,
+                baselineHydration ? pendingBaseline : null);
         applyStatusFields(entity, event, operation, priceReference);
 
         FuturesPositionEntity saved;
@@ -965,8 +1093,30 @@ public class HyperliquidOriginPositionStoreService {
         } else {
             activeOriginIds.put(mapped.positionKey(), saved.getIdFuturesPosition());
         }
+        if (pendingBaseline != null) {
+            pendingOriginBaselines.remove(mapped.positionKey(), pendingBaseline);
+        }
+        if (baselineHydration) {
+            meterRegistry.counter(
+                    "origin_baseline_hydrated_total",
+                    "baseline_kind", safeTag(pendingBaseline.baselineKind()),
+                    "delta_type", safeTag(mapped.deltaType())
+            ).increment();
+            log.info("event=hyperliquid.origin_store.origin_baseline_hydrated category=origin_position action=baseline_hydrate reasonCode=ORIGIN_BASELINE_HYDRATED baselineKind={} economicEvent=false pnlBasis=NONE originId={} positionKey={} wallet={} symbol={} side={} deltaType={} snapshotVersion={} sourceTs={}",
+                    pendingBaseline.baselineKind(),
+                    saved.getIdFuturesPosition(),
+                    safeLog(mapped.positionKey()),
+                    safeLog(mapped.wallet()),
+                    safeLog(mapped.symbol()),
+                    safeLog(mapped.side()),
+                    safeLog(mapped.deltaType()),
+                    pendingBaseline.snapshotVersion(),
+                    pendingBaseline.sourceTs());
+        }
 
-        String action = created ? "insert" : (saved.getStatus() == PositionStatus.OPEN ? "update" : "close");
+        String action = baselineHydration
+                ? "baseline_hydrate"
+                : created ? "insert" : (saved.getStatus() == PositionStatus.OPEN ? "update" : "close");
         return new PersistOutcome(
                 action,
                 created,
@@ -1166,7 +1316,8 @@ public class HyperliquidOriginPositionStoreService {
             OperacionDto operation,
             BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference,
             HyperliquidDirectCopyDispatchResult dispatchResult,
-            boolean closing
+            boolean closing,
+            HyperliquidOriginBaselinePolicy.Decision baseline
     ) {
         HyperliquidDeltaRequest request = mapped.request();
         BigDecimal sizeQty = nonNegative(operation.getSizeQty());
@@ -1185,7 +1336,9 @@ public class HyperliquidOriginPositionStoreService {
         entity.setSymbol(firstNonBlank(operation.getParSymbol(), mapped.symbol()));
         entity.setSide(operation.getTipoOperacion());
         entity.setOperationType(operation.getTipoOperacion() == null ? safeUpper(mapped.side()) : operation.getTipoOperacion().name());
-        entity.setLeverage(positiveOrDefault(request == null ? null : request.leverage(), ONE));
+        entity.setLeverage(positiveOrDefault(
+                baseline == null ? request == null ? null : request.leverage() : baseline.leverage(),
+                ONE));
         BigDecimal marginUsed = nonNegative(operation.getMarginUsedUsd());
         BigDecimal sizeLegacy = nonNegative(firstNonNull(notional, operation.getSize(), operation.getNotionalUsd(), sizeQty));
         if (!closing || !isPositive(entity.getSizeQty())) {
@@ -1200,14 +1353,24 @@ public class HyperliquidOriginPositionStoreService {
         if (!closing || !isPositive(entity.getSizeLegacy())) {
             entity.setSizeLegacy(sizeLegacy);
         }
-        if (entity.getEntryPrice() == null || entity.getEntryPrice().compareTo(ZERO) <= 0) {
-            entity.setEntryPrice(nonNegative(firstNonNull(!closing ? normalizedPrice : null, ZERO)));
+        if (baseline != null) {
+            entity.setSizeQty(nonNegative(baseline.sizeQty()));
+            entity.setNotionalUsd(nonNegative(baseline.notionalUsd()));
+            entity.setSizeLegacy(nonNegative(baseline.notionalUsd()));
+            entity.setEntryPrice(nonNegative(baseline.entryPrice()));
+            entity.setMarkPrice(nonNegative(baseline.markPrice()));
+            entity.setRealizedPnlUsd(null);
+            entity.setUnrealizedPnlUsd(null);
+        } else {
+            if (entity.getEntryPrice() == null || entity.getEntryPrice().compareTo(ZERO) <= 0) {
+                entity.setEntryPrice(nonNegative(firstNonNull(!closing ? normalizedPrice : null, ZERO)));
+            }
+            entity.setMarkPrice(nonNegative(firstNonNull(normalizedPrice, entity.getMarkPrice(), ZERO)));
+            entity.setUnrealizedPnlUsd(ZERO);
         }
-        entity.setMarkPrice(nonNegative(firstNonNull(normalizedPrice, entity.getMarkPrice(), ZERO)));
-        entity.setUnrealizedPnlUsd(ZERO);
         entity.setSourceTs(resolveSourceTs(operation, request));
         entity.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
-        entity.setRaw(raw(mapped, operation, priceReference, dispatchResult));
+        entity.setRaw(raw(mapped, operation, priceReference, dispatchResult, entity.getRaw(), baseline));
     }
 
     private void applyStatusFields(
@@ -1289,9 +1452,12 @@ public class HyperliquidOriginPositionStoreService {
             HyperliquidMappedDelta mapped,
             OperacionDto operation,
             BinanceFuturesPriceNormalizerService.BinancePriceReference priceReference,
-            HyperliquidDirectCopyDispatchResult dispatchResult
+            HyperliquidDirectCopyDispatchResult dispatchResult,
+            JsonNode existingRaw,
+            HyperliquidOriginBaselinePolicy.Decision baseline
     ) {
         Map<String, Object> meta = new LinkedHashMap<>();
+        preserveOriginBaselineMeta(existingRaw, meta);
         meta.put("__entry_price_feed", operation.getPrecioEntrada());
         meta.put("__mark_price_feed", operation.getPrecioMercado());
         meta.put("__exit_price_feed", operation.getPrecioCierre());
@@ -1317,6 +1483,15 @@ public class HyperliquidOriginPositionStoreService {
             meta.put("__direct_copy_fallback_jobs", dispatchResult.fallbackJobs());
             meta.put("__direct_copy_fallback_used", dispatchResult.fallbackUsed());
         }
+        if (baseline != null) {
+            meta.put("__origin_baseline_kind", baseline.baselineKind());
+            meta.put("__origin_baseline_reconciled", true);
+            meta.put("__origin_baseline_economic_event", false);
+            meta.put("__origin_baseline_pnl_basis", "NONE");
+            meta.put("__origin_baseline_snapshot_version", baseline.snapshotVersion());
+            meta.put("__origin_baseline_source_ts", baseline.sourceTs());
+            meta.put("__origin_baseline_hydrated_at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        }
 
         Map<String, Object> raw = new LinkedHashMap<>();
         raw.put("source", "ms-signals-orc.hyperliquid.direct_ingest");
@@ -1330,6 +1505,27 @@ public class HyperliquidOriginPositionStoreService {
         raw.put("request", mapped.request());
         raw.put("__meta", meta);
         return objectMapper.valueToTree(raw);
+    }
+
+    private void preserveOriginBaselineMeta(JsonNode existingRaw, Map<String, Object> target) {
+        if (existingRaw == null || target == null) {
+            return;
+        }
+        JsonNode existingMeta = existingRaw.path("__meta");
+        for (String key : List.of(
+                "__origin_baseline_kind",
+                "__origin_baseline_reconciled",
+                "__origin_baseline_economic_event",
+                "__origin_baseline_pnl_basis",
+                "__origin_baseline_snapshot_version",
+                "__origin_baseline_source_ts",
+                "__origin_baseline_hydrated_at"
+        )) {
+            JsonNode value = existingMeta.get(key);
+            if (value != null && !value.isNull()) {
+                target.put(key, objectMapper.convertValue(value, Object.class));
+            }
+        }
     }
 
     private boolean isPositive(BigDecimal value) {

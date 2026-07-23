@@ -1,0 +1,249 @@
+﻿{
+    "mode":  "DUAL_ACCOUNT",
+    "MICRO_LIVE":  {
+                       "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                       "identityAlias":  "uX",
+                       "purpose":  "MICRO_LIVE",
+                       "symbol":  "ETHUSDC",
+                       "leverage":  5,
+                       "cycles":  [
+                                      "16d2ba1b-abf2-47ff-9ef1-805c891154a9",
+                                      "832ab40f-856e-4f07-a995-74ffd0a534d9"
+                                  ],
+                       "cycleIdentityDistinct":  true,
+                       "orders":  [
+                                      {
+                                          "purpose":  "MICRO_LIVE",
+                                          "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                                          "intent":  "OPEN",
+                                          "clientOrderId":  "codex-b2b-m-16d2ba1bab-o1",
+                                          "orderId":  76731447126,
+                                          "ack":  true,
+                                          "status":  "FILLED",
+                                          "executedQty":  0.012,
+                                          "avgPrice":  1923.10000,
+                                          "reduceOnly":  false
+                                      },
+                                      {
+                                          "purpose":  "MICRO_LIVE",
+                                          "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                                          "intent":  "INCREASE",
+                                          "clientOrderId":  "codex-b2b-m-16d2ba1bab-i1",
+                                          "orderId":  76731476549,
+                                          "ack":  true,
+                                          "status":  "FILLED",
+                                          "executedQty":  0.012,
+                                          "avgPrice":  1923.23000,
+                                          "reduceOnly":  false
+                                      },
+                                      {
+                                          "purpose":  "MICRO_LIVE",
+                                          "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                                          "intent":  "REDUCE",
+                                          "clientOrderId":  "codex-b2b-m-16d2ba1bab-r1",
+                                          "orderId":  76731490542,
+                                          "ack":  true,
+                                          "status":  "FILLED",
+                                          "executedQty":  0.012,
+                                          "avgPrice":  1923.74000,
+                                          "reduceOnly":  true
+                                      },
+                                      {
+                                          "purpose":  "MICRO_LIVE",
+                                          "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                                          "intent":  "CLOSE",
+                                          "clientOrderId":  "codex-b2b-m-16d2ba1bab-c1",
+                                          "orderId":  76731501227,
+                                          "ack":  true,
+                                          "status":  "FILLED",
+                                          "executedQty":  0.012,
+                                          "avgPrice":  1924.30000,
+                                          "reduceOnly":  true
+                                      },
+                                      {
+                                          "purpose":  "MICRO_LIVE",
+                                          "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                                          "intent":  "OPEN",
+                                          "clientOrderId":  "codex-b2b-m-832ab40f85-o2",
+                                          "orderId":  76731517541,
+                                          "ack":  true,
+                                          "status":  "FILLED",
+                                          "executedQty":  0.012,
+                                          "avgPrice":  1923.96000,
+                                          "reduceOnly":  false
+                                      },
+                                      {
+                                          "purpose":  "MICRO_LIVE",
+                                          "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                                          "intent":  "CLOSE",
+                                          "clientOrderId":  "codex-b2b-m-832ab40f85-c2",
+                                          "orderId":  76731543452,
+                                          "ack":  true,
+                                          "status":  "FILLED",
+                                          "executedQty":  0.012,
+                                          "avgPrice":  1924.13000,
+                                          "reduceOnly":  true
+                                      }
+                                  ],
+                       "localPolicyBlocks":  [
+                                                 {
+                                                     "purpose":  "MICRO_LIVE",
+                                                     "executionAccountId":  "7f255183-c762-478f-99da-416ba831e2f8",
+                                                     "intent":  "INCREASE",
+                                                     "requestedQty":  0.001,
+                                                     "reasonCode":  "INCREASE_BELOW_MIN_NOTIONAL_NOOP",
+                                                     "sentToBinance":  false
+                                                 }
+                                             ],
+                       "finalPosition":  0,
+                       "finalOpenOrders":  0,
+                       "emergencyStop":  true,
+                       "emergencyStopEvidence":  {
+                                                     "active":  true,
+                                                     "blockedIntents":  [
+                                                                            "OPEN",
+                                                                            "INCREASE"
+                                                                        ],
+                                                     "blockedReasonCode":  "B2B_EMERGENCY_STOP_ACTIVE",
+                                                     "allowedDeriskIntents":  [
+                                                                                  "REDUCE",
+                                                                                  "CLOSE"
+                                                                              ],
+                                                     "sentToBinance":  false
+                                                 },
+                       "counterpartIntact":  true,
+                       "originalLeverageRestored":  true,
+                       "originalPositionModeRestored":  true
+                   },
+    "LIVE":  {
+                 "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                 "identityAlias":  "uX",
+                 "purpose":  "LIVE",
+                 "symbol":  "ETHUSDC",
+                 "leverage":  5,
+                 "cycles":  [
+                                "99e5a9bb-3b6c-45ff-b533-f4f4d9d6c770",
+                                "85e6b9f4-fde5-4405-8d69-95a1e4ee535a"
+                            ],
+                 "cycleIdentityDistinct":  true,
+                 "orders":  [
+                                {
+                                    "purpose":  "LIVE",
+                                    "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                                    "intent":  "OPEN",
+                                    "clientOrderId":  "codex-b2b-l-99e5a9bb3b-o1",
+                                    "orderId":  76731637927,
+                                    "ack":  true,
+                                    "status":  "FILLED",
+                                    "executedQty":  0.012,
+                                    "avgPrice":  1925.28000,
+                                    "reduceOnly":  false
+                                },
+                                {
+                                    "purpose":  "LIVE",
+                                    "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                                    "intent":  "INCREASE",
+                                    "clientOrderId":  "codex-b2b-l-99e5a9bb3b-i1",
+                                    "orderId":  76731665571,
+                                    "ack":  true,
+                                    "status":  "FILLED",
+                                    "executedQty":  0.012,
+                                    "avgPrice":  1925.01000,
+                                    "reduceOnly":  false
+                                },
+                                {
+                                    "purpose":  "LIVE",
+                                    "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                                    "intent":  "REDUCE",
+                                    "clientOrderId":  "codex-b2b-l-99e5a9bb3b-r1",
+                                    "orderId":  76731678518,
+                                    "ack":  true,
+                                    "status":  "FILLED",
+                                    "executedQty":  0.012,
+                                    "avgPrice":  1925.39000,
+                                    "reduceOnly":  true
+                                },
+                                {
+                                    "purpose":  "LIVE",
+                                    "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                                    "intent":  "CLOSE",
+                                    "clientOrderId":  "codex-b2b-l-99e5a9bb3b-c1",
+                                    "orderId":  76731678876,
+                                    "ack":  true,
+                                    "status":  "FILLED",
+                                    "executedQty":  0.012,
+                                    "avgPrice":  1925.39000,
+                                    "reduceOnly":  true
+                                },
+                                {
+                                    "purpose":  "LIVE",
+                                    "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                                    "intent":  "OPEN",
+                                    "clientOrderId":  "codex-b2b-l-85e6b9f4fd-o2",
+                                    "orderId":  76731705749,
+                                    "ack":  true,
+                                    "status":  "FILLED",
+                                    "executedQty":  0.012,
+                                    "avgPrice":  1926.00000,
+                                    "reduceOnly":  false
+                                },
+                                {
+                                    "purpose":  "LIVE",
+                                    "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                                    "intent":  "CLOSE",
+                                    "clientOrderId":  "codex-b2b-l-85e6b9f4fd-c2",
+                                    "orderId":  76731720395,
+                                    "ack":  true,
+                                    "status":  "FILLED",
+                                    "executedQty":  0.012,
+                                    "avgPrice":  1926.00000,
+                                    "reduceOnly":  true
+                                }
+                            ],
+                 "localPolicyBlocks":  [
+                                           {
+                                               "purpose":  "LIVE",
+                                               "executionAccountId":  "23972ef0-1fd7-4313-a9ee-05be70b6b961",
+                                               "intent":  "INCREASE",
+                                               "requestedQty":  0.001,
+                                               "reasonCode":  "INCREASE_BELOW_MIN_NOTIONAL_NOOP",
+                                               "sentToBinance":  false
+                                           }
+                                       ],
+                 "finalPosition":  0,
+                 "finalOpenOrders":  0,
+                 "emergencyStop":  true,
+                 "emergencyStopEvidence":  {
+                                               "active":  true,
+                                               "blockedIntents":  [
+                                                                      "OPEN",
+                                                                      "INCREASE"
+                                                                  ],
+                                               "blockedReasonCode":  "B2B_EMERGENCY_STOP_ACTIVE",
+                                               "allowedDeriskIntents":  [
+                                                                            "REDUCE",
+                                                                            "CLOSE"
+                                                                        ],
+                                               "sentToBinance":  false
+                                           },
+                 "counterpartIntact":  true,
+                 "originalLeverageRestored":  true,
+                 "originalPositionModeRestored":  true
+             },
+    "GLOBAL_LIMIT":  {
+                         "maxObservedMargin":  9.24110400,
+                         "maxObservedNotional":  46.20552000,
+                         "simultaneousPositionsObserved":  false,
+                         "maxLeverage":  5,
+                         "finalPositions":  0,
+                         "finalOpenOrders":  0,
+                         "accountIsolationEvidence":  {
+                                                          "proven":  true,
+                                                          "proofType":  "BINANCE_MASTER_SUBACCOUNT_API_KEY",
+                                                          "reasonCode":  "B2B_MASTER_SUBACCOUNT_RELATIONSHIP_PROVEN",
+                                                          "candidatesChecked":  1
+                                                      },
+                         "liveTradingExecuted":  true
+                     },
+    "emergencyStop":  true
+}
