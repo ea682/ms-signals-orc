@@ -9,6 +9,7 @@ import com.apunto.engine.hyperliquid.dto.HyperliquidDirectCopyDispatchResult;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 import com.apunto.engine.hyperliquid.model.HyperliquidDeltaType;
 import com.apunto.engine.repository.OperationMovementEventRepository;
+import com.apunto.engine.service.movement.AuthoritativeMovementIdentity;
 import com.apunto.engine.outbox.service.MetricMovementOutboxService;
 import com.apunto.engine.outbox.exception.MetricOutboxHashException;
 import com.apunto.engine.outbox.exception.MetricOutboxSerializationException;
@@ -210,6 +211,9 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     }
 
     private void persist(OperationMovementEventRecordCommand command, long acceptedNs, long startedNs) {
+        if (StringUtils.hasText(command.getPositionKey())) {
+            repository.lockEconomicPosition(command.getPositionKey());
+        }
         if (repository.existsByMovementKeyInGuard(command.getMovementKey())) {
             skipped.incrementAndGet();
             log.info("event=operation_movement_event.idempotent category=audit reasonCode=movement_already_recorded reasonAlias=movement_already_recorded friendlyReason=movimiento_ya_registrado explanation=movementKey_ya_existia_en_guard_y_no_se_duplica copyImpact=ledger_idempotent traceId={} originId={} wallet={} symbol={} deltaType={} movementKey={} source={} sourceCategory={} metricEligible={} {}",
@@ -251,6 +255,16 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
             return null;
         }
         if (command.getEventTime() != null) {
+            if (command.getSourceSequence() != null
+                    && StringUtils.hasText(command.getMovementKey())) {
+                return repository.findPreviousByEconomicOrder(
+                                command.getPositionKey(),
+                                command.getEventTime(),
+                                command.getSourceSequence(),
+                                command.getMovementKey()
+                        )
+                        .orElse(null);
+            }
             return repository.findTopByPositionKeyAndEventTimeLessThanEqualOrderByEventTimeDescDateCreationDesc(command.getPositionKey(), command.getEventTime())
                     .orElse(null);
         }
@@ -289,7 +303,11 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         return OperationMovementEventRecordCommand.builder()
                 .idOrderOrigin(op.getIdOperacion())
                 .movementKey(compactKey(buildMovementKey(mappedDelta, eventTime)))
-                .idempotencyKey(firstNonBlank(mappedDelta.idempotencyKey(), req == null ? null : req.idempotencyKey()))
+                .idempotencyKey(firstNonBlank(
+                        req == null ? null : req.sourceEventId(),
+                        mappedDelta.idempotencyKey(),
+                        req == null ? null : req.idempotencyKey()
+                ))
                 .positionKey(firstNonBlank(mappedDelta.positionKey(), buildPositionKey(op)))
                 .idWalletOrigin(firstNonBlank(mappedDelta.wallet(), op.getIdCuenta()))
                 .parsymbol(firstNonBlank(mappedDelta.symbol(), op.getParSymbol()))
@@ -821,7 +839,7 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         BigDecimal notionalUsd = firstNonNull(req == null ? null : req.notionalUsd(), op == null ? null : op.getNotionalUsd());
         BigDecimal marginUsedUsd = firstNonNull(req == null ? null : req.marginUsedUsd(), op == null ? null : op.getMarginUsedUsd());
         BigDecimal tradePrice = firstNonNull(op == null ? null : op.getPrecioCierre(), req == null ? null : req.entryPrice(), op == null ? null : op.getPrecioEntrada());
-        return String.join("|",
+        String baseMaterial = String.join("|",
                 "movement_v2",
                 "origin=" + safePart(asString(op == null ? null : op.getIdOperacion())),
                 "position=" + safePart(positionKey),
@@ -836,6 +854,11 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 "notionalUsd=" + decimalKey(notionalUsd),
                 "marginUsedUsd=" + decimalKey(marginUsedUsd),
                 "tradePrice=" + decimalKey(tradePrice)
+        );
+        return AuthoritativeMovementIdentity.sourceAwareMovementMaterial(
+                baseMaterial,
+                req == null ? null : req.sourceEventId(),
+                req == null ? null : req.sourceSequence()
         );
     }
 

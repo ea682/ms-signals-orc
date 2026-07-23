@@ -22,6 +22,9 @@ final class CopyDispatchRequestFingerprint {
         Objects.requireNonNull(operation, "operation is required");
         return String.join("|",
                 VERSION,
+                text(operation.getExchangeAccountId() == null ? null : operation.getExchangeAccountId().toString()),
+                upper(operation.getAccountPurpose()),
+                text(operation.getSourcePositionCycleId() == null ? null : operation.getSourcePositionCycleId().toString()),
                 upper(operation.getSymbol()),
                 enumName(operation.getSide()),
                 enumName(operation.getPositionSide()),

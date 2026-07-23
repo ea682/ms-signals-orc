@@ -14,6 +14,7 @@ public class ManualLiveCertificationService {
     private final LiveCertificationTransitionStore store;
     private final LiveCertificationTransitionPolicy policy;
     private final Clock clock;
+    private LiveCertificationStatePropagation statePropagation;
 
     @Autowired
     public ManualLiveCertificationService(LiveCertificationTransitionStore store,
@@ -27,6 +28,11 @@ public class ManualLiveCertificationService {
         this.store = store;
         this.policy = policy;
         this.clock = clock;
+    }
+
+    @Autowired(required = false)
+    void setStatePropagation(LiveCertificationStatePropagation statePropagation) {
+        this.statePropagation = statePropagation;
     }
 
     @Transactional
@@ -77,6 +83,9 @@ public class ManualLiveCertificationService {
                 current.id(), command.transitionKey().trim(), current.status(), command.nextStatus(),
                 current.version(), next.version(), command.actor().trim(), command.reason().trim(),
                 Map.copyOf(command.evidenceSnapshot()), OffsetDateTime.now(clock)));
+        if (statePropagation != null) {
+            statePropagation.propagate(current.id(), command.nextStatus(), command.reason());
+        }
         return LiveCertificationTransitionResult.applied(next, false);
     }
 }

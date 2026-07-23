@@ -12,8 +12,10 @@ public final class ShadowCoverageSql {
                            order by e.event_time desc, e.id_event desc
                        ) as event_rank
                 from futuros_operaciones.shadow_copy_operation_event e
+                join futuros_operaciones.shadow_copy_allocation a
+                  on a.id = e.shadow_allocation_id
                 where e.shadow_allocation_id in (:allocationIds)
-                  and e.event_time >= :windowStart
+                  and e.event_time >= greatest(:windowStart, a.created_at)
                   and e.event_time <= :windowEnd
                   and e.decision in ('SIMULATED', 'RECORDED', 'SKIPPED', 'ERROR')
             ), bounded_events as (

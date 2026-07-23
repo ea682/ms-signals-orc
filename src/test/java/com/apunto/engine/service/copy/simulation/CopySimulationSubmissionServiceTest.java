@@ -81,6 +81,7 @@ class CopySimulationSubmissionServiceTest {
                 .sourcePositions(List.of(new SourcePosition(
                         "leg-1", "HYPE", "HYPEUSDC", SourceSide.LONG,
                         new BigDecimal("4"), new BigDecimal("100000"),
+                        new BigDecimal("10000"),
                         new BigDecimal("25000"), new BigDecimal("24000"),
                         new BigDecimal("10"), 77L, new BigDecimal("0.9"))))
                 .targetAllocatedCapitalUsd(new BigDecimal("100"))

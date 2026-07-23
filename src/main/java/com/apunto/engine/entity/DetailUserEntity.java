@@ -52,6 +52,15 @@ public class DetailUserEntity {
     @Column(name = "max_wallet", nullable = false)
     private Integer maxWallet = 1;
 
+    @Column(name = "participate_in_micro_live", nullable = false)
+    private boolean participateInMicroLive = false;
+
+    @Column(name = "auto_follow_certified_live", nullable = false)
+    private boolean autoFollowCertifiedLive = false;
+
+    @Column(name = "continue_in_live_after_certification", nullable = false)
+    private boolean continueInLiveAfterCertification = false;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "copy_min_notional_mode", nullable = false, length = 32)
     private CopyMinNotionalMode copyMinNotionalMode = CopyMinNotionalMode.SKIP;

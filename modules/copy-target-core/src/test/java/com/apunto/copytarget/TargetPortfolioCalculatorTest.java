@@ -22,7 +22,7 @@ class TargetPortfolioCalculatorTest {
     private final TargetPortfolioCalculator calculator = new TargetPortfolioCalculator();
 
     @Test
-    void usesSourceNotionalOverEquityAndTargetCapital() {
+    void usesSourceMarginOverEquityAndTargetCapital() {
         TargetPortfolioResult result = calculator.calculate(request(
                 bd("500000"),
                 List.of(position("HYPE", "HYPEUSDT", "100000", "100", SourceSide.LONG)),
@@ -32,9 +32,27 @@ class TargetPortfolioCalculatorTest {
         ));
 
         TargetLegDecision leg = result.selectedLegs().getFirst();
-        assertEquals(0, bd("0.2").compareTo(leg.sourceExposureRatio()));
+        assertEquals(0, bd("0.04").compareTo(leg.sourceExposureRatio()));
         assertEquals(0, bd("20").compareTo(leg.targetNotionalUsd()));
         assertEquals(0, bd("4").compareTo(leg.targetMarginUsd()));
+    }
+
+    @Test
+    void targetPortfolioReplicatesSourceMarginUsageAtTargetLeverage() {
+        SourcePosition source = positionWithMargin(
+                "HYPE", "HYPEUSDT", "1000", "100", "100", SourceSide.LONG);
+        TargetPortfolioResult result = calculator.calculate(request(
+                bd("2000"),
+                List.of(source),
+                bd("100"),
+                bd("5"),
+                null
+        ));
+
+        TargetLegDecision leg = result.selectedLegs().getFirst();
+        assertEquals(0, bd("0.05").compareTo(leg.sourceExposureRatio()));
+        assertEquals(0, bd("25").compareTo(leg.targetNotionalUsd()));
+        assertEquals(0, bd("5").compareTo(leg.targetMarginUsd()));
     }
 
     @Test
@@ -57,7 +75,7 @@ class TargetPortfolioCalculatorTest {
     void sourceExposureAboveOneHundredPercentUsesOneCommonScaleFactor() {
         TargetPortfolioResult result = calculator.calculate(request(
                 bd("100"),
-                List.of(position("A", "AUSDT", "600", "10", SourceSide.LONG)),
+                List.of(positionWithMargin("A", "AUSDT", "600", "600", "10", SourceSide.LONG)),
                 bd("100"), bd("5"), null));
 
         TargetLegDecision leg = result.selectedLegs().getFirst();
@@ -67,15 +85,15 @@ class TargetPortfolioCalculatorTest {
     }
 
     @Test
-    void sourceLeverageDoesNotReplaceNotionalOverEquityExposure() {
+    void sourceLeverageDoesNotReplaceExplicitSourceMarginUsage() {
         SourcePosition base = position("A", "AUSDT", "200", "10", SourceSide.LONG);
         SourcePosition lowLeverage = new SourcePosition(
                 base.sourceLegId(), base.sourceSymbol(), base.targetSymbol(), base.side(), base.quantity(),
-                base.notionalUsd(), base.markPrice(), base.entryPrice(), bd("2"),
+                base.notionalUsd(), base.marginUsedUsd(), base.markPrice(), base.entryPrice(), bd("2"),
                 base.snapshotVersion(), base.liquidityScore());
         SourcePosition highLeverage = new SourcePosition(
                 base.sourceLegId(), base.sourceSymbol(), base.targetSymbol(), base.side(), base.quantity(),
-                base.notionalUsd(), base.markPrice(), base.entryPrice(), bd("50"),
+                base.notionalUsd(), base.marginUsedUsd(), base.markPrice(), base.entryPrice(), bd("50"),
                 base.snapshotVersion(), base.liquidityScore());
 
         TargetPortfolioResult low = calculator.calculate(request(
@@ -136,8 +154,8 @@ class TargetPortfolioCalculatorTest {
     @Test
     void positionLimitDoesNotSpendASlotOnAnIneligibleHigherExposureCandidate() {
         List<SourcePosition> positions = List.of(
-                position("A", "AUSDT", "60", "10", SourceSide.LONG),
-                position("B", "BUSDT", "40", "10", SourceSide.LONG));
+                positionWithMargin("A", "AUSDT", "60", "60", "10", SourceSide.LONG),
+                positionWithMargin("B", "BUSDT", "40", "40", "10", SourceSide.LONG));
         List<BinanceSymbolFilter> filters = List.of(
                 new BinanceSymbolFilter("AUSDT", true, "USDT", bd("0.001"), bd("1000"), bd("0.001"),
                         bd("100"), bd("0.01"), bd("20"), bd("100")),
@@ -205,8 +223,8 @@ class TargetPortfolioCalculatorTest {
     @Test
     void lowerRankedCandidateCannotDiluteAHigherRankedCandidateBelowMinimum() {
         List<SourcePosition> positions = List.of(
-                position("A", "AUSDT", "60", "10", SourceSide.LONG),
-                position("B", "BUSDT", "40", "10", SourceSide.LONG));
+                positionWithMargin("A", "AUSDT", "60", "60", "10", SourceSide.LONG),
+                positionWithMargin("B", "BUSDT", "40", "40", "10", SourceSide.LONG));
         List<BinanceSymbolFilter> filters = List.of(
                 new BinanceSymbolFilter("AUSDT", true, "USDT", bd("0.001"), bd("1000"), bd("0.001"),
                         bd("50"), bd("0.01"), bd("20"), bd("100")),
@@ -256,8 +274,8 @@ class TargetPortfolioCalculatorTest {
         TargetPortfolioResult result = calculator.calculate(request(
                 bd("100"),
                 List.of(
-                        position("A", "AUSDT", "100", "10", SourceSide.LONG),
-                        position("B", "BUSDT", "100", "10", SourceSide.LONG)
+                        positionWithMargin("A", "AUSDT", "100", "100", "10", SourceSide.LONG),
+                        positionWithMargin("B", "BUSDT", "100", "100", "10", SourceSide.LONG)
                 ),
                 bd("100"),
                 bd("1"),
@@ -611,6 +629,13 @@ class TargetPortfolioCalculatorTest {
     }
 
     private SourcePosition position(String id, String targetSymbol, String notional, String markPrice, SourceSide side) {
+        return positionWithMargin(id, targetSymbol, notional,
+                bd(notional).divide(bd("5"), 18, RoundingMode.DOWN).toPlainString(),
+                markPrice, side);
+    }
+
+    private SourcePosition positionWithMargin(String id, String targetSymbol, String notional,
+                                              String margin, String markPrice, SourceSide side) {
         BigDecimal price = bd(markPrice);
         return new SourcePosition(
                 id,
@@ -619,6 +644,7 @@ class TargetPortfolioCalculatorTest {
                 side,
                 bd(notional).divide(price, 18, RoundingMode.DOWN),
                 bd(notional),
+                bd(margin),
                 price,
                 price,
                 bd("10"),

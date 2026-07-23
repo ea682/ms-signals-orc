@@ -40,6 +40,14 @@ class ShadowCoverageWindowPropertiesTest {
     }
 
     @Test
+    void rollingWindowCannotExceedFourteenDays() {
+        ShadowCoverageWindowProperties properties = new ShadowCoverageWindowProperties();
+        properties.setWindowDays(15);
+
+        assertThrows(IllegalArgumentException.class, properties::validate);
+    }
+
+    @Test
     void minimumSampleCannotExceedLimit() {
         ShadowCoverageWindowProperties properties = new ShadowCoverageWindowProperties();
         properties.setMaxEvents(99);

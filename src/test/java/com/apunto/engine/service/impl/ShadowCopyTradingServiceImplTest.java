@@ -254,7 +254,38 @@ class ShadowCopyTradingServiceImplTest {
     }
 
     @Test
-    void resizeWithoutOpenRecordsSkippedEventWithoutShadowOperation() throws Exception {
+    void eventExactlyAtAllocationActivationCannotStartANewShadowCycle() throws Exception {
+        OffsetDateTime activationAt = OffsetDateTime.parse("2026-06-22T10:00:00Z");
+        ShadowCopyAllocationEntity allocation = shadowAllocation(
+                10L, UUID.randomUUID(), "MOVEMENT_ALL", "MOVEMENT_ALL", 100L);
+        allocation.setCreatedAt(activationAt);
+        allocation.setLastSeenAt(activationAt);
+        List<ShadowCopyOperationEventEntity> recordedEvents = new ArrayList<>();
+        List<ShadowPositionStateEntity> openedPositions = new ArrayList<>();
+        ShadowCopyTradingServiceImpl service = serviceForRuntime(
+                List.of(allocation), recordedEvents, openedPositions);
+
+        OperacionEvent event = new OperacionEvent(
+                OperacionEvent.Tipo.ABIERTA,
+                OperacionDto.builder()
+                        .idOperacion(UUID.randomUUID())
+                        .idCuenta("0xabc")
+                        .parSymbol("BTCUSDT")
+                        .tipoOperacion(PositionSide.LONG)
+                        .sizeQty(new BigDecimal("0.1"))
+                        .notionalUsd(new BigDecimal("1000"))
+                        .precioEntrada(new BigDecimal("100000"))
+                        .fechaCreacion(activationAt.toInstant())
+                        .build());
+        event.setDeltaType("OPEN");
+
+        assertEquals(0, service.recordShadowEvent(event));
+        assertTrue(recordedEvents.isEmpty());
+        assertTrue(openedPositions.isEmpty());
+    }
+
+    @Test
+    void resizeWithoutOpenDoesNotPersistCopyLayerRows() throws Exception {
         ShadowCopyAllocationEntity allocation = shadowAllocation(10L, UUID.randomUUID(), "MOVEMENT_ALL", "MOVEMENT_ALL", 100L);
         allocation.setCreatedAt(OffsetDateTime.parse("2026-06-22T08:00:00Z"));
         allocation.setLastSeenAt(OffsetDateTime.parse("2026-06-22T08:00:00Z"));
@@ -279,12 +310,8 @@ class ShadowCopyTradingServiceImplTest {
         );
         event.setDeltaType("RESIZE");
 
-        assertEquals(1, service.recordShadowEvent(event));
-        assertEquals(1, recordedEvents.size());
-        assertEquals("RESIZE_WITHOUT_SHADOW_OPEN", recordedEvents.get(0).getReasonCode());
-        assertEquals("SKIPPED", recordedEvents.get(0).getDecision());
-        assertNull(recordedEvents.get(0).getShadowOperationId());
-        assertNull(recordedEvents.get(0).getShadowPositionId());
+        assertEquals(0, service.recordShadowEvent(event));
+        assertTrue(recordedEvents.isEmpty());
         assertTrue(openedPositions.isEmpty());
         assertTrue(validations.isEmpty());
     }
@@ -888,7 +915,7 @@ class ShadowCopyTradingServiceImplTest {
     }
 
     @Test
-    void flipWithoutPreviousShadowOpenRecordsSkippedWithoutOpeningNewSide() throws Exception {
+    void flipWithoutPreviousShadowOpenAdmitsOnlyTheNewSide() throws Exception {
         ShadowCopyAllocationEntity allocation = shadowAllocation(10L, UUID.randomUUID(), "MOVEMENT_ALL", "MOVEMENT_ALL", 100L);
         allocation.setCreatedAt(OffsetDateTime.parse("2026-06-22T08:00:00Z"));
         allocation.setLastSeenAt(OffsetDateTime.parse("2026-06-22T08:00:00Z"));
@@ -900,12 +927,12 @@ class ShadowCopyTradingServiceImplTest {
 
         assertEquals(1, service.recordShadowEvent(flipEvent(UUID.randomUUID(), PositionSide.LONG, new BigDecimal("90"))));
         assertEquals(1, recordedEvents.size());
-        assertEquals("FLIP_WITHOUT_SHADOW_OPEN", recordedEvents.get(0).getReasonCode());
-        assertEquals("SKIPPED", recordedEvents.get(0).getDecision());
-        assertNull(recordedEvents.get(0).getShadowOperationId());
-        assertNull(recordedEvents.get(0).getShadowPositionId());
-        assertTrue(openedPositions.isEmpty());
-        assertTrue(validations.isEmpty());
+        assertEquals("SHADOW_POSITION_OPENED_BY_FLIP", recordedEvents.get(0).getReasonCode());
+        assertEquals("SIMULATED", recordedEvents.get(0).getDecision());
+        assertNotNull(recordedEvents.get(0).getShadowOperationId());
+        assertNotNull(recordedEvents.get(0).getShadowPositionId());
+        assertEquals(1, openedPositions.size());
+        assertFalse(validations.isEmpty());
     }
 
     @Test

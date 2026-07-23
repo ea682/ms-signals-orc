@@ -14,7 +14,7 @@ class ShadowCoverageSqlContractTest {
         String sql = normalizedSql();
 
         assertTrue(sql.contains("shadow_allocation_id in (:allocationids)"));
-        assertTrue(sql.contains("event_time >= :windowstart"));
+        assertTrue(sql.contains("event_time >= greatest(:windowstart, a.created_at)"));
         assertTrue(sql.contains("event_time <= :windowend"));
         assertTrue(sql.contains("decision in ('simulated', 'recorded', 'skipped', 'error')"));
     }
@@ -50,6 +50,14 @@ class ShadowCoverageSqlContractTest {
         assertTrue(decisionFilter >= 0);
         assertTrue(rowNumber >= 0);
         assertTrue(sql.indexOf("duplicate") < 0);
+    }
+
+    @Test
+    void rollingWindowNeverCountsEventsBeforeShadowAllocationActivation() {
+        String sql = normalizedSql();
+
+        assertTrue(sql.contains("join futuros_operaciones.shadow_copy_allocation"));
+        assertTrue(sql.contains("greatest(:windowstart, a.created_at)"));
     }
 
     private static String normalizedSql() {

@@ -94,6 +94,7 @@ class CapitalLeverageMatrixSimulatorTest {
                 .sourcePositions(List.of(new SourcePosition(
                         "leg-1", "BTC", "BTCUSDT", SourceSide.LONG,
                         new BigDecimal("1"), new BigDecimal("100000"),
+                        new BigDecimal("100000"),
                         new BigDecimal("100000"), new BigDecimal("90000"),
                         new BigDecimal("5"), 7L, new BigDecimal("100"))))
                 .targetAllocatedCapitalUsd(capital)

@@ -37,11 +37,8 @@ public class LiveCertificationTransitionPolicy {
         if (current == null || next == null) {
             return CertificationTransitionDecision.block("LIVE_CERTIFICATION_STATUS_REQUIRED");
         }
-        if (automatic) {
-            return CertificationTransitionDecision.block("LIVE_CERTIFICATION_MANUAL_TRANSITION_REQUIRED");
-        }
         if (actor == null || actor.isBlank()) {
-            return CertificationTransitionDecision.block("LIVE_CERTIFICATION_MANUAL_ACTOR_REQUIRED");
+            return CertificationTransitionDecision.block("LIVE_CERTIFICATION_ACTOR_REQUIRED");
         }
         if (reason == null || reason.isBlank()) {
             return CertificationTransitionDecision.block("LIVE_CERTIFICATION_REASON_REQUIRED");
@@ -59,6 +56,20 @@ public class LiveCertificationTransitionPolicy {
         if (!forward && !SAFETY.contains(next)) {
             return CertificationTransitionDecision.block("LIVE_CERTIFICATION_ILLEGAL_TRANSITION");
         }
+        if (next == LiveCertificationStatus.LIVE_APPROVED && !hasValidRealMicroLiveEvidence(evidenceSnapshot)) {
+            return CertificationTransitionDecision.block("LIVE_CERTIFICATION_REAL_MICRO_EVIDENCE_REQUIRED");
+        }
         return CertificationTransitionDecision.permit();
+    }
+
+    private static boolean hasValidRealMicroLiveEvidence(Map<String, ?> evidenceSnapshot) {
+        if (!Boolean.TRUE.equals(evidenceSnapshot.get("automaticPolicyPassed"))) {
+            return false;
+        }
+        if (!Boolean.TRUE.equals(evidenceSnapshot.get("realMicroLiveEvidence"))) {
+            return false;
+        }
+        Object count = evidenceSnapshot.get("validMicroLiveTests");
+        return count instanceof Number number && number.longValue() >= 1L;
     }
 }

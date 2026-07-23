@@ -45,6 +45,20 @@ class CopyEconomicCycleContractTest {
         assertFalse(migration.contains("funding_paid numeric(38, 12) not null default 0"));
     }
 
+    @Test
+    void persistedOperationAndCycleKeepImmutableExecutionAccountAndTradingSettings() throws IOException {
+        String operationService = source("src/main/java/com/apunto/engine/service/impl/CopyOperationServiceImpl.java");
+        String cycleService = source("src/main/java/com/apunto/engine/service/impl/CopyEconomicCycleServiceImpl.java");
+        String operationDto = source("src/main/java/com/apunto/engine/dto/CopyOperationDto.java");
+
+        assertTrue(operationService.contains("entity.setexchangeaccountid(operation.getexchangeaccountid())"));
+        assertTrue(operationService.contains("entity.setsourcepositioncycleid(operation.getsourcepositioncycleid())"));
+        assertTrue(operationDto.contains("private string fixedmarginmode"));
+        assertTrue(operationDto.contains("private string fixedpositionmode"));
+        assertTrue(cycleService.contains(".fixedmarginmode(operation.getfixedmarginmode())"));
+        assertTrue(cycleService.contains(".fixedpositionmode(operation.getfixedpositionmode())"));
+    }
+
     private String source(String relative) throws IOException {
         Path path = Path.of(relative);
         assertTrue(Files.isRegularFile(path), "missing source " + path.toAbsolutePath());
