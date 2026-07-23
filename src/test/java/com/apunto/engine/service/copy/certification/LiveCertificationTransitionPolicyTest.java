@@ -13,27 +13,59 @@ class LiveCertificationTransitionPolicyTest {
     private final LiveCertificationTransitionPolicy policy = new LiveCertificationTransitionPolicy();
 
     @Test
-    void initialLiveApprovalRequiresManualActorReasonAndEvidence() {
+    void automaticLiveApprovalRequiresRealMicroLiveEvidenceThatPassedPolicy() {
         CertificationTransitionDecision automatic = policy.evaluate(
                 LiveCertificationStatus.MICRO_LIVE_VALIDATING,
                 LiveCertificationStatus.LIVE_APPROVED,
                 true,
                 "promotion-job",
                 "thresholds passed",
-                Map.of("sampleCount", 25));
+                Map.of(
+                        "automaticPolicyPassed", true,
+                        "realMicroLiveEvidence", true,
+                        "validMicroLiveTests", 1));
 
-        assertFalse(automatic.allowed());
-        assertEquals("LIVE_CERTIFICATION_MANUAL_TRANSITION_REQUIRED", automatic.reasonCode());
+        assertTrue(automatic.allowed());
+    }
 
+    @Test
+    void administrativeLiveApprovalCannotBypassTechnicalEvidence() {
         CertificationTransitionDecision manual = policy.evaluate(
                 LiveCertificationStatus.MICRO_LIVE_VALIDATING,
                 LiveCertificationStatus.LIVE_APPROVED,
                 false,
                 "operator@example.com",
                 "reviewed calibration and reconciliation",
-                Map.of("sampleCount", 25));
+                Map.of("ticket", "CHG-1"));
 
-        assertTrue(manual.allowed());
+        assertFalse(manual.allowed());
+        assertEquals("LIVE_CERTIFICATION_REAL_MICRO_EVIDENCE_REQUIRED", manual.reasonCode());
+
+        CertificationTransitionDecision evidencedManual = policy.evaluate(
+                LiveCertificationStatus.MICRO_LIVE_VALIDATING,
+                LiveCertificationStatus.LIVE_APPROVED,
+                false,
+                "operator@example.com",
+                "reviewed calibration and reconciliation",
+                Map.of(
+                        "automaticPolicyPassed", true,
+                        "realMicroLiveEvidence", true,
+                        "validMicroLiveTests", 1));
+
+        assertTrue(evidencedManual.allowed());
+    }
+
+    @Test
+    void automaticSafetyDegradationIsAllowedWithEvidence() {
+        CertificationTransitionDecision degraded = policy.evaluate(
+                LiveCertificationStatus.LIVE_APPROVED,
+                LiveCertificationStatus.LIVE_DEGRADED,
+                true,
+                "certification-monitor",
+                "dispatch error threshold exceeded",
+                Map.of("dispatchErrorRate", "0.25"));
+
+        assertTrue(degraded.allowed());
     }
 
     @Test

@@ -17,6 +17,9 @@ import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolv
 import com.apunto.engine.service.copy.promotion.LivePromotionProperties;
 import com.apunto.engine.service.copy.promotion.LivePromotionResult;
 import com.apunto.engine.service.copy.readiness.MicroLiveExecutionEvidencePolicy;
+import com.apunto.engine.service.copy.lifecycle.MicroLiveFlatness;
+import com.apunto.engine.service.copy.lifecycle.MicroLiveFlatnessGate;
+import com.apunto.engine.service.copy.certification.LiveUserRuntimeEligibilityGate;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -390,6 +393,118 @@ class MicroLivePromotionServiceImplTest {
     }
 
     @Test
+    void promotionWithOpenMicroPositionCreatesLiveButKeepsMicroExitOnlyAndReserved() {
+        UserCopyAllocationEntity micro = microLiveAllocation();
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        MicroLivePromotionServiceImpl service = service(micro, 12L, 0L, "7.5", 8, saved, audits);
+        setField(service, "microLiveFlatnessGate",
+                (MicroLiveFlatnessGate) allocationId -> new MicroLiveFlatness(false, 1, 0));
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.promoted());
+        assertEquals("LIVE", saved.get().getExecutionMode());
+        assertEquals(UserCopyAllocationEntity.Status.EXIT_ONLY, micro.getStatus());
+        assertTrue(micro.isActive());
+        assertEquals(null, micro.getEndsAt());
+        assertEquals("MICRO_LIVE_PROMOTED_EXIT_ONLY_PENDING_FLAT", micro.getStatusReason());
+    }
+
+    @Test
+    void degradedLiveIsReusedAndReactivatedAfterValidMicroRecertification() {
+        UserCopyAllocationEntity micro = microLiveAllocation();
+        UUID certificationId = UUID.randomUUID();
+        micro.setLiveCertificationId(certificationId);
+        UserCopyAllocationEntity degradedLive = liveAllocation(micro);
+        degradedLive.setLiveCertificationId(certificationId);
+        degradedLive.setStatus(UserCopyAllocationEntity.Status.EXIT_ONLY);
+        degradedLive.setStatusReason("LIVE_CERTIFICATION_LIVE_DEGRADED");
+        AtomicInteger liveRowsCreated = new AtomicInteger();
+        List<UserCopyAllocationEntity> saved = new ArrayList<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        UserCopyAllocationRepository repository = proxy(UserCopyAllocationRepository.class, (method, args) -> {
+            if ("findMicroLivePromotionCandidates".equals(method.getName())) return List.of(micro);
+            if ("findOpenLiveAllocationForUserWalletStrategyScope".equals(method.getName())) {
+                return Optional.of(degradedLive);
+            }
+            if ("findById".equals(method.getName())) return Optional.of(micro);
+            if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
+                UserCopyAllocationEntity entity = (UserCopyAllocationEntity) args[0];
+                if ("LIVE".equals(entity.getExecutionMode()) && entity.getId() == null) {
+                    liveRowsCreated.incrementAndGet();
+                    entity.setId(999L);
+                }
+                saved.add(entity);
+                return entity;
+            }
+            return unexpected(method);
+        });
+        LivePromotionProperties properties = properties();
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                repository,
+                evidenceRepository(12L, 12L, 12L, 3L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits), properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations());
+        setField(service, "liveAllocationPercentageResolver",
+                (LiveAllocationPercentageResolver) request -> resolvedPercentage("0.120000", "0.120000"));
+        setField(service, "liveUserRuntimeEligibilityGate",
+                (LiveUserRuntimeEligibilityGate) allocation -> LiveUserRuntimeEligibilityGate.Decision.permit());
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(1, result.promoted());
+        assertEquals(0, liveRowsCreated.get(), "recertification must never insert a second LIVE allocation");
+        assertEquals(401L, degradedLive.getId());
+        assertEquals(UserCopyAllocationEntity.Status.ACTIVE, degradedLive.getStatus());
+        assertTrue(degradedLive.isActive());
+        assertEquals("LIVE_RECERTIFIED", degradedLive.getStatusReason());
+        assertEquals(UserCopyAllocationEntity.Status.CLOSED, micro.getStatus());
+        assertTrue(saved.stream().anyMatch(entity -> entity == degradedLive));
+        assertTrue(audits.stream().anyMatch(audit -> "LIVE_RECERTIFIED".equals(audit.getDecision())));
+    }
+
+    @Test
+    void degradedLiveIsNotReactivatedWhenUserRuntimeEligibilityChanged() {
+        UserCopyAllocationEntity micro = microLiveAllocation();
+        UUID certificationId = UUID.randomUUID();
+        micro.setLiveCertificationId(certificationId);
+        UserCopyAllocationEntity degradedLive = liveAllocation(micro);
+        degradedLive.setLiveCertificationId(certificationId);
+        degradedLive.setStatus(UserCopyAllocationEntity.Status.EXIT_ONLY);
+        degradedLive.setStatusReason("LIVE_CERTIFICATION_LIVE_DEGRADED");
+        AtomicReference<UserCopyAllocationEntity> saved = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        LivePromotionProperties properties = properties();
+        MicroLivePromotionServiceImpl service = new MicroLivePromotionServiceImpl(
+                allocationRepository(micro, degradedLive, saved, false),
+                evidenceRepository(12L, 12L, 12L, 3L, 0L, "7.5", OffsetDateTime.now().minusDays(8)),
+                auditRepository(audits), properties,
+                new CapturingCopyDecisionGateway(fullDecisionAllowed(false, true, "FULL_DECISION_OK_FOR_LIVE")),
+                new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry()),
+                transactionOperations());
+        setField(service, "liveAllocationPercentageResolver",
+                (LiveAllocationPercentageResolver) request -> resolvedPercentage("0.120000", "0.120000"));
+        setField(service, "liveUserRuntimeEligibilityGate",
+                (LiveUserRuntimeEligibilityGate) allocation ->
+                        LiveUserRuntimeEligibilityGate.Decision.block("COPY_WALLET_BLOCKED_BY_USER"));
+
+        LivePromotionResult result = service.promoteMicroLiveToLive();
+
+        assertEquals(0, result.promoted());
+        assertEquals(1, result.rejected());
+        assertEquals(UserCopyAllocationEntity.Status.EXIT_ONLY, degradedLive.getStatus());
+        assertTrue(degradedLive.isActive());
+        assertEquals("LIVE_CERTIFICATION_LIVE_DEGRADED", degradedLive.getStatusReason());
+        assertEquals("COPY_WALLET_BLOCKED_BY_USER", micro.getStatusReason());
+        assertTrue(audits.stream().anyMatch(audit ->
+                "COPY_WALLET_BLOCKED_BY_USER".equals(audit.getReasonCode())));
+    }
+
+    @Test
     void duplicateLiveConstraintIsTreatedAsNoopWhenLiveAppearsOnRequery() {
         UserCopyAllocationEntity allocation = microLiveAllocation();
         UserCopyAllocationEntity existingLive = liveAllocation(allocation);
@@ -588,7 +703,6 @@ class MicroLivePromotionServiceImplTest {
         properties.setMinAcknowledgedOrders(2);
         properties.setMinFilledOrders(2);
         properties.setMinClosedOperations(1);
-        properties.setMinSlippageSamples(1);
         properties.setMaxDispatchErrors(0);
         properties.setMaxReconciliationPending(0);
         properties.setMaxDuplicateCount(0);

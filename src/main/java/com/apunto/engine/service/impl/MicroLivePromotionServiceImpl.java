@@ -10,6 +10,11 @@ import com.apunto.engine.repository.MicroLiveExecutionEvidenceProjection;
 import com.apunto.engine.repository.CopyPromotionAuditRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.repository.UserWalletCopyPlanRepository;
+import com.apunto.engine.repository.DetailUserRepository;
+import com.apunto.engine.entity.DetailUserEntity;
+import com.apunto.engine.entity.UserApiKeyEntity;
+import com.apunto.engine.repository.UserApiKeyRepository;
+import com.apunto.engine.service.copy.account.ExecutionAccountPurpose;
 import com.apunto.engine.service.MicroLivePromotionService;
 import com.apunto.engine.service.copy.decision.CopyDecisionGateway;
 import com.apunto.engine.service.copy.decision.CopyDecisionRequest;
@@ -25,6 +30,11 @@ import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolv
 import com.apunto.engine.service.copy.readiness.MicroLiveExecutionEvidence;
 import com.apunto.engine.service.copy.readiness.MicroLiveExecutionEvidencePolicy;
 import com.apunto.engine.service.copy.readiness.MicroLiveReadinessDecision;
+import com.apunto.engine.service.copy.certification.AutomaticLiveCertificationResult;
+import com.apunto.engine.service.copy.certification.AutomaticLiveCertificationService;
+import com.apunto.engine.service.copy.certification.LiveUserRuntimeEligibilityGate;
+import com.apunto.engine.service.copy.lifecycle.MicroLiveFlatness;
+import com.apunto.engine.service.copy.lifecycle.MicroLiveFlatnessGate;
 import lombok.extern.slf4j.Slf4j;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +53,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -73,6 +84,21 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
 
     @Autowired(required = false)
     private MeterRegistry meterRegistry;
+
+    @Autowired(required = false)
+    private AutomaticLiveCertificationService automaticLiveCertificationService;
+
+    @Autowired(required = false)
+    private DetailUserRepository detailUserRepository;
+
+    @Autowired(required = false)
+    private UserApiKeyRepository userApiKeyRepository;
+
+    @Autowired(required = false)
+    private MicroLiveFlatnessGate microLiveFlatnessGate;
+
+    @Autowired(required = false)
+    private LiveUserRuntimeEligibilityGate liveUserRuntimeEligibilityGate;
 
     @Autowired
     public MicroLivePromotionServiceImpl(UserCopyAllocationRepository allocationRepository,
@@ -109,8 +135,7 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             return LivePromotionResult.empty();
         }
         if (properties.isManualCertificationRequired()) {
-            log.warn("event=copy.promotion.micro_to_live.skipped decision=BLOCK reasonCode=LIVE_MANUAL_CERTIFICATION_REQUIRED copyImpact=no_live_allocation_created");
-            return LivePromotionResult.empty();
+            log.warn("event=copy.promotion.micro_to_live.configuration_deprecated reasonCode=AUTOMATIC_REAL_EVIDENCE_CERTIFICATION_REQUIRED configuredManualCertificationRequired=true");
         }
 
         List<UserCopyAllocationEntity> candidates = allocationRepository.findMicroLivePromotionCandidates(
@@ -330,11 +355,11 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             OffsetDateTime now
     ) {
         Optional<UserCopyAllocationEntity> existing = existingLive(micro);
-        if (existing.isPresent()) {
+        if (existing.isPresent() && !isRecertificationCandidate(existing.get())) {
             LiveDecision noop = decisionWithResolution(
                     decision,
                     false,
-                    "LIVE_ALLOCATION_ALREADY_EXISTS",
+                    recertificationBlockedReason(existing.get()),
                     decision.percentageResolution());
             audit(micro, noop, "MICRO_LIVE_PROMOTION_NOOP");
             return PromotionMutation.noop(micro, existing.get());
@@ -368,20 +393,143 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
 
         LiveDecision effectiveDecision = decisionWithResolution(
                 decision, true, "MICRO_LIVE_VALIDATED_READY_FOR_LIVE", currentPercentage);
-        micro.setStatus(UserCopyAllocationEntity.Status.CLOSED);
-        micro.setActive(false);
-        micro.setStatusReason("PROMOTED_MICRO_TO_LIVE_CLOSED");
-        micro.setStatusUpdatedAt(now);
-        micro.setUpdatedAt(now);
-        UserCopyAllocationEntity closed = allocationRepository.saveAndFlush(micro);
+        UUID certificationId = null;
+        if (automaticLiveCertificationService != null) {
+            AutomaticLiveCertificationResult certification = automaticLiveCertificationService.certify(
+                    micro, effectiveDecision.details());
+            if (!certification.approved()) {
+                micro.setStatusReason(certification.reasonCode());
+                micro.setStatusUpdatedAt(recheckTime);
+                micro.setUpdatedAt(recheckTime);
+                allocationRepository.save(micro);
+                audit(micro, decisionWithResolution(
+                        decision, false, certification.reasonCode(), currentPercentage),
+                        "MICRO_LIVE_PROMOTION_REJECTED");
+                return PromotionMutation.rejected(micro, certification.reasonCode());
+            }
+            certificationId = certification.certificationId();
+        }
+        if (detailUserRepository != null) {
+            DetailUserEntity detail = detailUserRepository.findByUser_Id(micro.getIdUser());
+            if (detail == null || !detail.isContinueInLiveAfterCertification()) {
+                LiveDecision declined = decisionWithResolution(
+                        decision, false, "LIVE_CONTINUATION_NOT_REQUESTED", currentPercentage);
+                UserCopyAllocationEntity closedWithoutLive = completeOrDeriskMicro(
+                        micro,
+                        "MICRO_LIVE_CERTIFIED_USER_DECLINED_LIVE",
+                        "MICRO_LIVE_CERTIFIED_EXIT_ONLY_PENDING_FLAT",
+                        now);
+                audit(closedWithoutLive, declined, "MICRO_LIVE_CERTIFIED_NO_LIVE");
+                return PromotionMutation.rejected(closedWithoutLive, "LIVE_CONTINUATION_NOT_REQUESTED");
+            }
+        }
+        UserApiKeyEntity liveAccount = userApiKeyRepository == null ? null : userApiKeyRepository
+                .findByUser_IdAndExchangeIgnoreCaseAndAccountPurposeAndActiveTrue(
+                        micro.getIdUser(), "BINANCE", ExecutionAccountPurpose.LIVE)
+                .orElse(null);
+        if (userApiKeyRepository != null && !usable(liveAccount)) {
+            micro.setStatusReason("LIVE_EXECUTION_ACCOUNT_MISSING");
+            micro.setStatusUpdatedAt(now);
+            micro.setUpdatedAt(now);
+            allocationRepository.save(micro);
+            audit(micro, decisionWithResolution(decision, false,
+                    "LIVE_EXECUTION_ACCOUNT_MISSING", currentPercentage),
+                    "MICRO_LIVE_PROMOTION_REJECTED");
+            return PromotionMutation.rejected(micro, "LIVE_EXECUTION_ACCOUNT_MISSING");
+        }
+        if (existing.isPresent()) {
+            UserCopyAllocationEntity live = existing.get();
+            if (certificationId != null) live.setLiveCertificationId(certificationId);
+            LiveUserRuntimeEligibilityGate.Decision userEligibility = liveUserRuntimeEligibilityGate == null
+                    ? LiveUserRuntimeEligibilityGate.Decision.block("LIVE_USER_ELIGIBILITY_UNAVAILABLE")
+                    : liveUserRuntimeEligibilityGate.evaluateForActivation(live);
+            if (userEligibility == null || !userEligibility.allowed()) {
+                String eligibilityReason = userEligibility == null
+                        ? "LIVE_USER_ELIGIBILITY_UNAVAILABLE"
+                        : userEligibility.reasonCode();
+                micro.setStatusReason(eligibilityReason);
+                micro.setStatusUpdatedAt(now);
+                micro.setUpdatedAt(now);
+                allocationRepository.save(micro);
+                audit(micro, decisionWithResolution(
+                        decision, false, eligibilityReason, currentPercentage),
+                        "MICRO_LIVE_RECERTIFICATION_REJECTED");
+                return PromotionMutation.rejected(micro, eligibilityReason);
+            }
+            if (liveAccount != null && live.getExchangeAccountId() != null
+                    && !live.getExchangeAccountId().equals(liveAccount.getId())) {
+                return PromotionMutation.rejected(micro, "EXECUTION_ACCOUNT_PURPOSE_MISMATCH");
+            }
+            if (live.getExchangeAccountId() == null && liveAccount != null) {
+                live.setExchangeAccountId(liveAccount.getId());
+            }
+            applyLivePercentage(live, currentPercentage);
+            live.setCopyMode(effectiveDecision.resolvedCopyMode());
+            live.setStatus(UserCopyAllocationEntity.Status.ACTIVE);
+            live.setActive(true);
+            live.setEndsAt(null);
+            live.setStatusReason("LIVE_RECERTIFIED");
+            live.setStatusUpdatedAt(now);
+            live.setUpdatedAt(now);
+            live.setActivationAt(now);
+            UserCopyAllocationEntity closed = completeOrDeriskMicro(
+                    micro,
+                    "MICRO_LIVE_RECERTIFICATION_COMPLETED",
+                    "MICRO_LIVE_RECERTIFICATION_EXIT_ONLY_PENDING_FLAT",
+                    now);
+            UserCopyAllocationEntity reactivated = allocationRepository.saveAndFlush(live);
+            audit(closed, effectiveDecision, "MICRO_LIVE_RECERTIFICATION_COMPLETED");
+            auditLiveRecertified(closed, reactivated, effectiveDecision);
+            recordLivePromotion("recertified", "LIVE_RECERTIFIED");
+            return PromotionMutation.created(closed, reactivated, currentPercentage);
+        }
+        UserCopyAllocationEntity closed = completeOrDeriskMicro(
+                micro,
+                "PROMOTED_MICRO_TO_LIVE_CLOSED",
+                "MICRO_LIVE_PROMOTED_EXIT_ONLY_PENDING_FLAT",
+                now);
         UserCopyAllocationEntity live = allocationRepository.saveAndFlush(liveFromMicro(
-                closed, now, effectiveDecision.resolvedCopyMode(), currentPercentage));
+                closed, now, effectiveDecision.resolvedCopyMode(), currentPercentage, certificationId,
+                automaticLiveCertificationService != null, liveAccount == null ? null : liveAccount.getId()));
         updateLivePlan(closed, currentPercentage, effectiveDecision, now);
         audit(closed, effectiveDecision, "MICRO_LIVE_EVALUATED");
         auditMicroClosed(closed, effectiveDecision);
         auditLiveCreated(closed, live, effectiveDecision);
         recordLivePromotion("promoted", "LIVE_ALLOCATION_PCT_RESOLVED");
         return PromotionMutation.created(closed, live, currentPercentage);
+    }
+
+    private UserCopyAllocationEntity completeOrDeriskMicro(UserCopyAllocationEntity micro,
+                                                           String closedReason,
+                                                           String exitOnlyReason,
+                                                           OffsetDateTime now) {
+        MicroLiveFlatness flatness;
+        try {
+            flatness = microLiveFlatnessGate == null
+                    ? new MicroLiveFlatness(true, 0, 0)
+                    : microLiveFlatnessGate.evaluate(micro.getId());
+        } catch (RuntimeException error) {
+            flatness = new MicroLiveFlatness(false, -1, -1);
+            log.warn("event=copy.promotion.micro_flatness_failed allocationId={} reasonCode=MICRO_LIVE_FLATNESS_UNAVAILABLE decision=KEEP_EXIT_ONLY errorClass={}",
+                    micro.getId(), error.getClass().getSimpleName());
+        }
+        if (flatness.flat()) {
+            micro.setStatus(UserCopyAllocationEntity.Status.CLOSED);
+            micro.setActive(false);
+            micro.setEndsAt(now);
+            micro.setStatusReason(closedReason);
+        } else {
+            micro.setStatus(UserCopyAllocationEntity.Status.EXIT_ONLY);
+            micro.setActive(true);
+            micro.setEndsAt(null);
+            micro.setStatusReason(exitOnlyReason);
+        }
+        micro.setStatusUpdatedAt(now);
+        micro.setUpdatedAt(now);
+        log.info("event=copy.promotion.micro_completion_state allocationId={} status={} active={} activePositions={} pendingDispatches={} reserveReleased={} reasonCode={}",
+                micro.getId(), micro.getStatus(), micro.isActive(), flatness.activePositions(),
+                flatness.pendingDispatches(), flatness.flat(), micro.getStatusReason());
+        return allocationRepository.saveAndFlush(micro);
     }
 
     private void updateLivePlan(
@@ -474,7 +622,10 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             UserCopyAllocationEntity micro,
             OffsetDateTime now,
             String resolvedCopyMode,
-            LiveAllocationPercentageResolution percentageResolution
+            LiveAllocationPercentageResolution percentageResolution,
+            UUID certificationId,
+            boolean adoptionRequired,
+            UUID exchangeAccountId
     ) {
         return UserCopyAllocationEntity.builder()
                 .idUser(micro.getIdUser())
@@ -495,11 +646,14 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 .allocationPctValidUntil(percentageResolution.validUntil())
                 .walletTotalAllocationPct(percentageResolution.walletTotalPercentage())
                 .score(micro.getScore())
-                .status(UserCopyAllocationEntity.Status.ACTIVE)
+                .status(adoptionRequired ? UserCopyAllocationEntity.Status.PAUSED : UserCopyAllocationEntity.Status.ACTIVE)
                 .updatedAt(now)
                 .isActive(true)
                 .executionMode("LIVE")
-                .statusReason("PROMOTED_MICRO_TO_LIVE")
+                .exchangeAccountId(exchangeAccountId)
+                .statusReason(adoptionRequired
+                        ? "LIVE_ADOPTION_VALIDATION_REQUIRED"
+                        : "PROMOTED_MICRO_TO_LIVE")
                 .statusUpdatedAt(now)
                 .leverageOverride(micro.getLeverageOverride())
                 .copyMinNotionalMode(micro.getCopyMinNotionalMode())
@@ -513,6 +667,8 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 .walletProfileId(micro.getWalletProfileId())
                 .linkedShadowAllocationId(micro.getLinkedShadowAllocationId())
                 .promotedFromShadowAt(firstNonNull(micro.getPromotedFromShadowAt(), now))
+                .activationAt(now)
+                .liveCertificationId(certificationId)
                 .sourceRankingVersion(micro.getSourceRankingVersion())
                 .sourceSymbol(micro.getSourceSymbol())
                 .targetSymbol(micro.getTargetSymbol())
@@ -521,6 +677,12 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 .symbolResolutionStatus(micro.getSymbolResolutionStatus())
                 .symbolResolutionReason(micro.getSymbolResolutionReason())
                 .build();
+    }
+
+    private static boolean usable(UserApiKeyEntity account) {
+        return account != null && account.isActive()
+                && account.getApiKey() != null && !account.getApiKey().isBlank()
+                && account.getApiSecret() != null && !account.getApiSecret().isBlank();
     }
 
     private Map<Long, MicroLiveExecutionEvidence> loadExecutionEvidence(List<UserCopyAllocationEntity> candidates,
@@ -642,8 +804,9 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
             return rejected("MICRO_LIVE_NOT_READY_INVALID_ALLOCATION", allocation, 0, 0, ZERO, ZERO, 0);
         }
         Optional<UserCopyAllocationEntity> existingLive = existingLive(allocation);
-        if (existingLive.isPresent()) {
-            return rejected("LIVE_ALLOCATION_ALREADY_EXISTS", allocation, 0, 0, ZERO, ZERO, 0, existingLive.get().getCopyMode());
+        if (existingLive.isPresent() && !isRecertificationCandidate(existingLive.get())) {
+            return rejected(recertificationBlockedReason(existingLive.get()), allocation,
+                    0, 0, ZERO, ZERO, 0, existingLive.get().getCopyMode());
         }
 
         CopyModeResolution copyModeResolution = UserCopyAllocationCopyModeResolver.resolve(
@@ -887,6 +1050,38 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
         );
     }
 
+    private static boolean isRecertificationCandidate(UserCopyAllocationEntity live) {
+        if (live == null || !live.isActive() || live.getEndsAt() != null
+                || !"LIVE".equals(UserCopyAllocationEntity.normalizeExecutionMode(live.getExecutionMode()))) {
+            return false;
+        }
+        String reason = live.getStatusReason() == null
+                ? "" : live.getStatusReason().trim().toUpperCase(Locale.ROOT);
+        if (reason.contains("REVOKED")) return false;
+        return live.getStatus() != UserCopyAllocationEntity.Status.ACTIVE
+                && (reason.startsWith("LIVE_CERTIFICATION_")
+                || reason.startsWith("LIVE_RECERTIFICATION_"));
+    }
+
+    private static String recertificationBlockedReason(UserCopyAllocationEntity live) {
+        String reason = live == null || live.getStatusReason() == null
+                ? "" : live.getStatusReason().trim().toUpperCase(Locale.ROOT);
+        return reason.contains("REVOKED")
+                ? "LIVE_CERTIFICATION_REVOKED_TERMINAL"
+                : "LIVE_ALLOCATION_ALREADY_EXISTS";
+    }
+
+    private static void applyLivePercentage(UserCopyAllocationEntity live,
+                                            LiveAllocationPercentageResolution resolution) {
+        live.setAllocationPct(resolution.percentage());
+        live.setSizingMode("PERCENTAGE");
+        live.setAllocationPctSource(resolution.source());
+        live.setAllocationPctSourceId(resolution.sourceId());
+        live.setAllocationPctCalculatedAt(resolution.calculatedAt());
+        live.setAllocationPctValidUntil(resolution.validUntil());
+        live.setWalletTotalAllocationPct(resolution.walletTotalPercentage());
+    }
+
     private void audit(UserCopyAllocationEntity allocation, LiveDecision decision, String event) {
         auditRepository.save(CopyPromotionAuditEntity.builder()
                 .idUser(allocation.getIdUser())
@@ -931,6 +1126,26 @@ public class MicroLivePromotionServiceImpl implements MicroLivePromotionService 
                 .targetExecutionMode("LIVE")
                 .decision("LIVE_CREATED")
                 .reasonCode(decision.reasonCode())
+                .reasonDetails(decision.details())
+                .shadowAllocationId(liveAllocation.getLinkedShadowAllocationId())
+                .microLiveAllocationId(microAllocation.getId())
+                .liveAllocationId(liveAllocation.getId())
+                .build());
+    }
+
+    private void auditLiveRecertified(
+            UserCopyAllocationEntity microAllocation,
+            UserCopyAllocationEntity liveAllocation,
+            LiveDecision decision
+    ) {
+        auditRepository.save(CopyPromotionAuditEntity.builder()
+                .idUser(liveAllocation.getIdUser())
+                .walletId(liveAllocation.getWalletId())
+                .copyStrategyCode(liveAllocation.getCopyStrategyCode())
+                .sourceExecutionMode("MICRO_LIVE")
+                .targetExecutionMode("LIVE")
+                .decision("LIVE_RECERTIFIED")
+                .reasonCode("LIVE_RECERTIFIED")
                 .reasonDetails(decision.details())
                 .shadowAllocationId(liveAllocation.getLinkedShadowAllocationId())
                 .microLiveAllocationId(microAllocation.getId())

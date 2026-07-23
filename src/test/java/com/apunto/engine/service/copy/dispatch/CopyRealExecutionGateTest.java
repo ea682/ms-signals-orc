@@ -4,7 +4,11 @@ import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.service.copy.certification.LiveEntryAuthorizationDecision;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.env.StandardEnvironment;
+
+import java.math.BigDecimal;
 import java.lang.reflect.Field;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -62,11 +66,62 @@ class CopyRealExecutionGateTest {
     }
 
     @Test
+    void currentUserPreferenceCanBlockLiveEntryWithoutBlockingDerisk() {
+        CopyRealExecutionGate gate = gate(true, true, true, true, false);
+        setField(gate, "liveUserRuntimeEligibilityGate",
+                (com.apunto.engine.service.copy.certification.LiveUserRuntimeEligibilityGate)
+                        allocation -> com.apunto.engine.service.copy.certification.LiveUserRuntimeEligibilityGate.Decision
+                                .block("LIVE_USER_OPT_IN_REQUIRED"));
+
+        assertEquals("LIVE_USER_OPT_IN_REQUIRED",
+                gate.evaluate(operation(false), allocation("LIVE")).reasonCode());
+        assertTrue(gate.evaluate(operation(true), allocation("LIVE")).allowed());
+    }
+
+    @Test
     void unknownModeFailsClosed() {
         CopyRealExecutionGate gate = gate(true, true, true, true, false);
 
         assertEquals("COPY_REAL_EXECUTION_MODE_UNKNOWN",
                 gate.evaluate(operation(false), allocation("SHADOW")).reasonCode());
+    }
+
+    @Test
+    void b2bRuntimeBlocksTheOppositePurposeExecutionAccount() throws Exception {
+        UUID microAccountId = UUID.fromString("10000000-0000-0000-0000-000000000001");
+        UUID liveAccountId = UUID.fromString("20000000-0000-0000-0000-000000000002");
+        B2bRealMoneyGuardProperties properties = new B2bRealMoneyGuardProperties();
+        properties.setEnabled(true);
+        properties.setExplicitAcknowledgement("I_ACCEPT_MAX_10_USDC_REAL_MARGIN");
+        properties.setEmergencyStop(false);
+        properties.setManualPositionsVerified(true);
+        properties.setTestUserId("user-1");
+        properties.setMicroLiveExecutionAccountId(microAccountId);
+        properties.setLiveExecutionAccountId(liveAccountId);
+        properties.afterPropertiesSet();
+        StandardEnvironment environment = new StandardEnvironment();
+        environment.setActiveProfiles("b2b");
+        B2bRealMoneyExecutionGuard b2bGuard =
+                new B2bRealMoneyExecutionGuard(properties, environment);
+        CopyRealExecutionGate gate = gate(true, true, true, true, false);
+        setField(gate, "b2bRealMoneyExecutionGuard", b2bGuard);
+        OperationDto operation = OperationDto.builder()
+                .userId("user-1")
+                .symbol("BTCUSDC")
+                .clientOrderId("codex-b2b-cross-purpose")
+                .accountPurpose("LIVE")
+                .exchangeAccountId(microAccountId)
+                .sourcePositionCycleId(UUID.randomUUID())
+                .copyIntent("OPEN")
+                .requestedMarginUsd(BigDecimal.ONE)
+                .requestedNotionalUsd(new BigDecimal("5"))
+                .leverage(5)
+                .build();
+
+        CopyRealExecutionGate.Decision decision = gate.evaluate(operation, allocation("LIVE"));
+
+        assertFalse(decision.allowed());
+        assertEquals("B2B_EXECUTION_ACCOUNT_PURPOSE_MISMATCH", decision.reasonCode());
     }
 
     private CopyRealExecutionGate gate(boolean newDispatch, boolean micro, boolean live,
@@ -83,6 +138,9 @@ class CopyRealExecutionGateTest {
         setField(gate, "liveWhitelistSymbols", "");
         setField(gate, "liveWhitelistAllocationIds", "");
         setField(gate, "liveWhitelistStrategyCodes", "");
+        setField(gate, "liveUserRuntimeEligibilityGate",
+                (com.apunto.engine.service.copy.certification.LiveUserRuntimeEligibilityGate)
+                        allocation -> com.apunto.engine.service.copy.certification.LiveUserRuntimeEligibilityGate.Decision.permit());
         return gate;
     }
 

@@ -2,6 +2,7 @@ package com.apunto.engine.service.copy.coverage;
 
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import org.springframework.beans.factory.InitializingBean;
@@ -20,6 +21,7 @@ public class ShadowCoverageWindowProperties implements InitializingBean {
     private ShadowCoverageMode mode = ShadowCoverageMode.ROLLING;
 
     @Min(1)
+    @Max(14)
     private int windowDays = 14;
 
     @Min(1)
@@ -40,6 +42,9 @@ public class ShadowCoverageWindowProperties implements InitializingBean {
     public void validate() {
         if (windowDays <= 0) {
             throw new IllegalArgumentException("copy.promotion.coverage.window-days must be greater than zero");
+        }
+        if (windowDays > 14) {
+            throw new IllegalArgumentException("copy.promotion.coverage.window-days cannot exceed 14 days");
         }
         if (maxEvents <= 0) {
             throw new IllegalArgumentException("copy.promotion.coverage.max-events must be greater than zero");

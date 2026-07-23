@@ -20,6 +20,17 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
     List<CopyDispatchIntentEntity> findAllByClientOrderId(String clientOrderId);
 
     @Query(value = """
+            select count(*)
+            from futuros_operaciones.copy_dispatch_intent
+            where user_copy_allocation_id = :allocationId
+              and status in (
+                  'CREATED','CLAIMED','DISPATCHING','ACKNOWLEDGED','NEW',
+                  'PARTIALLY_FILLED','FILLED','RECONCILING','PERSISTENCE_PENDING'
+              )
+            """, nativeQuery = true)
+    long countNonTerminalByAllocationId(@Param("allocationId") Long allocationId);
+
+    @Query(value = """
         WITH allocation_ids AS (
             SELECT a.id
             FROM futuros_operaciones.user_copy_allocation a
@@ -118,6 +129,7 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
     @Query(value = """
         INSERT INTO futuros_operaciones.copy_dispatch_intent (
             id, idempotency_key, id_user, user_copy_allocation_id, execution_mode,
+            exchange_account_id, source_position_cycle_id, fixed_margin_mode, fixed_position_mode,
             wallet_id, strategy_code, scope_type, scope_value, metric_generation_id, source_event_id,
             id_order_origin, source_event_type, copy_intent, symbol, side, position_side,
             reduce_only, requested_qty, requested_margin_usd, requested_notional_usd,
@@ -126,7 +138,9 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
             client_order_id, average_price_status, status, request_hash, attempts,
             reconciliation_attempts, created_at, updated_at
         ) VALUES (
-            :id, :key, :userId, :allocationId, :mode, :walletId, :strategy,
+            :id, :key, :userId, :allocationId, :mode,
+            :exchangeAccountId, :sourcePositionCycleId, :fixedMarginMode, :fixedPositionMode,
+            :walletId, :strategy,
             :scopeType, :scopeValue, :generationId, :sourceEventId, :originId, :sourceEventType,
             :copyIntent, :symbol, :side, :positionSide, :reduceOnly, :qty, :margin,
             :notional, :notionalBand, :referencePrice, :leverage, :userMaxConcurrentPositions,
@@ -140,6 +154,10 @@ public interface CopyDispatchIntentRepository extends JpaRepository<CopyDispatch
             @Param("userId") String userId,
             @Param("allocationId") Long allocationId,
             @Param("mode") String mode,
+            @Param("exchangeAccountId") UUID exchangeAccountId,
+            @Param("sourcePositionCycleId") UUID sourcePositionCycleId,
+            @Param("fixedMarginMode") String fixedMarginMode,
+            @Param("fixedPositionMode") String fixedPositionMode,
             @Param("walletId") String walletId,
             @Param("strategy") String strategy,
              @Param("scopeType") String scopeType,

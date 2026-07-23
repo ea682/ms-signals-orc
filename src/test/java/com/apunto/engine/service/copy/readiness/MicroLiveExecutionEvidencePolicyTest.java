@@ -27,7 +27,6 @@ class MicroLiveExecutionEvidencePolicyTest {
         properties.setMaxReconciliationPending(0);
         properties.setMaxDuplicateCount(0);
         properties.setMaxUnresolvedAmbiguousTimeouts(0);
-        properties.setMinSlippageSamples(3);
         policy = new MicroLiveExecutionEvidencePolicy(properties, new SimpleMeterRegistry());
     }
 
@@ -65,6 +64,16 @@ class MicroLiveExecutionEvidencePolicyTest {
     }
 
     @Test
+    void directCrossExchangePriceSlippageDoesNotBlockPromotion() {
+        MicroLiveReadinessDecision decision = policy.evaluate(completeEvidence()
+                .adverseSlippageP95Bps(new BigDecimal("250"))
+                .build());
+
+        assertTrue(decision.allowed());
+        assertFalse(decision.reasons().contains("MICRO_LIVE_NOT_READY_ADVERSE_SLIPPAGE"));
+    }
+
+    @Test
     void errorRateLimitStillAppliesWhenAbsoluteErrorLimitAllowsSomeErrors() {
         LivePromotionProperties properties = new LivePromotionProperties();
         properties.setMinMicroDays(0);
@@ -74,7 +83,6 @@ class MicroLiveExecutionEvidencePolicyTest {
         properties.setMinClosedOperations(0);
         properties.setMaxDispatchErrors(5);
         properties.setMaxErrorRatePct(new BigDecimal("5"));
-        properties.setMinSlippageSamples(0);
         MicroLiveExecutionEvidencePolicy ratePolicy = new MicroLiveExecutionEvidencePolicy(
                 properties, new SimpleMeterRegistry());
 

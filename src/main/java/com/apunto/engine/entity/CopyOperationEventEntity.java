@@ -38,6 +38,12 @@ public class CopyOperationEventEntity {
     @Column(name = "economic_cycle_id", columnDefinition = "uuid")
     private UUID economicCycleId;
 
+    @Column(name = "exchange_account_id", columnDefinition = "uuid")
+    private UUID exchangeAccountId;
+
+    @Column(name = "source_position_cycle_id", columnDefinition = "uuid")
+    private UUID sourcePositionCycleId;
+
     @Column(name = "dispatch_intent_id", columnDefinition = "uuid")
     private UUID dispatchIntentId;
 

@@ -18,6 +18,8 @@ import java.util.UUID;
 public class CopyOperationEventRecordCommand {
     private UUID idOperation;
     private UUID economicCycleId;
+    private UUID exchangeAccountId;
+    private UUID sourcePositionCycleId;
     private UUID dispatchIntentId;
     private Long userCopyAllocationId;
     private String copyStrategyCode;

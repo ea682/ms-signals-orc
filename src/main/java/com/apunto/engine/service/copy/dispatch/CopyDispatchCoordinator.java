@@ -36,6 +36,7 @@ public class CopyDispatchCoordinator {
     private final CopyIdempotencyKeyFactory keyFactory;
     private final MeterRegistry meterRegistry;
     private final CopyNotionalBandPolicy notionalBandPolicy;
+    private final CopyOrderRuntimePreflight runtimePreflight;
 
     public CopyDispatchCoordinator(CopyDispatchIntentStore intentStore,
                                    ProcesBinanceService binanceGateway,
@@ -43,7 +44,18 @@ public class CopyDispatchCoordinator {
                                    CopyIdempotencyKeyFactory keyFactory,
                                    MeterRegistry meterRegistry) {
         this(intentStore, binanceGateway, normalizer, keyFactory, meterRegistry,
-                new CopyNotionalBandPolicy(new BigDecimal("100"), new BigDecimal("1000"), new BigDecimal("10000")));
+                new CopyNotionalBandPolicy(new BigDecimal("100"), new BigDecimal("1000"), new BigDecimal("10000")),
+                request -> CopyOrderRuntimePreflightDecision.allowed(request.requestedQty(), "TEST_PREFLIGHT_BYPASS"));
+    }
+
+    public CopyDispatchCoordinator(CopyDispatchIntentStore intentStore,
+                                   ProcesBinanceService binanceGateway,
+                                   BinanceOrderExecutionNormalizer normalizer,
+                                   CopyIdempotencyKeyFactory keyFactory,
+                                   MeterRegistry meterRegistry,
+                                   CopyNotionalBandPolicy notionalBandPolicy) {
+        this(intentStore, binanceGateway, normalizer, keyFactory, meterRegistry, notionalBandPolicy,
+                request -> CopyOrderRuntimePreflightDecision.allowed(request.requestedQty(), "TEST_PREFLIGHT_BYPASS"));
     }
 
     @Autowired
@@ -52,13 +64,15 @@ public class CopyDispatchCoordinator {
                                    BinanceOrderExecutionNormalizer normalizer,
                                    CopyIdempotencyKeyFactory keyFactory,
                                    MeterRegistry meterRegistry,
-                                   CopyNotionalBandPolicy notionalBandPolicy) {
+                                   CopyNotionalBandPolicy notionalBandPolicy,
+                                   CopyOrderRuntimePreflight runtimePreflight) {
         this.intentStore = intentStore;
         this.binanceGateway = binanceGateway;
         this.normalizer = normalizer;
         this.keyFactory = keyFactory;
         this.meterRegistry = meterRegistry;
         this.notionalBandPolicy = notionalBandPolicy;
+        this.runtimePreflight = runtimePreflight;
     }
 
     public BinanceFuturesOrderClientResponse dispatch(OperationDto operation,
@@ -112,6 +126,30 @@ public class CopyDispatchCoordinator {
             throw new SkipExecutionException(reasonCode,
                     "La intencion ya fue rechazada y no puede reenviarse",
                     LogFmt.kv("dispatchIntentId", permit.intentId(), "status", permit.existingStatus()));
+        }
+
+        CopyOrderRuntimePreflightDecision preflight = runtimePreflight.evaluate(request);
+        if (preflight == null || !preflight.allowed()) {
+            String reasonCode = preflight == null || preflight.reasonCode() == null
+                    ? "BINANCE_SYMBOL_RULES_UNAVAILABLE" : preflight.reasonCode();
+            intentStore.markRejected(permit.intentId(), reasonCode,
+                    LogFmt.kv("symbol", request.symbol(), "executionMode", request.identity().executionMode(),
+                            "copyIntent", request.identity().copyIntent(), "reconciliationRequired",
+                            preflight != null && preflight.reconciliationRequired()));
+            recordDispatch(request, "preflight_rejected");
+            log.warn("event=copy.dispatch.preflight_rejected dispatchIntentId={} reasonCode={} decision=NO_ORDER executionMode={} copyIntent={} symbol={} reconciliationRequired={} copyImpact=NO_HTTP_NO_LOCAL_FILL",
+                    permit.intentId(), reasonCode, request.identity().executionMode(),
+                    request.identity().copyIntent(), request.symbol(),
+                    preflight != null && preflight.reconciliationRequired());
+            throw new SkipExecutionException(reasonCode,
+                    "La orden fue bloqueada por el preflight Binance autoritativo antes del cliente HTTP",
+                    LogFmt.kv("dispatchIntentId", permit.intentId(), "executionMode",
+                            request.identity().executionMode(), "copyIntent", request.identity().copyIntent(),
+                            "symbol", request.symbol()));
+        }
+        if (preflight.executableQuantity() != null && preflight.executableQuantity().signum() > 0
+                && preflight.executableQuantity().compareTo(request.requestedQty()) != 0) {
+            operation.setQuantity(preflight.executableQuantity().stripTrailingZeros().toPlainString());
         }
 
         try {

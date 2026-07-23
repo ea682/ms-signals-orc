@@ -285,10 +285,11 @@ public final class TargetPortfolioCalculator {
                     DecisionCode.REJECTED_BY_BINANCE_FILTER, "source price is not positive"));
         }
         BigDecimal exposure = DecimalSupport.divideDown(
-                position.notionalUsd().abs(), request.sourceAccountEquityUsd());
-        BigDecimal rawTargetNotional = DecimalSupport.normalize(
+                position.marginUsedUsd().abs(), request.sourceAccountEquityUsd());
+        BigDecimal rawTargetMargin = DecimalSupport.normalize(
                 request.targetAllocatedCapitalUsd().multiply(exposure));
-        BigDecimal rawTargetMargin = DecimalSupport.divideDown(rawTargetNotional, request.targetLeverage());
+        BigDecimal rawTargetNotional = DecimalSupport.normalize(
+                rawTargetMargin.multiply(request.targetLeverage()));
         BigDecimal preliminaryRawQty = DecimalSupport.divideDown(rawTargetNotional, price);
         BigDecimal preliminaryRoundedQty = DecimalSupport.floorToStep(preliminaryRawQty, filter.stepSize());
         BigDecimal roundingError = DecimalSupport.normalize(
@@ -513,9 +514,10 @@ public final class TargetPortfolioCalculator {
                 || request.sourceAccountEquityUsd().compareTo(DecimalSupport.ZERO) <= 0) {
             return DecimalSupport.ZERO;
         }
-        BigDecimal exposure = DecimalSupport.divideDown(position.notionalUsd().abs(),
+        BigDecimal exposure = DecimalSupport.divideDown(position.marginUsedUsd().abs(),
                 request.sourceAccountEquityUsd());
-        return DecimalSupport.normalize(request.targetAllocatedCapitalUsd().multiply(exposure));
+        BigDecimal margin = DecimalSupport.normalize(request.targetAllocatedCapitalUsd().multiply(exposure));
+        return DecimalSupport.normalize(margin.multiply(request.targetLeverage()));
     }
 
     private Map<String, BinanceSymbolFilter> indexFilters(List<BinanceSymbolFilter> values) {

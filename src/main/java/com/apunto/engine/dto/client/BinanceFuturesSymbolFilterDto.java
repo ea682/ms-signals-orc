@@ -15,6 +15,10 @@ public class BinanceFuturesSymbolFilterDto {
     private String stepSize;
     private Integer limit;
     private String notional;
+    private String minNotional;
+    private String maxNotional;
+    private Boolean applyMinToMarket;
+    private Boolean applyMaxToMarket;
     private String multiplierUp;
     private String multiplierDown;
     private String multiplierDecimal;

@@ -560,6 +560,8 @@ public class CopyOperationServiceImpl implements CopyOperationService {
         entity.setSourceEventId(operation.getSourceEventId());
         entity.setClientOrderId(operation.getClientOrderId());
         entity.setPriceStatus(operation.getPriceStatus());
+        entity.setExchangeAccountId(operation.getExchangeAccountId());
+        entity.setSourcePositionCycleId(operation.getSourcePositionCycleId());
         if (operation.getEconomicDataStatus() != null) {
             entity.setEconomicDataStatus(normalizeEconomicDataStatus(operation.getEconomicDataStatus()));
         }
