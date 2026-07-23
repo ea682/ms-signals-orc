@@ -403,6 +403,61 @@ class ShadowPromotionServiceImplTest {
     }
 
     @Test
+    void availableCapitalBelowFullMicroBudgetIsRejectedBeforeAllocationCreation() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                activeUser(userId, true, 80, 5, "USDC"),
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(
+                        sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a ->
+                "MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE".equals(a.getReasonCode())));
+    }
+
+    @Test
+    void userWithoutMicroLiveOptInIsRejectedBeforeAllocationCreation() {
+        UUID userId = UUID.randomUUID();
+        ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
+        AtomicReference<UserCopyAllocationEntity> savedAllocation = new AtomicReference<>();
+        List<CopyPromotionAuditEntity> audits = new ArrayList<>();
+        UserBundle user = activeUser(userId, true, 192, 5, "USDC");
+        user.detail().setParticipateInMicroLive(false);
+
+        ShadowPromotionServiceImpl service = service(
+                List.of(shadow),
+                validation(5, 12, "8.5"),
+                user,
+                apiKey(userId, true),
+                new AtomicReference<>(),
+                savedAllocation,
+                audits,
+                (sourceSymbol, capitalAsset) -> CopySymbolResolution.resolved(
+                        sourceSymbol, sourceSymbol, null, capitalAsset, capitalAsset, false)
+        );
+
+        ShadowPromotionResult result = service.promoteShadowToMicroLive();
+
+        assertEquals(1, result.rejected());
+        assertNull(savedAllocation.get());
+        assertTrue(audits.stream().anyMatch(a -> "MICRO_LIVE_USER_OPT_IN_REQUIRED".equals(a.getReasonCode())));
+    }
+
+    @Test
     void readyShadowWithSummaryBlockerCallsFullDecisionAndCanPromoteToMicroLive() {
         UUID userId = UUID.randomUUID();
         ShadowCopyAllocationEntity shadow = readyShadow(userId, "MOVEMENT_ALL", "ALL");
@@ -1265,7 +1320,7 @@ class ShadowPromotionServiceImplTest {
                 planRepository(new AtomicReference<>()),
                 proxy(UserCopyAllocationRepository.class, (method, args) -> {
                     if ("countActiveExecutionAllocationsByUser".equals(method.getName())) return 0L;
-                    if ("findOpenAllocationForUserWalletStrategyScope".equals(method.getName())) {
+                    if ("findOpenAllocationForUserWalletStrategyScopeAndMode".equals(method.getName())) {
                         return firstFind.getAndSet(false) ? Optional.empty() : Optional.of(existing);
                     }
                     if ("saveAndFlush".equals(method.getName())) {
@@ -1631,6 +1686,7 @@ class ShadowPromotionServiceImplTest {
         detail.setCapital(capital);
         detail.setMaxWallet(maxWallet);
         detail.setCapitalAsset(capitalAsset);
+        detail.setParticipateInMicroLive(true);
         return new UserBundle(user, detail);
     }
 
@@ -1690,7 +1746,11 @@ class ShadowPromotionServiceImplTest {
 
     private static UserApiKeyRepository apiKeyRepository(UserApiKeyEntity apiKey) {
         return proxy(UserApiKeyRepository.class, (method, args) -> {
-            if ("findByUser_Id".equals(method.getName())) return apiKey;
+            if ("findByUser_IdAndExchangeIgnoreCaseAndAccountPurposeAndActiveTrue".equals(method.getName())) {
+                if (apiKey.getId() == null) apiKey.setId(UUID.randomUUID());
+                apiKey.setActive(true);
+                return Optional.of(apiKey);
+            }
             return unexpected(method);
         });
     }
@@ -1733,7 +1793,7 @@ class ShadowPromotionServiceImplTest {
             long activeAllocationCount
     ) {
         return proxy(UserCopyAllocationRepository.class, (method, args) -> {
-            if ("findOpenAllocationForUserWalletStrategyScope".equals(method.getName())) return Optional.ofNullable(savedAllocation.get());
+            if ("findOpenAllocationForUserWalletStrategyScopeAndMode".equals(method.getName())) return Optional.ofNullable(savedAllocation.get());
             if ("countActiveExecutionAllocationsByUser".equals(method.getName())) return activeAllocationCount;
             if ("save".equals(method.getName()) || "saveAndFlush".equals(method.getName())) {
                 UserCopyAllocationEntity entity = (UserCopyAllocationEntity) args[0];

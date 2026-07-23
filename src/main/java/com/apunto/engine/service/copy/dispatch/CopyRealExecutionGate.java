@@ -4,6 +4,7 @@ import com.apunto.engine.dto.OperationDto;
 import com.apunto.engine.entity.UserCopyAllocationEntity;
 import com.apunto.engine.service.copy.certification.LiveEntryAuthorizationDecision;
 import com.apunto.engine.service.copy.certification.LiveEntryAuthorizationGate;
+import com.apunto.engine.service.copy.certification.LiveUserRuntimeEligibilityGate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -46,6 +47,12 @@ public class CopyRealExecutionGate {
     @Autowired(required = false)
     private LiveEntryAuthorizationGate liveEntryAuthorizationGate;
 
+    @Autowired(required = false)
+    private LiveUserRuntimeEligibilityGate liveUserRuntimeEligibilityGate;
+
+    @Autowired(required = false)
+    private B2bRealMoneyExecutionGuard b2bRealMoneyExecutionGuard;
+
     @PostConstruct
     void logEffectiveConfiguration() {
         log.info("event=copy.real_execution_gate.config newDispatchEnabled={} deriskExecutionEnabled={} microLiveEnabled={} liveEnabled={} liveDryRun={} liveCanaryEnabled={} whitelistUsers={} whitelistWallets={} whitelistSymbols={} whitelistAllocations={} whitelistStrategies={} reasonCode=EFFECTIVE_COPY_SWITCHES",
@@ -60,6 +67,10 @@ public class CopyRealExecutionGate {
         boolean reduceOnly = operation != null && operation.isReduceOnly();
         if (!"MICRO_LIVE".equals(mode) && !"LIVE".equals(mode)) {
             return blocked(mode, "COPY_REAL_EXECUTION_MODE_UNKNOWN");
+        }
+        if (b2bRealMoneyExecutionGuard != null) {
+            B2bRealMoneyExecutionGuard.Decision b2b = b2bRealMoneyExecutionGuard.evaluate(operation);
+            if (b2b != null && !b2b.allowed()) return blocked(mode, b2b.reasonCode());
         }
         if (reduceOnly) {
             return deriskExecutionEnabled
@@ -85,6 +96,16 @@ public class CopyRealExecutionGate {
         }
         if (!liveWhitelisted(operation, allocation)) {
             return blocked(mode, "LIVE_WHITELIST_BLOCKED");
+        }
+        if (liveUserRuntimeEligibilityGate == null) {
+            return blocked(mode, "LIVE_USER_ELIGIBILITY_UNAVAILABLE");
+        }
+        LiveUserRuntimeEligibilityGate.Decision userEligibility =
+                liveUserRuntimeEligibilityGate.evaluate(allocation);
+        if (userEligibility == null || !userEligibility.allowed()) {
+            return blocked(mode, userEligibility == null
+                    ? "LIVE_USER_ELIGIBILITY_UNAVAILABLE"
+                    : userEligibility.reasonCode());
         }
         if (liveEntryAuthorizationGate == null) {
             return blocked(mode, "LIVE_CERTIFICATION_UNAVAILABLE");

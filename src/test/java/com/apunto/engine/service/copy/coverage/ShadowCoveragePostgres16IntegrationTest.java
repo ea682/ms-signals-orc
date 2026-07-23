@@ -81,6 +81,12 @@ class ShadowCoveragePostgres16IntegrationTest {
             if (!externalReadOnly) {
                 statement.execute("create schema futuros_operaciones");
                 statement.execute("""
+                        create table futuros_operaciones.shadow_copy_allocation (
+                            id bigint primary key,
+                            created_at timestamptz not null
+                        )
+                        """);
+                statement.execute("""
                         create table futuros_operaciones.shadow_copy_operation_event (
                             id_event uuid primary key,
                             shadow_allocation_id bigint not null,
@@ -167,6 +173,13 @@ class ShadowCoveragePostgres16IntegrationTest {
         Instant start = Instant.parse("2026-07-01T00:00:00.123456Z");
         Instant middle = Instant.parse("2026-07-01T00:00:01.987654Z");
         Instant end = Instant.parse("2026-07-01T00:00:02.654321Z");
+        try (Connection connection = dataSource.getConnection(); PreparedStatement insert = connection.prepareStatement("""
+                insert into futuros_operaciones.shadow_copy_allocation(id, created_at) values (?, ?)
+                """)) {
+            insert.setLong(1, 41L);
+            insert.setObject(2, OffsetDateTime.ofInstant(start, ZoneOffset.UTC));
+            insert.executeUpdate();
+        }
         insert(41L, "SIMULATED", start);
         insert(41L, "SKIPPED", middle);
         insert(41L, "SIMULATED", end);

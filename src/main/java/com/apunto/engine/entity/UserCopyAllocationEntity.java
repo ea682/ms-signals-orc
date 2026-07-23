@@ -166,6 +166,18 @@ public class UserCopyAllocationEntity {
     @Column(name = "promoted_from_shadow_at", columnDefinition = "timestamp with time zone")
     private OffsetDateTime promotedFromShadowAt;
 
+    @Column(name = "activation_at", nullable = false, columnDefinition = "timestamp with time zone")
+    private OffsetDateTime activationAt;
+
+    @Column(name = "live_certification_id")
+    private UUID liveCertificationId;
+
+    @Column(name = "exchange_account_id")
+    private UUID exchangeAccountId;
+
+    @Column(name = "reserved_capital_usd", precision = 38, scale = 8)
+    private BigDecimal reservedCapitalUsd;
+
     @Column(name = "source_ranking_version", length = 80)
     private String sourceRankingVersion;
 
@@ -204,6 +216,7 @@ public class UserCopyAllocationEntity {
 
         if (status == null) status = Status.ACTIVE;
         if (updatedAt == null) updatedAt = now;
+        if (activationAt == null) activationAt = now;
         if (copyMinNotionalMode == null) copyMinNotionalMode = CopyMinNotionalMode.INHERIT;
         executionMode = normalizeExecutionMode(executionMode);
         statusReason = normalize(statusReason);

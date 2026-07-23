@@ -55,7 +55,7 @@ public class PostgresLiveCertificationCatalogStore implements LiveCertificationC
                             version, created_by, creation_reason, created_at, updated_at
                         ) VALUES (
                             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            CAST(? AS jsonb), FALSE, 0, ?, ?, now(), now()
+                            CAST(? AS jsonb), ?, 0, ?, ?, now(), now()
                         )
                         ON CONFLICT DO NOTHING
                         """,
@@ -66,7 +66,9 @@ public class PostgresLiveCertificationCatalogStore implements LiveCertificationC
                 identity.symbolMappingVersion(), identity.feeModelVersion(),
                 identity.fundingModelVersion(), identity.slippageModelVersion(),
                 identity.liquidityModelVersion(), record.evidenceLevel().name(), record.status().name(),
-                writeJson(evidenceSnapshot), actor, reason) == 1;
+                writeJson(evidenceSnapshot),
+                Boolean.TRUE.equals(evidenceSnapshot.get("automaticPolicyPassed")),
+                actor, reason) == 1;
     }
 
     @Override

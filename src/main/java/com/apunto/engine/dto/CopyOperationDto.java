@@ -42,6 +42,10 @@ public class CopyOperationDto {
     private String clientOrderId;
     private String priceStatus;
     private UUID economicCycleId;
+    private UUID exchangeAccountId;
+    private UUID sourcePositionCycleId;
+    private String fixedMarginMode;
+    private String fixedPositionMode;
     private Long cycleSequence;
     private String economicDataStatus;
 }

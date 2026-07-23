@@ -53,11 +53,11 @@ public class MicroLiveExecutionEvidencePolicy {
         if (evidence.unresolvedAmbiguousTimeouts() > nonNegative(properties.getMaxUnresolvedAmbiguousTimeouts())) {
             reasons.add("MICRO_LIVE_NOT_READY_AMBIGUOUS_RECONCILIATION");
         }
-        if (evidence.slippageSamples() < nonNegative(properties.getMinSlippageSamples())) reasons.add("MICRO_LIVE_NOT_READY_SLIPPAGE_SAMPLE");
-        if (positive(properties.getMaxAdverseSlippageP95Bps())
-                && decimal(evidence.adverseSlippageP95Bps()).compareTo(properties.getMaxAdverseSlippageP95Bps()) > 0) {
-            reasons.add("MICRO_LIVE_NOT_READY_ADVERSE_SLIPPAGE");
-        }
+        // Direct origin-vs-Binance prices include the natural venue basis. Keep
+        // this legacy value observable, but never use it as a promotion gate.
+        // Complete-cycle execution drag is evaluated independently.
+        meterRegistry.summary("copy.micro_live.cross_venue_price_gap_bps")
+                .record(decimal(evidence.adverseSlippageP95Bps()).doubleValue());
         if (positive(properties.getMaxDrawdownUsd())
                 && decimal(evidence.maxDrawdownUsd()).compareTo(properties.getMaxDrawdownUsd()) > 0) {
             reasons.add("MICRO_LIVE_NOT_READY_DRAWDOWN");
@@ -80,8 +80,7 @@ public class MicroLiveExecutionEvidencePolicy {
                 inverseRatio(evidence.duplicateCount(), properties.getMaxDuplicateCount()),
                 inverseRatio(evidence.unresolvedAmbiguousTimeouts(), properties.getMaxUnresolvedAmbiguousTimeouts())
         );
-        BigDecimal slippage = ratio(evidence.slippageSamples(), nonNegative(properties.getMinSlippageSamples()));
-        BigDecimal finalPct = min(calendar, execution, reconciliation, slippage);
+        BigDecimal finalPct = min(calendar, execution, reconciliation);
         if (!reasons.isEmpty() && finalPct.compareTo(HUNDRED) >= 0) finalPct = ZERO.setScale(2);
 
         for (String reason : reasons) {

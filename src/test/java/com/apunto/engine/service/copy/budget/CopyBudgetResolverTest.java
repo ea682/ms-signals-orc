@@ -14,13 +14,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CopyBudgetResolverTest {
 
     @Test
-    void microLiveUsesOneHundredAtFiveXWithProportionalNotional() {
+    void microLiveUsesOneHundredAtFiveXWithProportionalMarginUsage() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("MICRO_LIVE")
                 .accountCapitalUsd(bd("1000"))
                 .microLiveFixedBudgetUsd(bd("100"))
                 .leverage(bd("5"))
                 .sourceAccountEquityUsd(bd("500000"))
+                .sourcePositionMarginUsd(bd("20000"))
                 .sourcePositionNotionalUsd(bd("100000"))
                 .requireSourceExposure(true)
                 .build());
@@ -28,9 +29,45 @@ class CopyBudgetResolverTest {
         assertTrue(decision.allowed());
         assertEquals(CopyBudgetResolver.MICRO_LIVE_PROPORTIONAL_PORTFOLIO, decision.budgetMode());
         assertEquals(0, bd("100").compareTo(decision.budgetUsd()));
-        assertEquals(0, bd("0.2").compareTo(decision.sourceExposurePct()));
+        assertEquals(0, bd("0.04").compareTo(decision.sourceExposurePct()));
         assertEquals(0, bd("20").compareTo(decision.copyNotionalUsd()));
         assertEquals(0, bd("4").compareTo(decision.copyMarginUsd()));
+    }
+
+    @Test
+    void microLiveSizesOneFiveTenAndFiftyPercentAndCapsUsageAboveOneHundredPercent() {
+        for (String usage : new String[]{"1", "5", "10", "50", "150"}) {
+            CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                    .executionMode("MICRO_LIVE")
+                    .accountCapitalUsd(bd("1000"))
+                    .sourceAccountEquityUsd(bd("100"))
+                    .sourcePositionMarginUsd(bd(usage))
+                    .sourcePositionNotionalUsd(bd(usage).multiply(bd("10")))
+                    .leverage(bd("5"))
+                    .build());
+
+            BigDecimal expectedMargin = bd(usage).min(bd("100"));
+            assertTrue(decision.allowed(), usage);
+            assertEquals(0, expectedMargin.compareTo(decision.copyMarginUsd()), usage);
+            assertEquals(0, expectedMargin.multiply(bd("5")).compareTo(decision.copyNotionalUsd()), usage);
+        }
+    }
+
+    @Test
+    void microLiveReplicatesSourceMarginUsageInsteadOfSourceNotionalExposure() {
+        CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
+                .executionMode("MICRO_LIVE")
+                .accountCapitalUsd(bd("1000"))
+                .sourceAccountEquityUsd(bd("2000"))
+                .sourcePositionMarginUsd(bd("100"))
+                .sourcePositionNotionalUsd(bd("1000"))
+                .leverage(bd("5"))
+                .build());
+
+        assertTrue(decision.allowed());
+        assertEquals(0, bd("0.05").compareTo(decision.sourceExposurePct()));
+        assertEquals(0, bd("5").compareTo(decision.copyMarginUsd()));
+        assertEquals(0, bd("25").compareTo(decision.copyNotionalUsd()));
     }
 
     @Test
@@ -41,6 +78,7 @@ class CopyBudgetResolverTest {
                 .allocationPct(BigDecimal.ZERO)
                 .leverage(bd("20"))
                 .sourceAccountEquityUsd(bd("500000"))
+                .sourcePositionMarginUsd(bd("20000"))
                 .sourcePositionNotionalUsd(bd("100000"))
                 .requireSourceExposure(true)
                 .build());
@@ -66,6 +104,7 @@ class CopyBudgetResolverTest {
                 .openPositionsCount(12)
                 .leverage(bd("5"))
                 .sourceAccountEquityUsd(bd("1000"))
+                .sourcePositionMarginUsd(bd("120"))
                 .sourcePositionNotionalUsd(bd("600"))
                 .requireSourceExposure(true)
                 .build());
@@ -84,6 +123,7 @@ class CopyBudgetResolverTest {
                 .accountCapitalUsd(bd("99.99"))
                 .microLiveFixedBudgetUsd(bd("100"))
                 .sourceAccountEquityUsd(bd("1000"))
+                .sourcePositionMarginUsd(bd("20"))
                 .sourcePositionNotionalUsd(bd("100"))
                 .leverage(bd("5"))
                 .build());
@@ -93,19 +133,19 @@ class CopyBudgetResolverTest {
     }
 
     @Test
-    void sourceMarginCannotSubstituteSourceNotional() {
+    void sourceNotionalCannotSubstituteSourceMargin() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("MICRO_LIVE")
                 .accountCapitalUsd(bd("1000"))
                 .microLiveFixedBudgetUsd(bd("100"))
                 .sourceAccountEquityUsd(bd("1000"))
-                .sourcePositionMarginUsd(bd("500"))
+                .sourcePositionNotionalUsd(bd("500"))
                 .leverage(bd("5"))
                 .requireSourceExposure(true)
                 .build());
 
         assertFalse(decision.allowed());
-        assertEquals(CopyBudgetResolver.BLOCKED_SOURCE_POSITION_NOTIONAL_MISSING, decision.reasonCode());
+        assertEquals(CopyBudgetResolver.BLOCKED_SOURCE_POSITION_MARGIN_MISSING, decision.reasonCode());
     }
 
     @Test
@@ -113,6 +153,7 @@ class CopyBudgetResolverTest {
         CopyBudgetDecision micro = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("MICRO_LIVE")
                 .accountCapitalUsd(bd("1000"))
+                .sourcePositionMarginUsd(bd("20"))
                 .sourcePositionNotionalUsd(bd("100"))
                 .leverage(bd("5"))
                 .build());
@@ -120,6 +161,7 @@ class CopyBudgetResolverTest {
                 .executionMode("LIVE")
                 .accountCapitalUsd(bd("1000"))
                 .allocationPct(BigDecimal.ONE)
+                .sourcePositionMarginUsd(bd("20"))
                 .sourcePositionNotionalUsd(bd("100"))
                 .leverage(bd("5"))
                 .build());
@@ -135,6 +177,7 @@ class CopyBudgetResolverTest {
                 .accountCapitalUsd(bd("1000"))
                 .allocationPct(bd("0.51"))
                 .sourceAccountEquityUsd(bd("100000"))
+                .sourcePositionMarginUsd(bd("2000"))
                 .sourcePositionNotionalUsd(bd("10000"))
                 .leverage(bd("5"))
                 .requireSourceExposure(true)
@@ -148,18 +191,19 @@ class CopyBudgetResolverTest {
     }
 
     @Test
-    void leveragedSourceExposureIsNotClampedToOne() {
+    void liveUsesSourceMarginRatherThanLeveragedNotional() {
         CopyBudgetDecision decision = CopyBudgetResolver.resolveBudget(CopyBudgetRequest.builder()
                 .executionMode("LIVE")
                 .accountCapitalUsd(bd("100"))
                 .allocationPct(BigDecimal.ONE)
                 .sourceAccountEquityUsd(bd("100"))
+                .sourcePositionMarginUsd(bd("40"))
                 .sourcePositionNotionalUsd(bd("200"))
                 .leverage(bd("5"))
                 .build());
 
         assertTrue(decision.allowed());
-        assertEquals(0, bd("2").compareTo(decision.sourceExposurePct()));
+        assertEquals(0, bd("0.4").compareTo(decision.sourceExposurePct()));
         assertEquals(0, bd("200").compareTo(decision.copyNotionalUsd()));
         assertEquals(0, bd("40").compareTo(decision.copyMarginUsd()));
     }
@@ -172,6 +216,7 @@ class CopyBudgetResolverTest {
                 .microLiveFixedBudgetUsd(bd("100"))
                 .openMarginUsedUsd(bd("100"))
                 .sourceAccountEquityUsd(bd("1000"))
+                .sourcePositionMarginUsd(bd("20"))
                 .sourcePositionNotionalUsd(bd("100"))
                 .leverage(bd("5"))
                 .build());

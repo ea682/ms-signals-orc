@@ -33,6 +33,14 @@ public class CopyDispatchIntentEntity {
     private String idUser;
     @Column(name = "user_copy_allocation_id")
     private Long userCopyAllocationId;
+    @Column(name = "exchange_account_id", columnDefinition = "uuid")
+    private UUID exchangeAccountId;
+    @Column(name = "source_position_cycle_id", columnDefinition = "uuid")
+    private UUID sourcePositionCycleId;
+    @Column(name = "fixed_margin_mode", length = 24)
+    private String fixedMarginMode;
+    @Column(name = "fixed_position_mode", length = 24)
+    private String fixedPositionMode;
     @Column(name = "execution_mode", nullable = false, length = 16)
     private String executionMode;
     @Column(name = "wallet_id", length = 180)

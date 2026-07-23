@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -69,6 +70,24 @@ class ManualLiveCertificationServiceTest {
         assertTrue(store.audits.isEmpty());
     }
 
+    @Test
+    void safetyTransitionPropagatesExitOnlyStateToAssociatedAllocations() {
+        store.snapshot = new LiveCertificationSnapshot(
+                CERTIFICATION_ID, LiveCertificationStatus.LIVE_APPROVED, 9L);
+        AtomicReference<LiveCertificationStatus> propagated = new AtomicReference<>();
+        service.setStatePropagation((id, status, reason) -> propagated.set(status));
+
+        LiveCertificationTransitionResult result = service.transition(
+                new LiveCertificationTransitionCommand(
+                        CERTIFICATION_ID, 9L, LiveCertificationStatus.LIVE_APPROVED,
+                        LiveCertificationStatus.LIVE_DEGRADED, true,
+                        "certification-monitor", "dispatch errors",
+                        Map.of("dispatchErrorRate", "0.25"), "degrade-9"));
+
+        assertTrue(result.applied());
+        assertEquals(LiveCertificationStatus.LIVE_DEGRADED, propagated.get());
+    }
+
     private LiveCertificationTransitionCommand command(String key, long version) {
         return new LiveCertificationTransitionCommand(
                 CERTIFICATION_ID,
@@ -78,7 +97,12 @@ class ManualLiveCertificationServiceTest {
                 false,
                 "operator@example.com",
                 "manual review complete",
-                Map.of("calibrationId", "cal-1", "sampleCount", 30),
+                Map.of(
+                        "calibrationId", "cal-1",
+                        "sampleCount", 30,
+                        "automaticPolicyPassed", true,
+                        "realMicroLiveEvidence", true,
+                        "validMicroLiveTests", 1),
                 key);
     }
 

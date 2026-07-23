@@ -34,6 +34,8 @@ public class CopyDispatchPayloadSnapshotFactory {
         Map<String, Object> payload = new LinkedHashMap<>();
         put(payload, "userId", value.getIdUser());
         put(payload, "allocationId", value.getUserCopyAllocationId());
+        put(payload, "exchangeAccountId", value.getExchangeAccountId());
+        put(payload, "sourcePositionCycleId", value.getSourcePositionCycleId());
         put(payload, "executionMode", value.getExecutionMode());
         put(payload, "walletId", value.getWalletId());
         put(payload, "strategyCode", value.getStrategyCode());
@@ -64,6 +66,8 @@ public class CopyDispatchPayloadSnapshotFactory {
         Map<String, Object> payload = new LinkedHashMap<>();
         put(payload, "userId", identity.userId());
         put(payload, "allocationId", identity.userCopyAllocationId());
+        put(payload, "exchangeAccountId", value.operation() == null ? null : value.operation().getExchangeAccountId());
+        put(payload, "sourcePositionCycleId", value.operation() == null ? null : value.operation().getSourcePositionCycleId());
         put(payload, "executionMode", identity.executionMode());
         put(payload, "walletId", value.walletId());
         put(payload, "strategyCode", identity.strategyCode());

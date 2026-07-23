@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.UUID;
 
 public interface DetailUserRepository extends JpaRepository<DetailUserEntity, UUID> {
@@ -14,6 +15,32 @@ public interface DetailUserRepository extends JpaRepository<DetailUserEntity, UU
     DetailUserEntity findByUser_Id_AndUserActive(UUID user_id, boolean userActive);
 
     DetailUserEntity findByUser_Id(UUID userId);
+
+    @Query("""
+            select d
+            from DetailUserEntity d
+            join fetch d.user u
+            where u.activo = true
+              and d.userActive = true
+              and d.apiKeyBinar = true
+              and d.autoFollowCertifiedLive = true
+              and coalesce(d.capital, 0) > 0
+              and coalesce(d.maxWallet, 0) > 0
+            """)
+    List<DetailUserEntity> findEligibleAutoFollowCertifiedLiveUsers();
+
+    @Query("""
+            select d
+            from DetailUserEntity d
+            join fetch d.user u
+            where u.activo = true
+              and d.userActive = true
+              and d.apiKeyBinar = true
+              and d.participateInMicroLive = true
+              and coalesce(d.capital, 0) >= 100
+              and coalesce(d.maxWallet, 0) > 0
+            """)
+    List<DetailUserEntity> findEligibleMicroLiveUsers();
 
     @Query("""
             select count(distinct d.user.id)

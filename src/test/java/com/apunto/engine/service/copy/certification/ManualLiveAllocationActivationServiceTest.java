@@ -24,7 +24,7 @@ class ManualLiveAllocationActivationServiceTest {
             store, Clock.fixed(Instant.parse("2026-07-13T12:00:00Z"), ZoneOffset.UTC));
 
     @Test
-    void activatesTheSameAdoptedAllocationOnlyWhenFlatAndSettled() {
+    void activatesTheNewPendingLiveAllocationOnlyWhenFlatAndSettled() {
         store.authorization = validAuthorization();
 
         LiveAllocationActivationResult result = service.activate(command("activate-55"));
@@ -35,7 +35,7 @@ class ManualLiveAllocationActivationServiceTest {
     }
 
     @Test
-    void openMicroLivePositionBlocksPolicyChangeMidCycle() {
+    void openPositionBlocksPendingLiveActivation() {
         store.authorization = validAuthorization();
         store.openOperations = 1;
 
@@ -43,7 +43,21 @@ class ManualLiveAllocationActivationServiceTest {
 
         assertFalse(result.activated());
         assertEquals("LIVE_ACTIVATION_OPEN_POSITIONS_EXIST", result.reasonCode());
-        assertEquals("MICRO_LIVE", store.snapshot.executionMode());
+        assertEquals("LIVE", store.snapshot.executionMode());
+    }
+
+    @Test
+    void microLiveAllocationIsNeverConvertedInPlace() {
+        store.authorization = validAuthorization();
+        store.snapshot = new LiveAllocationActivationSnapshot(
+                55L, store.snapshot.userId(), "0xabc", "MOVEMENT_ALL", "ALL", "ALL",
+                "MICRO_LIVE", "ACTIVE", true, null);
+
+        LiveAllocationActivationResult result = service.activate(command("activate-micro-in-place"));
+
+        assertFalse(result.activated());
+        assertEquals("LIVE_ACTIVATION_WRONG_SOURCE_MODE", result.reasonCode());
+        assertEquals(0, store.updateCount);
     }
 
     @Test
@@ -85,7 +99,7 @@ class ManualLiveAllocationActivationServiceTest {
     private static final class FakeStore implements LiveAllocationActivationStore {
         private LiveAllocationActivationSnapshot snapshot = new LiveAllocationActivationSnapshot(
                 55L, UUID.fromString("22222222-2222-2222-2222-222222222222"),
-                "0xabc", "MOVEMENT_ALL", "ALL", "ALL", "MICRO_LIVE", "ACTIVE", true, null);
+                "0xabc", "MOVEMENT_ALL", "ALL", "ALL", "LIVE", "PAUSED", true, null);
         private LiveActivationAuthorization authorization;
         private long openOperations;
         private long pendingIntents;
@@ -98,8 +112,13 @@ class ManualLiveAllocationActivationServiceTest {
         @Override public long countNonTerminalIntents(Long id) { return pendingIntents; }
         @Override public Optional<LiveActivationAuthorization> findAuthorization(Long id, UUID cert) { return Optional.ofNullable(authorization); }
         @Override public boolean activate(Long id, String actor, String reason, OffsetDateTime at) {
-            if (!"MICRO_LIVE".equals(snapshot.executionMode())) return false;
-            snapshot = snapshot.withExecutionMode("LIVE");
+            return false;
+        }
+        @Override public boolean activatePendingLive(Long id, String actor, String reason, OffsetDateTime at) {
+            if (!"LIVE".equals(snapshot.executionMode()) || !"PAUSED".equals(snapshot.status())) return false;
+            snapshot = new LiveAllocationActivationSnapshot(
+                    snapshot.allocationId(), snapshot.userId(), snapshot.walletId(), snapshot.strategyCode(),
+                    snapshot.scopeType(), snapshot.scopeValue(), "LIVE", "ACTIVE", true, null);
             updateCount++;
             return true;
         }

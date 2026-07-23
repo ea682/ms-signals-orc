@@ -99,6 +99,7 @@ public class PostgresLiveAllocationActivationStore implements LiveAllocationActi
                          AND a.user_id = u.id_user
                          AND a.allocation_id = u.id
                         WHERE u.id = ?
+                          AND (u.live_certification_id IS NULL OR u.live_certification_id = c.id)
                         """,
                 (rs, rowNum) -> new LiveActivationAuthorization(
                         rs.getObject("certification_id", UUID.class),
@@ -122,6 +123,36 @@ public class PostgresLiveAllocationActivationStore implements LiveAllocationActi
                           AND ends_at IS NULL
                           AND lower(status) = 'active'
                         """, activatedAt, activatedAt, allocationId) == 1;
+    }
+
+    @Override
+    public boolean activatePendingLive(Long allocationId, String actor, String reason,
+                                       OffsetDateTime activatedAt) {
+        jdbcTemplate.update("""
+                UPDATE futuros_operaciones.user_copy_allocation pending_micro
+                SET status = 'CLOSED', is_active = FALSE, ends_at = ?,
+                    status_reason = 'RECERTIFIED_LIVE_ACTIVATED', status_updated_at = ?, updated_at = ?
+                FROM futuros_operaciones.user_copy_allocation pending_live
+                WHERE pending_live.id = ?
+                  AND pending_micro.id_user = pending_live.id_user
+                  AND lower(pending_micro.wallet_id) = lower(pending_live.wallet_id)
+                  AND pending_micro.copy_strategy_code = pending_live.copy_strategy_code
+                  AND pending_micro.scope_type = pending_live.scope_type
+                  AND pending_micro.scope_value = pending_live.scope_value
+                  AND pending_micro.execution_mode = 'MICRO_LIVE'
+                  AND pending_micro.ends_at IS NULL
+                """, activatedAt, activatedAt, activatedAt, allocationId);
+        return jdbcTemplate.update("""
+                        UPDATE futuros_operaciones.user_copy_allocation
+                        SET status = 'ACTIVE',
+                            status_reason = 'LIVE_CERTIFICATION_ADOPTION_ACTIVATED',
+                            status_updated_at = ?, updated_at = ?, activation_at = ?
+                        WHERE id = ?
+                          AND execution_mode = 'LIVE'
+                          AND is_active = TRUE
+                          AND ends_at IS NULL
+                          AND lower(status) = 'paused'
+                        """, activatedAt, activatedAt, activatedAt, allocationId) == 1;
     }
 
     @Override

@@ -20,6 +20,7 @@ import com.apunto.engine.repository.UserApiKeyRepository;
 import com.apunto.engine.repository.UserCopyAllocationRepository;
 import com.apunto.engine.repository.UserRepository;
 import com.apunto.engine.repository.UserWalletCopyPlanRepository;
+import com.apunto.engine.repository.UserWalletCopyPreferenceRepository;
 import com.apunto.engine.service.ShadowPromotionService;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageBatch;
 import com.apunto.engine.service.copy.coverage.ShadowCoverageCalculator;
@@ -37,6 +38,9 @@ import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor;
 import com.apunto.engine.service.copy.distribution.CopyDistributionUnitExecutor.UnitMutationResult;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver;
 import com.apunto.engine.service.copy.promotion.UserCopyAllocationCopyModeResolver.CopyModeResolution;
+import com.apunto.engine.service.copy.account.ExecutionAccountPurpose;
+import com.apunto.engine.service.copy.account.MicroLiveCapacityDecision;
+import com.apunto.engine.service.copy.account.MicroLiveCapacityGate;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionProperties;
 import com.apunto.engine.service.copy.promotion.ShadowPromotionResult;
 import com.apunto.engine.service.copy.symbol.CopySymbolResolution;
@@ -60,6 +64,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @Slf4j
@@ -97,6 +102,15 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
 
     @Autowired(required = false)
     private MeterRegistry meterRegistry;
+
+    @Autowired(required = false)
+    private UserWalletCopyPreferenceRepository walletPreferenceRepository;
+
+    @Autowired(required = false)
+    private MicroLiveCapacityGate microLiveCapacityGate;
+
+    @Autowired(required = false)
+    private com.apunto.engine.service.copy.account.MicroLiveCapacityProperties microLiveCapacityProperties;
 
     @Override
     public ShadowPromotionResult promoteShadowToMicroLive() {
@@ -358,7 +372,10 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     continue;
                 }
                 rejected++;
-                PromotionDecision failed = PromotionDecision.rejected("PROMOTION_FAILED_DUPLICATE_CONSTRAINT", extras(
+                String integrityReason = containsReason(ex, "MICRO_LIVE_CAPACITY_EXHAUSTED")
+                        ? "MICRO_LIVE_SLOT_CONCURRENCY_LOST"
+                        : "PROMOTION_FAILED_DUPLICATE_CONSTRAINT";
+                PromotionDecision failed = PromotionDecision.rejected(integrityReason, extras(
                         "errorClass", ex.getClass().getSimpleName(),
                         "error", safe(ex.getMessage())
                 ));
@@ -374,6 +391,14 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                         safe(ex.getMessage()),
                         elapsedMs(candidateNs)
                 );
+            } catch (ExecutionAccountUnavailableException ex) {
+                rejected++;
+                PromotionDecision failed = PromotionDecision.rejected(ex.reasonCode(), extras(
+                        "targetExecutionMode", ex.executionMode()));
+                markRejectedUnderProfileLock(shadow, failed, now);
+                audit(shadow, failed, null, "SHADOW_PROMOTION_REJECTED");
+                log.info("event=copy.promotion.shadow_to_micro.rejected userId={} walletId={} shadowAllocationId={} executionMode={} decision=REJECT reasonCode={}",
+                        shadow.getIdUser(), shadow.getWalletId(), shadow.getId(), ex.executionMode(), ex.reasonCode());
             } catch (RuntimeException ex) {
                 rejected++;
                 PromotionDecision failed = PromotionDecision.rejected("PROMOTION_FAILED", extras(
@@ -467,7 +492,14 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         if (detail == null || !detail.isUserActive()) {
             return rejected("NO_ACTIVE_USER", shadow);
         }
-        if (!detail.isApiKeyBinar() || !usable(userApiKeyRepository.findByUser_Id(shadow.getIdUser()))) {
+        if (!detail.isParticipateInMicroLive()) {
+            return rejected("MICRO_LIVE_USER_OPT_IN_REQUIRED", shadow);
+        }
+        if (walletPreferenceRepository != null
+                && walletPreferenceRepository.isBlocked(shadow.getIdUser(), shadow.getWalletId())) {
+            return rejected("COPY_WALLET_BLOCKED_BY_USER", shadow);
+        }
+        if (!detail.isApiKeyBinar()) {
             return rejected("NO_ACTIVE_BINANCE_API_KEY", shadow);
         }
 
@@ -491,6 +523,21 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     "capitalConfigReasonCode", "CAPITAL_CONFIG_MISSING_FROM_USER_DETAIL",
                     "capitalConfigFailure", capitalConfig.reasonCode()
             )));
+        }
+
+        BigDecimal requiredMicroCapital = positiveOrDefault(
+                properties.getMicroLiveInitialCapitalUsd(),
+                new BigDecimal("100")
+        ).setScale(8, RoundingMode.HALF_UP);
+        BigDecimal availableCapital = BigDecimal.valueOf(capitalConfig.capital()).setScale(8, RoundingMode.HALF_UP);
+        if (availableCapital.compareTo(requiredMicroCapital) < 0) {
+            return PromotionDecision.rejected(
+                    "MICRO_LIVE_INSUFFICIENT_AVAILABLE_BALANCE",
+                    details(shadow, null, extras(
+                            "availableCapitalUsd", availableCapital,
+                            "requiredMicroLiveCapitalUsd", requiredMicroCapital
+                    ))
+            );
         }
 
         long activeExecutionAllocations = allocationRepository.countActiveExecutionAllocationsByUser(shadow.getIdUser());
@@ -549,7 +596,7 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             );
         }
 
-        BigDecimal microCapital = microLiveCapital(BigDecimal.valueOf(capitalConfig.capital()));
+        BigDecimal microCapital = requiredMicroCapital;
         DirectLiveDecision targetDecision = directLiveDecision(shadow);
         logDirectLivePolicyChecked(shadow, targetDecision);
         if (!targetDecision.allowed()) {
@@ -562,6 +609,28 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                     "copyModeReasonCode", copyModeResolution.reasonCode(),
                     "copyModeConstraintReasonCode", copyModeResolution.constraintReasonCode()
             )));
+        }
+        ExecutionAccountPurpose accountPurpose = "LIVE".equals(targetDecision.targetExecutionMode())
+                ? ExecutionAccountPurpose.LIVE : ExecutionAccountPurpose.MICRO_LIVE;
+        UserApiKeyEntity account = executionAccount(shadow.getIdUser(), accountPurpose);
+        if (!usable(account)) {
+            return rejected(accountPurpose == ExecutionAccountPurpose.MICRO_LIVE
+                    ? "MICRO_LIVE_EXECUTION_ACCOUNT_MISSING"
+                    : "LIVE_EXECUTION_ACCOUNT_MISSING", shadow);
+        }
+        if (accountPurpose == ExecutionAccountPurpose.MICRO_LIVE && microLiveCapacityGate != null) {
+            MicroLiveCapacityDecision capacity = microLiveCapacityGate.evaluate(
+                    account, shadow.getIdUser(), capitalConfig.capitalAsset());
+            if (!capacity.allowed()) {
+                return PromotionDecision.rejected(capacity.reasonCode(), details(shadow, evidence, extras(
+                        "exchangeAccountId", account.getId(),
+                        "occupiedMicroLiveSlots", capacity.occupiedSlots(),
+                        "effectiveMicroLiveMaxSlots", capacity.effectiveMaxSlots(),
+                        "walletBalance", capacity.walletBalance(),
+                        "availableBalance", capacity.availableBalance(),
+                        "requiredReservedCapital", capacity.requiredReservedCapital()
+                )));
+            }
         }
         LiveAllocationPercentageResolution percentageResolution = null;
         if ("LIVE".equals(targetDecision.targetExecutionMode())) {
@@ -905,6 +974,23 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         UserWalletCopyPlanEntity plan = planResolution.plan();
         decision.details().put("copyPlanReasonCode", planResolution.reasonCode());
         String resolvedCopyMode = Objects.requireNonNull(decision.resolvedCopyMode(), "resolvedCopyMode");
+        ExecutionAccountPurpose accountPurpose = "LIVE".equals(targetExecutionMode)
+                ? ExecutionAccountPurpose.LIVE : ExecutionAccountPurpose.MICRO_LIVE;
+        UserApiKeyEntity executionAccount = executionAccount(shadow.getIdUser(), accountPurpose);
+        if (!usable(executionAccount)) {
+            throw new ExecutionAccountUnavailableException(
+                    targetExecutionMode,
+                    accountPurpose == ExecutionAccountPurpose.MICRO_LIVE
+                            ? "MICRO_LIVE_EXECUTION_ACCOUNT_MISSING"
+                            : "LIVE_EXECUTION_ACCOUNT_MISSING");
+        }
+        if (accountPurpose == ExecutionAccountPurpose.MICRO_LIVE && microLiveCapacityGate != null) {
+            MicroLiveCapacityDecision capacity = microLiveCapacityGate.evaluate(
+                    executionAccount, shadow.getIdUser(), validCapitalAsset(detail));
+            if (!capacity.allowed()) {
+                throw new ExecutionAccountUnavailableException(targetExecutionMode, capacity.reasonCode());
+            }
+        }
 
         CopySymbolResolution symbol = decision.symbolResolution();
         UserCopyAllocationEntity allocation = UserCopyAllocationEntity.builder()
@@ -939,6 +1025,9 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
                 .status(UserCopyAllocationEntity.Status.ACTIVE)
                 .isActive(true)
                 .executionMode(targetExecutionMode)
+                .exchangeAccountId(executionAccount.getId())
+                .reservedCapitalUsd("MICRO_LIVE".equals(targetExecutionMode)
+                        ? microLiveBudgetPerAllocation() : null)
                 .statusReason("LIVE".equals(targetExecutionMode) ? "PROMOTED_DIRECT_FROM_SHADOW" : "PROMOTED_FROM_SHADOW")
                 .statusUpdatedAt(now)
                 .updatedAt(now)
@@ -1296,12 +1385,13 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
     }
 
     private Optional<UserCopyAllocationEntity> existingAllocation(ShadowCopyAllocationEntity shadow) {
-        return allocationRepository.findOpenAllocationForUserWalletStrategyScope(
+        return allocationRepository.findOpenAllocationForUserWalletStrategyScopeAndMode(
                 shadow.getIdUser(),
                 shadow.getWalletId(),
                 normalizeStrategy(shadow.getCopyStrategyCode()),
                 normalizeScopeType(shadow.getScopeType()),
-                normalizeScopeValue(shadow.getScopeValue(), shadow.getCopyStrategyCode())
+                normalizeScopeValue(shadow.getScopeValue(), shadow.getCopyStrategyCode()),
+                "MICRO_LIVE"
         );
     }
 
@@ -1618,6 +1708,36 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
         return MetricStrategyIdentity.scopeValue(value, strategy);
     }
 
+    private UserApiKeyEntity executionAccount(UUID userId, ExecutionAccountPurpose purpose) {
+        return userApiKeyRepository
+                .findByUser_IdAndExchangeIgnoreCaseAndAccountPurposeAndActiveTrue(
+                        userId, "BINANCE", purpose)
+                .orElse(null);
+    }
+
+    private static boolean containsReason(Throwable error, String reason) {
+        Throwable current = error;
+        while (current != null) {
+            if (current.getMessage() != null && current.getMessage().contains(reason)) return true;
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static final class ExecutionAccountUnavailableException extends RuntimeException {
+        private final String executionMode;
+        private final String reasonCode;
+
+        private ExecutionAccountUnavailableException(String executionMode, String reasonCode) {
+            super(reasonCode);
+            this.executionMode = executionMode;
+            this.reasonCode = reasonCode;
+        }
+
+        private String executionMode() { return executionMode; }
+        private String reasonCode() { return reasonCode; }
+    }
+
     private static String normalizeToken(String value) {
         return value == null ? "" : value.trim().toUpperCase(Locale.ROOT).replace('-', '_');
     }
@@ -1807,6 +1927,12 @@ public class ShadowPromotionServiceImpl implements ShadowPromotionService {
             String policy,
             String reasonCode
     ) {
+    }
+
+    private BigDecimal microLiveBudgetPerAllocation() {
+        BigDecimal configured = microLiveCapacityProperties == null
+                ? null : microLiveCapacityProperties.getBudgetPerAllocationUsdc();
+        return configured == null || configured.signum() <= 0 ? new BigDecimal("100") : configured;
     }
 
     private record Evidence(

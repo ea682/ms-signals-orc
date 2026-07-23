@@ -8,6 +8,7 @@ import lombok.Data;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.UUID;
 
 @Data
 @Builder
@@ -38,6 +39,11 @@ public class OperationDto {
     private String originId;
     private String userId;
     private String walletId;
+    private UUID exchangeAccountId;
+    private String accountPurpose;
+    private UUID sourcePositionCycleId;
+    private String fixedMarginMode;
+    private String fixedPositionMode;
 
     /** Durable dispatch metadata. These fields are never sent to Binance. */
     private String sourceEventId;

@@ -7,7 +7,9 @@ import com.apunto.engine.repository.CopyOperationEventRepository;
 import com.apunto.engine.repository.CopyEconomicCycleRepository;
 import com.apunto.engine.outbox.service.MetricCopyOperationOutboxService;
 import com.apunto.engine.service.CopyOperationEventService;
+import com.apunto.engine.service.copy.quality.RoundTripExecutionQualityPersistenceService;
 import com.apunto.engine.shared.metric.MetricStrategyIdentity;
+import org.springframework.beans.factory.annotation.Autowired;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
@@ -31,6 +33,12 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
     private final CopyOperationEventRepository repository;
     private final CopyEconomicCycleRepository copyEconomicCycleRepository;
     private final MetricCopyOperationOutboxService metricCopyOperationOutboxService;
+    private RoundTripExecutionQualityPersistenceService roundTripQualityService;
+
+    @Autowired(required = false)
+    void setRoundTripQualityService(RoundTripExecutionQualityPersistenceService value) {
+        this.roundTripQualityService = value;
+    }
 
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -102,6 +110,7 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
             if (mergeEconomicEvidence(existing, command)) {
                 repository.saveAndFlush(existing);
                 metricCopyOperationOutboxService.enqueue(existing);
+                recalculateRoundTrip(existing);
                 log.info("event=copy_operation_event.economic_evidence_upgraded dispatchIntentId={} eventId={} economicDataStatus={} tradeCount={} totalFees={} grossRealizedPnl={}",
                         command.getDispatchIntentId(), existing.getIdEvent(), existing.getEconomicDataStatus(),
                         existing.getTradeIds() == null ? 0 : existing.getTradeIds().size(), existing.getTotalFees(),
@@ -118,6 +127,7 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
         try {
             repository.saveAndFlush(entity);
             metricCopyOperationOutboxService.enqueue(entity);
+            recalculateRoundTrip(entity);
             log.info("event=copy_operation_event.insert_ok category=audit reasonAlias=ledger_event_recorded friendlyReason=historial_actualizado explanation=se_guardo_el_movimiento_de_la_copia_para_reconstruir_pnl copyImpact=ledger_tracked traceId={} originId={} userId={} wallet={} symbol={} eventType={} copyIntent={} orderId={} clientOrderId={} qtyExecuted={} price={} resultingQty={} realizedPnlUsd={}",
                     safe(command.getTraceId()), safe(command.getIdOrderOrigin()), safe(command.getIdUser()), safe(command.getIdWalletOrigin()), safe(command.getParsymbol()),
                     safe(command.getEventType()), safe(command.getCopyIntent()), safe(command.getBinanceOrderId()), safe(command.getClientOrderId()),
@@ -182,6 +192,8 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
         return CopyOperationEventEntity.builder()
                 .idOperation(command.getIdOperation())
                 .economicCycleId(economicCycleId)
+                .exchangeAccountId(command.getExchangeAccountId())
+                .sourcePositionCycleId(command.getSourcePositionCycleId())
                 .dispatchIntentId(command.getDispatchIntentId())
                 .executionIntentId(command.getDispatchIntentId())
                 .userCopyAllocationId(command.getUserCopyAllocationId())
@@ -308,6 +320,16 @@ public class CopyOperationEventServiceImpl implements CopyOperationEventService 
             }
         }
         return changed;
+    }
+
+    private void recalculateRoundTrip(CopyOperationEventEntity event) {
+        if (roundTripQualityService == null || event == null) return;
+        try {
+            roundTripQualityService.recalculate(event.getUserCopyAllocationId(), event.getEconomicCycleId());
+        } catch (RuntimeException ex) {
+            log.warn("event=copy.round_trip_execution_quality_failed allocationId={} economicCycleId={} errClass={} reasonCode=ROUND_TRIP_AUDIT_RECALCULATION_FAILED",
+                    event.getUserCopyAllocationId(), event.getEconomicCycleId(), ex.getClass().getSimpleName());
+        }
     }
 
     private boolean copyBaseEconomicEvidence(CopyOperationEventEntity entity,

@@ -1,0 +1,26 @@
+[
+  {
+    "eventTime": "2026-07-23T05:18:53.601Z",
+    "sourceSequence": 570400385456073,
+    "sourceEventId": "hyperliquid:user-fill:wallet-a:570400385456073:0xfill-a",
+    "deterministicId": "movement|fixture|570400385456073",
+    "quantity": 3.3183,
+    "executionPrice": 1923.20
+  },
+  {
+    "eventTime": "2026-07-23T05:18:53.601Z",
+    "sourceSequence": 101349630974151,
+    "sourceEventId": "hyperliquid:user-fill:wallet-a:101349630974151:0xfill-b",
+    "deterministicId": "movement|fixture|101349630974151",
+    "quantity": 23.2285,
+    "executionPrice": 1923.20
+  },
+  {
+    "eventTime": "2026-07-23T05:18:53.601Z",
+    "sourceSequence": 546777574496647,
+    "sourceEventId": "hyperliquid:user-fill:wallet-a:546777574496647:0xfill-c",
+    "deterministicId": "movement|fixture|546777574496647",
+    "quantity": 15.8158,
+    "executionPrice": 1923.20
+  }
+]

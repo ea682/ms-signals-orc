@@ -45,12 +45,13 @@ public class ManualLiveAllocationActivationService {
             return LiveAllocationActivationResult.blocked("LIVE_ACTIVATION_KEY_CONFLICT",
                     command.allocationId());
         }
-        if (!"MICRO_LIVE".equalsIgnoreCase(allocation.executionMode())) {
+        boolean pendingLive = "LIVE".equalsIgnoreCase(allocation.executionMode())
+                && "PAUSED".equalsIgnoreCase(allocation.status());
+        if (!pendingLive) {
             return LiveAllocationActivationResult.blocked("LIVE_ACTIVATION_WRONG_SOURCE_MODE",
                     command.allocationId());
         }
-        if (!allocation.active() || allocation.endsAt() != null
-                || !"ACTIVE".equalsIgnoreCase(allocation.status())) {
+        if (!allocation.active() || allocation.endsAt() != null) {
             return LiveAllocationActivationResult.blocked("LIVE_ACTIVATION_ALLOCATION_NOT_ACTIVE",
                     command.allocationId());
         }
@@ -83,13 +84,15 @@ public class ManualLiveAllocationActivationService {
         if (authorization.expiresAt() == null || !authorization.expiresAt().isAfter(now)) {
             return LiveAllocationActivationResult.blocked("LIVE_ADOPTION_EXPIRED", command.allocationId());
         }
-        if (!store.activate(command.allocationId(), command.actor().trim(), command.reason().trim(), now)) {
+        boolean activated = store.activatePendingLive(
+                command.allocationId(), command.actor().trim(), command.reason().trim(), now);
+        if (!activated) {
             return LiveAllocationActivationResult.blocked("LIVE_ACTIVATION_CONCURRENT_STATE_CHANGE",
                     command.allocationId());
         }
         store.appendAudit(new LiveAllocationActivationAudit(
                 command.activationKey().trim(), command.allocationId(), command.certificationId(),
-                allocation.userId(), "MICRO_LIVE", "LIVE", command.actor().trim(),
+                allocation.userId(), allocation.executionMode(), "LIVE", command.actor().trim(),
                 command.reason().trim(), now));
         return LiveAllocationActivationResult.activated(command.allocationId(), false);
     }
