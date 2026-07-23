@@ -291,6 +291,10 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                     safe(idempotencyKey), safe(dedupeKey), ex.getClass().getSimpleName(), safeLog(ex.getMessage()));
         }
         recordDedupeMetric("duplicate");
+        meterRegistry.counter(
+                "duplicate_noop_total",
+                "delta_type", safeMetricTag(mappedDelta.deltaType())
+        ).increment();
         log.info("event=hyperliquid.direct_ingest.distributed_duplicate reasonCode=DISTRIBUTED_DUPLICATE_SUPPRESSED reasonAlias=duplicate_claimed_by_other_instance decision=NOOP expected=true copyImpact=NO_DUPLICATE_ORDER idempotencyKey={} dedupeKey={} positionKey={} wallet={} symbol={} side={} deltaType={} {}",
                 safe(idempotencyKey), safe(dedupeKey), safe(mappedDelta.positionKey()), safe(mappedDelta.wallet()), safe(mappedDelta.symbol()), safe(mappedDelta.side()), safe(mappedDelta.deltaType()),
                 CopyLogAdvice.fields("distributed_duplicate_suppressed", CopyLogAdvice.context(null, null, 0, 1, null, null, null, "direct_ingest_dedupe")));
@@ -349,6 +353,10 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 "replica_payload_divergence_total",
                 "delta_type", safeMetricTag(mappedDelta.deltaType())
         ).increment();
+        meterRegistry.counter(
+                "replica_payload_conflict_total",
+                "delta_type", safeMetricTag(mappedDelta.deltaType())
+        ).increment();
         log.warn("event=hyperliquid.direct_ingest.replica_payload_divergence reasonCode=REPLICA_DERIVED_PAYLOAD_DIVERGENCE decision=NOOP_HTTP_ACK expected=false shouldAlert=true retryable=false copyImpact=NO_DUPLICATE_ORDER idempotencyKey={} dedupeKey={} positionKey={} wallet={} symbol={} side={} deltaType={} sourceTs={} existingStatus={} leaseExpired={} existingFingerprint={} incomingFingerprint={} recommendedAction=COMPARE_HYPERLIQUID_REPLICA_LOCAL_STATE",
                 safe(idempotencyKey), safe(dedupeKey), safe(mappedDelta.positionKey()),
                 safe(mappedDelta.wallet()), safe(mappedDelta.symbol()), safe(mappedDelta.side()),
@@ -370,6 +378,10 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                     safe(idempotencyKey), auditFailure.getClass().getSimpleName(), safeLog(auditFailure.getMessage()));
         }
         recordDedupeMetric("payload_conflict");
+        meterRegistry.counter(
+                "authoritative_identity_conflict_total",
+                "delta_type", safeMetricTag(mappedDelta.deltaType())
+        ).increment();
         log.error("event=hyperliquid.direct_ingest.idempotency_payload_conflict reasonCode=IDEMPOTENCY_KEY_PAYLOAD_CONFLICT reasonAlias=same_key_different_payload decision=BLOCK expected=false shouldAlert=true retryable=false copyImpact=ORDER_NOT_SENT idempotencyKey={} dedupeKey={} positionKey={} wallet={} symbol={} side={} deltaType={} existingStatus={} leaseExpired={} recommendedAction=INVESTIGATE_KEY_GENERATION",
                 safe(idempotencyKey), safe(dedupeKey), safe(mappedDelta.positionKey()), safe(mappedDelta.wallet()),
                 safe(mappedDelta.symbol()), safe(mappedDelta.side()), safe(mappedDelta.deltaType()), safe(existing.status()), existing.leaseExpired());

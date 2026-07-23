@@ -294,6 +294,14 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         OperacionEvent event = mappedDelta.event();
         OperacionDto op = event.getOperacion();
         HyperliquidDeltaRequest req = mappedDelta.request();
+        if (req != null
+                && "SEMANTIC_CONFLICT".equalsIgnoreCase(
+                req.normalizationStatus())) {
+            meterRegistry.counter(
+                    "semantic_classification_conflict_total",
+                    "delta_type", safeTag(mappedDelta.deltaType())
+            ).increment();
+        }
         OffsetDateTime sourceTs = req == null ? null : fromEpochMillis(req.sourceTs());
         OffsetDateTime detectedAt = req == null ? null : fromInstant(req.detectedAt());
         OffsetDateTime publishedAt = req == null ? null : fromInstant(req.publishedAt());

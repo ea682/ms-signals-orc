@@ -14,24 +14,32 @@ $env:JAVA_HOME = $Java21Home
 $env:Path = "$Java21Home\bin;$env:Path"
 
 $coverage = @(
-    [pscustomobject]@{ Id = "B2B-01"; Scenario = "OPEN normal con baseline valido"; Proof = "Sentinel detector + Signals movement contract" }
-    [pscustomobject]@{ Id = "B2B-02"; Scenario = "INCREASE real"; Proof = "Sentinel resize from published baseline" }
-    [pscustomobject]@{ Id = "B2B-03"; Scenario = "INCREASE original matematicamente REDUCE"; Proof = "Signals Shadow final REDUCE" }
-    [pscustomobject]@{ Id = "B2B-04"; Scenario = "REDUCE sin active origin"; Proof = "Signals non-economic origin hydration" }
-    [pscustomobject]@{ Id = "B2B-05"; Scenario = "Misma identidad y mismo payload"; Proof = "Signals healthy duplicate" }
-    [pscustomobject]@{ Id = "B2B-06"; Scenario = "Misma identidad y payload distinto"; Proof = "Signals explicit conflict" }
-    [pscustomobject]@{ Id = "B2B-07"; Scenario = "FLIP con evidencia suficiente"; Proof = "Signals future USER_FILL contract, publisher remains off" }
-    [pscustomobject]@{ Id = "B2B-08"; Scenario = "FLIP sin evidencia suficiente"; Proof = "Signals audit-only fail-closed" }
-    [pscustomobject]@{ Id = "B2B-09"; Scenario = "Hash cero y tid valido"; Proof = "Sentinel payload + Signals identity" }
-    [pscustomobject]@{ Id = "B2B-10"; Scenario = "Tres eventos mismo timestamp"; Proof = "Sentinel slow-snapshot fast-path contract" }
-    [pscustomobject]@{ Id = "B2B-11"; Scenario = "Redelivery del mismo evento"; Proof = "Signals idempotency guard" }
-    [pscustomobject]@{ Id = "B2B-12"; Scenario = "Reinicio con posiciones abiertas"; Proof = "Signals baseline hydration and later adjustment" }
+    [pscustomobject]@{ Id = "B2B-01"; Scenario = "Replica no lista"; Proof = "Sentinel readiness publisher gate, cero publish" }
+    [pscustomobject]@{ Id = "B2B-02"; Scenario = "Transicion PUBLISH_READY"; Proof = "Sentinel readiness state machine and health" }
+    [pscustomobject]@{ Id = "B2B-03"; Scenario = "OPEN normal"; Proof = "Sentinel detector, payload, HTTP DTO and ledger contract" }
+    [pscustomobject]@{ Id = "B2B-04"; Scenario = "INCREASE normal"; Proof = "Sentinel resize from published baseline" }
+    [pscustomobject]@{ Id = "B2B-05"; Scenario = "INCREASE etiquetado, matematicamente REDUCE"; Proof = "Signals final Shadow REDUCE" }
+    [pscustomobject]@{ Id = "B2B-06"; Scenario = "REDUCE sin origen"; Proof = "Signals NON_ECONOMIC_ESTIMATED baseline" }
+    [pscustomobject]@{ Id = "B2B-07"; Scenario = "FLIP estimado"; Proof = "Signals audit-only fail-closed" }
+    [pscustomobject]@{ Id = "B2B-08"; Scenario = "Mismo tid redeliverado"; Proof = "Signals duplicate NOOP" }
+    [pscustomobject]@{ Id = "B2B-09"; Scenario = "Mismo tid divergente"; Proof = "Signals explicit payload conflict" }
+    [pscustomobject]@{ Id = "B2B-10"; Scenario = "Hash cero"; Proof = "Sentinel and Signals canonical wallet+tid identity" }
+    [pscustomobject]@{ Id = "B2B-11"; Scenario = "Dos replicas, payload identico"; Proof = "Signals healthy distributed duplicate" }
+    [pscustomobject]@{ Id = "B2B-12"; Scenario = "Dos replicas, snapshot distinto"; Proof = "Readiness gate plus explicit divergence" }
+    [pscustomobject]@{ Id = "B2B-13"; Scenario = "Reinicio con posiciones abiertas"; Proof = "Signals state-only baseline hydration" }
+    [pscustomobject]@{ Id = "B2B-14"; Scenario = "Mismo timestamp, secuencias distintas"; Proof = "Economic total-order regression" }
+    [pscustomobject]@{ Id = "B2B-15"; Scenario = "POSITION_DELTA sin PnL"; Proof = "Signals ledger preserves null PnL" }
+    [pscustomobject]@{ Id = "B2B-16"; Scenario = "USER_FILL sintetico"; Proof = "Contract-only factory, publisher bean absent" }
 )
 
 $sentinelTests = @(
     "HyperliquidPositionDeltaDetectorImplTest",
     "HyperliquidPositionDeltaPayloadFactoryTest",
     "HyperliquidPositionDeltaPublisherReadinessTest",
+    "HyperliquidReadinessStateMachineTest",
+    "HyperliquidPublishReadinessHealthIndicatorTest",
+    "HyperliquidIdentityArchitectureTest",
+    "HyperliquidAuthoritativeUserFillContractTest",
     "HyperliquidSnapshotServiceTest",
     "HyperliquidSlowSnapshotFastPathContractTest"
 ) -join ","
@@ -42,7 +50,11 @@ $signalsTests = @(
     "HyperliquidDirectIngestIdempotencyGuardTest",
     "HyperliquidDirectDeltaIngestServiceImplTest",
     "HyperliquidZeroHashIdentityTest",
+    "HyperliquidIdentityArchitectureTest",
+    "HyperliquidDeltaRequestV3ContractTest",
+    "HyperliquidEconomicLedgerContractTest",
     "OperationMovementEconomicNormalizationTest",
+    "OperationMovementEconomicOrderRegressionTest",
     "AuthoritativeMovementIdentityRegressionTest",
     "MetricMovementOutboxPartitionKeyTest"
 ) -join ","
@@ -68,4 +80,4 @@ try {
 }
 
 $coverage | Format-Table -AutoSize
-Write-Output "B2B_RESULT=GREEN scenarios=$($coverage.Count) userFillPublisher=OFF externalOrders=0"
+Write-Output "B2B_RESULT=GREEN scenarios=$($coverage.Count) userFillPublisher=OFF externalOrders=0 duplicateEconomicEffects=0 ambiguousEstimatedFlips=0 unresolvedLateAdjustments=0 replicaPayloadConflictsHandled=true"

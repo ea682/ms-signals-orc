@@ -341,6 +341,16 @@ public class HyperliquidOriginPositionStoreService {
                     "reason", safeTag(baseline.reason())
             ).increment();
             if (baseline.valid()) {
+                meterRegistry.counter(
+                        "baseline_created_total",
+                        "baseline_kind", safeTag(baseline.baselineKind()),
+                        "delta_type", safeTag(mapped.deltaType())
+                ).increment();
+                meterRegistry.counter(
+                        "late_adjustment_resolved_total",
+                        "resolution", "non_economic_baseline",
+                        "delta_type", safeTag(mapped.deltaType())
+                ).increment();
                 UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
                 UUID baselineOriginId = activeOriginIds.putIfAbsent(key, fallback);
                 UUID resolvedOriginId = baselineOriginId == null ? fallback : baselineOriginId;
@@ -358,6 +368,11 @@ public class HyperliquidOriginPositionStoreService {
                         activeOriginIds.size());
                 return resolvedOriginId;
             }
+            meterRegistry.counter(
+                    "late_adjustment_unresolved_total",
+                    "reason", safeTag(baseline.reason()),
+                    "delta_type", safeTag(mapped.deltaType())
+            ).increment();
             UUID fallback = originId(mapped) == null ? fallbackLifecycleId(mapped) : originId(mapped);
             log.info("event=hyperliquid.origin_store.lifecycle_missing category=origin_position action=adjustment_skip reasonCode=late_adjustment_without_active_origin reasonAlias=adjustment_without_active_origin friendlyReason=ajuste_sin_posicion_original_activa explanation=ajuste_recibido_sin_posicion_original_activa_y_snapshot_no_valido copyImpact=no_copy_order originId={} positionKey={} wallet={} symbol={} side={} deltaType={} skipLateAdjustments={} baselineReason={} {}",
                     fallback, safeLog(mapped.positionKey()), safeLog(mapped.wallet()), safeLog(mapped.symbol()), safeLog(mapped.side()), safeLog(mapped.deltaType()), skipLateAdjustments, safeLog(baseline.reason()),
