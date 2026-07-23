@@ -110,8 +110,8 @@ public class HyperliquidDeltaOperacionMapper {
         }
         String cleanExternalId = externalId.trim();
         if (cleanExternalId.startsWith("snapshot-recovery-open|")) {
-            return "hyperliquid:recovery:" + wallet + ':' + symbol.toUpperCase(Locale.ROOT)
-                    + ':' + cleanExternalId;
+            return HyperliquidSourceTradeIdentity.recoveryKey(
+                    wallet, symbol, cleanExternalId);
         }
         HyperliquidSourceTradeIdentity.Evidence sourceTrade =
                 HyperliquidSourceTradeIdentity.fromExternalId(
@@ -120,7 +120,13 @@ public class HyperliquidDeltaOperacionMapper {
             recordZeroHashIdentity();
         }
         if (sourceTrade.tid() != null) {
-            return "hyperliquid:trade:" + wallet + ':' + sourceTrade.tid();
+            String canonical =
+                    HyperliquidSourceTradeIdentity.canonicalTradeKey(
+                    wallet, sourceTrade.tid());
+            if (!canonical.equals(supplied)) {
+                recordLegacyIdentityMatched();
+            }
+            return canonical;
         }
         String[] parts = cleanExternalId.split("\\|", 4);
         if (parts.length != 4
@@ -129,14 +135,23 @@ public class HyperliquidDeltaOperacionMapper {
                 || !isSourceDeltaType(parts[2])) {
             return supplied;
         }
-        return "hyperliquid:trade:" + wallet + ':' + symbol.toUpperCase(Locale.ROOT)
-                + ':' + parts[3].trim();
+        return HyperliquidSourceTradeIdentity.fallbackTradeKey(
+                wallet, symbol, parts[3]);
     }
 
     private void recordZeroHashIdentity() {
         if (meterRegistry != null) {
             meterRegistry.counter(
                     "zero_hash_identity_total",
+                    "source", "direct_ingest"
+            ).increment();
+        }
+    }
+
+    private void recordLegacyIdentityMatched() {
+        if (meterRegistry != null) {
+            meterRegistry.counter(
+                    "legacy_identity_matched_total",
                     "source", "direct_ingest"
             ).increment();
         }

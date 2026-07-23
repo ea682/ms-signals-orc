@@ -47,6 +47,33 @@ public final class HyperliquidSourceTradeIdentity {
                 && ZERO_HASH.equalsIgnoreCase(rawHash.trim());
     }
 
+    public static String canonicalTradeKey(String wallet, long tid) {
+        if (tid <= 0L) {
+            throw new IllegalArgumentException("Hyperliquid tid must be positive");
+        }
+        return "hyperliquid:trade:" + normalizedWallet(wallet) + ':' + tid;
+    }
+
+    public static String fallbackTradeKey(
+            String wallet,
+            String symbol,
+            String sourceIdentity
+    ) {
+        return "hyperliquid:trade:" + normalizedWallet(wallet)
+                + ':' + normalizedSymbol(symbol)
+                + ':' + required(sourceIdentity, "sourceIdentity");
+    }
+
+    public static String recoveryKey(
+            String wallet,
+            String symbol,
+            String sourceIdentity
+    ) {
+        return "hyperliquid:recovery:" + normalizedWallet(wallet)
+                + ':' + normalizedSymbol(symbol)
+                + ':' + required(sourceIdentity, "sourceIdentity");
+    }
+
     private static Long positiveLong(String value) {
         try {
             long parsed = Long.parseLong(value);
@@ -58,6 +85,17 @@ public final class HyperliquidSourceTradeIdentity {
 
     private static boolean equalsIgnoreCase(String left, String right) {
         return left != null && right != null && left.trim().equalsIgnoreCase(right.trim());
+    }
+
+    private static String normalizedWallet(String value) {
+        return required(value, "wallet").toLowerCase(Locale.ROOT);
+    }
+
+    private static String required(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(field + " is required");
+        }
+        return value.trim();
     }
 
     private static String normalizedSymbol(String value) {

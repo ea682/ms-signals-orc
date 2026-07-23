@@ -2896,6 +2896,12 @@ public class ShadowCopyTradingServiceImpl implements ShadowCopyTradingService {
         if (classification == null || !classification.corrected()) {
             return;
         }
+        Metrics.counter(
+                "semantic_classification_corrected_total",
+                "flow", "shadow",
+                "computed_delta_type",
+                classification.computedDeltaType().name().toLowerCase(Locale.ROOT)
+        ).increment();
         BigDecimal deltaQty = previousQty == null || resultingQty == null ? null : resultingQty.subtract(previousQty);
         log.info("event=copy_position.classification.corrected flow=shadow originalEventType={} originalDeltaType={} computedDeltaType={} reasonCode={} warningCode={} previousQty={} resultingQty={} deltaQty={} executionPrice={} symbol={} walletId={} profileKey={} strategyCode={} side={} originId={} correctionApplied=true confidence=POSITION_MATH",
                 originalEventType,
