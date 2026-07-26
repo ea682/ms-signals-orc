@@ -4,8 +4,12 @@ import com.apunto.engine.hyperliquid.config.HyperliquidDirectIngestProperties;
 import com.apunto.engine.hyperliquid.dto.HyperliquidMappedDelta;
 import com.apunto.engine.hyperliquid.exception.HyperliquidDirectIngestDedupeException;
 import com.apunto.engine.shared.util.CopyLogAdvice;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -15,14 +19,19 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeSet;
 
 @Slf4j
 @Service
 public class HyperliquidDirectIngestIdempotencyGuard {
 
+    private static final String FINGERPRINT_ALGORITHM =
+            "hyperliquid-economic-v2";
     private static final String STATUS_PROCESSING = "PROCESSING";
     private static final String STATUS_PROCESSED = "PROCESSED";
     private static final String STATUS_FAILED = "FAILED";
@@ -40,12 +49,16 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                     delta_type,
                     source_ts_ms,
                     payload_fingerprint,
+                    first_payload,
+                    fingerprint_algorithm,
                     status,
                     attempt_count,
                     lease_until,
                     first_seen_at,
                     last_seen_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PROCESSING', 1, now() + (? * interval '1 millisecond'), now(), now())
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?,
+                          'PROCESSING', 1,
+                          now() + (? * interval '1 millisecond'), now(), now())
                 ON CONFLICT (idempotency_key) DO UPDATE SET
                     dedupe_key = EXCLUDED.dedupe_key,
                     position_key = EXCLUDED.position_key,
@@ -54,7 +67,13 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                     side = EXCLUDED.side,
                     delta_type = EXCLUDED.delta_type,
                     source_ts_ms = EXCLUDED.source_ts_ms,
-                    payload_fingerprint = COALESCE(futuros_operaciones.hyperliquid_direct_ingest_dedupe.payload_fingerprint, EXCLUDED.payload_fingerprint),
+                   payload_fingerprint = COALESCE(futuros_operaciones.hyperliquid_direct_ingest_dedupe.payload_fingerprint, EXCLUDED.payload_fingerprint),
+                    first_payload = COALESCE(
+                        futuros_operaciones.hyperliquid_direct_ingest_dedupe.first_payload,
+                        EXCLUDED.first_payload),
+                    fingerprint_algorithm = COALESCE(
+                        futuros_operaciones.hyperliquid_direct_ingest_dedupe.fingerprint_algorithm,
+                        EXCLUDED.fingerprint_algorithm),
                     status = EXCLUDED.status,
                     attempt_count = futuros_operaciones.hyperliquid_direct_ingest_dedupe.attempt_count + 1,
                     lease_until = EXCLUDED.lease_until,
@@ -70,7 +89,8 @@ public class HyperliquidDirectIngestIdempotencyGuard {
 
     private static final String EXISTING_CLAIM_SQL = """
             SELECT payload_fingerprint, status, lease_until < now() AS lease_expired,
-                   wallet, symbol, source_ts_ms
+                   wallet, symbol, source_ts_ms,
+                   first_payload::text AS first_payload_json
             FROM futuros_operaciones.hyperliquid_direct_ingest_dedupe
             WHERE idempotency_key = ?
             """;
@@ -98,6 +118,36 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 last_seen_at = now(),
                 last_reason_code = 'REPLICA_DERIVED_PAYLOAD_DIVERGENCE'
             WHERE idempotency_key = ?
+            """;
+
+    private static final String INSERT_REPLICA_CONFLICT_SQL = """
+            INSERT INTO futuros_operaciones.hyperliquid_replica_payload_conflict (
+                idempotency_key,
+                existing_fingerprint,
+                incoming_fingerprint,
+                fingerprint_algorithm,
+                first_payload,
+                incoming_payload,
+                differing_fields,
+                resolution_status,
+                first_detected_at,
+                last_detected_at,
+                observation_count
+            ) VALUES (?, ?, ?, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?,
+                      now(), now(), 1)
+            ON CONFLICT (idempotency_key, incoming_fingerprint)
+            DO UPDATE SET
+                last_detected_at = now(),
+                observation_count =
+                    futuros_operaciones.hyperliquid_replica_payload_conflict.observation_count + 1,
+                incoming_payload = EXCLUDED.incoming_payload,
+                differing_fields = EXCLUDED.differing_fields,
+                resolution_status = CASE
+                    WHEN futuros_operaciones.hyperliquid_replica_payload_conflict.resolution_status
+                         = 'RESOLVED'
+                    THEN 'RESOLVED'
+                    ELSE EXCLUDED.resolution_status
+                END
             """;
 
     private static final String PAYLOAD_UNVERIFIED_SQL = """
@@ -133,6 +183,7 @@ public class HyperliquidDirectIngestIdempotencyGuard {
     private final HyperliquidDirectIngestProperties properties;
     private final JdbcTemplate jdbcTemplate;
     private final MeterRegistry meterRegistry;
+    private final ObjectMapper objectMapper;
 
     private record ExistingClaim(
             String payloadFingerprint,
@@ -140,7 +191,8 @@ public class HyperliquidDirectIngestIdempotencyGuard {
             boolean leaseExpired,
             String wallet,
             String symbol,
-            Long sourceTs
+            Long sourceTs,
+            String firstPayloadJson
     ) {
     }
 
@@ -149,9 +201,24 @@ public class HyperliquidDirectIngestIdempotencyGuard {
             JdbcTemplate jdbcTemplate,
             MeterRegistry meterRegistry
     ) {
+        this(
+                properties,
+                jdbcTemplate,
+                meterRegistry,
+                new ObjectMapper().findAndRegisterModules());
+    }
+
+    @Autowired
+    public HyperliquidDirectIngestIdempotencyGuard(
+            HyperliquidDirectIngestProperties properties,
+            JdbcTemplate jdbcTemplate,
+            MeterRegistry meterRegistry,
+            ObjectMapper objectMapper
+    ) {
         this.properties = properties;
         this.jdbcTemplate = jdbcTemplate;
         this.meterRegistry = meterRegistry;
+        this.objectMapper = objectMapper;
     }
 
     public boolean tryAcquire(HyperliquidMappedDelta mappedDelta, String dedupeKey) {
@@ -160,6 +227,7 @@ public class HyperliquidDirectIngestIdempotencyGuard {
         }
         String idempotencyKey = requireIdempotencyKey(mappedDelta);
         String payloadFingerprint = payloadFingerprint(mappedDelta, dedupeKey);
+        String payloadEvidence = payloadEvidence(mappedDelta, dedupeKey);
         try {
             Long acquired = jdbcTemplate.queryForObject(
                     ACQUIRE_SQL,
@@ -173,6 +241,8 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                     safe(mappedDelta.deltaType()),
                     sourceTs(mappedDelta),
                     payloadFingerprint,
+                    payloadEvidence,
+                    FINGERPRINT_ALGORITHM,
                     Math.max(1000L, properties.getDedupeLeaseTtlMs())
             );
             boolean allowed = acquired != null && acquired > 0L;
@@ -189,14 +259,16 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 if (existing.payloadFingerprint() != null
                         && !existing.payloadFingerprint().isBlank()
                         && !existing.payloadFingerprint().equals(payloadFingerprint)) {
-                    if (isAuthoritativeUserFill(mappedDelta)) {
+                    if (isAuthoritativeUserFill(mappedDelta)
+                            && existingIsAuthoritativeUserFill(existing)) {
                         markPayloadConflict(
                                 idempotencyKey, mappedDelta, dedupeKey,
                                 existing, payloadFingerprint);
                     }
                     if (sameImmutableSourceIdentity(existing, mappedDelta)) {
                         markReplicaPayloadDivergence(
-                                idempotencyKey, mappedDelta, dedupeKey, existing, payloadFingerprint);
+                                idempotencyKey, mappedDelta, dedupeKey, existing,
+                                payloadFingerprint, payloadEvidence);
                         return false;
                     }
                     markPayloadConflict(idempotencyKey, mappedDelta, dedupeKey, existing, payloadFingerprint);
@@ -309,7 +381,8 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                         rs.getBoolean("lease_expired"),
                         rs.getString("wallet"),
                         rs.getString("symbol"),
-                        rs.getObject("source_ts_ms", Long.class)
+                        rs.getObject("source_ts_ms", Long.class),
+                        rs.getString("first_payload_json")
                 ),
                 idempotencyKey
         );
@@ -335,13 +408,37 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 && request.sourceSequence() > 0L;
     }
 
+    private boolean existingIsAuthoritativeUserFill(ExistingClaim existing) {
+        if (existing == null || existing.firstPayloadJson() == null
+                || existing.firstPayloadJson().isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode payload = objectMapper.readTree(existing.firstPayloadJson());
+            return "USER_FILL".equalsIgnoreCase(
+                    payload.path("economicEventKind").asText())
+                    && !payload.path("sourceEstimated").asBoolean(true);
+        } catch (JsonProcessingException invalidStoredEvidence) {
+            return false;
+        }
+    }
+
     private void markReplicaPayloadDivergence(
             String idempotencyKey,
             HyperliquidMappedDelta mappedDelta,
             String dedupeKey,
             ExistingClaim existing,
-            String incomingFingerprint
+            String incomingFingerprint,
+            String incomingPayload
     ) {
+        persistReplicaConflict(
+                idempotencyKey,
+                existing,
+                incomingFingerprint,
+                incomingPayload,
+                isAuthoritativeUserFill(mappedDelta)
+                        ? "AUTHORITATIVE_VARIANT_OBSERVED"
+                        : "UNRESOLVED");
         try {
             jdbcTemplate.update(REPLICA_PAYLOAD_DIVERGENCE_SQL, idempotencyKey);
         } catch (DataAccessException auditFailure) {
@@ -371,6 +468,12 @@ public class HyperliquidDirectIngestIdempotencyGuard {
             ExistingClaim existing,
             String incomingFingerprint
     ) {
+        persistReplicaConflict(
+                idempotencyKey,
+                existing,
+                incomingFingerprint,
+                payloadEvidence(mappedDelta, dedupeKey),
+                "ESCALATED");
         try {
             jdbcTemplate.update(PAYLOAD_CONFLICT_SQL, idempotencyKey);
         } catch (DataAccessException auditFailure) {
@@ -392,6 +495,38 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 existing.payloadFingerprint(),
                 incomingFingerprint
         );
+    }
+
+    private void persistReplicaConflict(
+            String idempotencyKey,
+            ExistingClaim existing,
+            String incomingFingerprint,
+            String incomingPayload,
+            String resolutionStatus
+    ) {
+        String existingPayload = existing.firstPayloadJson() == null
+                || existing.firstPayloadJson().isBlank()
+                ? null
+                : existing.firstPayloadJson();
+        String differingFields = differingFields(
+                existingPayload, incomingPayload);
+        try {
+            jdbcTemplate.update(
+                    INSERT_REPLICA_CONFLICT_SQL,
+                    idempotencyKey,
+                    existing.payloadFingerprint(),
+                    incomingFingerprint,
+                    FINGERPRINT_ALGORITHM,
+                    existingPayload,
+                    incomingPayload,
+                    differingFields,
+                    resolutionStatus);
+        } catch (DataAccessException auditFailure) {
+            log.error("event=hyperliquid.direct_ingest.replica_conflict_evidence_failed reasonCode=REPLICA_CONFLICT_EVIDENCE_PERSIST_FAILED decision=NOOP_STILL_ENFORCED shouldAlert=true idempotencyKey={} errorClass={} errorMessage=\"{}\"",
+                    safe(idempotencyKey),
+                    auditFailure.getClass().getSimpleName(),
+                    safeLog(auditFailure.getMessage()));
+        }
     }
 
     private void markPayloadUnverified(
@@ -464,8 +599,7 @@ public class HyperliquidDirectIngestIdempotencyGuard {
     private String payloadFingerprint(HyperliquidMappedDelta mappedDelta, String dedupeKey) {
         var request = mappedDelta.request();
         String canonical = String.join("|",
-                canonicalText(dedupeKey),
-                canonicalText(mappedDelta.positionKey()),
+                canonicalText(mappedDelta.idempotencyKey()),
                 canonicalText(mappedDelta.wallet()),
                 canonicalText(mappedDelta.symbol()),
                 canonicalText(mappedDelta.side()),
@@ -480,9 +614,22 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 canonicalDecimal(request == null ? null : request.entryPrice()),
                 canonicalDecimal(request == null ? null : request.markPrice()),
                 canonicalDecimal(request == null ? null : request.leverage()),
-                canonicalValue(request == null ? null : request.walletVersion()),
-                canonicalValue(request == null ? null : request.snapshotVersion()),
-                canonicalText(request == null ? null : request.externalId())
+                canonicalDecimal(request == null ? null : request.rawNotionalUsd()),
+                canonicalDecimal(request == null ? null : request.positionNotionalUsd()),
+                canonicalDecimal(request == null ? null : request.closedNotionalUsd()),
+                canonicalDecimal(request == null ? null : request.closedMarginUsedUsd()),
+                canonicalDecimal(request == null ? null : request.effectiveCloseQty()),
+                canonicalDecimal(request == null ? null : request.effectiveEntryPrice()),
+                canonicalDecimal(request == null ? null : request.effectiveExitPrice()),
+                canonicalDecimal(request == null ? null : request.effectiveRealizedPnlUsd()),
+                canonicalText(request == null ? null : request.economicEventKind()),
+                canonicalValue(request == null ? null : request.economicEventVersion()),
+                canonicalValue(request == null ? null : request.sourceSequence()),
+                canonicalDecimal(request == null ? null : request.sourceFeeUsd()),
+                canonicalDecimal(request == null ? null : request.fundingPnlUsd()),
+                canonicalText(request == null ? null : request.executionPriceBasis()),
+                canonicalText(request == null ? null : request.notionalBasis()),
+                canonicalValue(request == null ? null : request.sourceEstimated())
         );
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
@@ -490,6 +637,82 @@ public class HyperliquidDirectIngestIdempotencyGuard {
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException ex) {
             throw new IllegalStateException("SHA-256 no disponible para idempotencia", ex);
+        }
+    }
+
+    private String payloadEvidence(
+            HyperliquidMappedDelta mappedDelta,
+            String dedupeKey
+    ) {
+        var request = mappedDelta.request();
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("fingerprintAlgorithm", FINGERPRINT_ALGORITHM);
+        evidence.put("dedupeKey", dedupeKey);
+        evidence.put("positionKey", mappedDelta.positionKey());
+        evidence.put("wallet", mappedDelta.wallet());
+        evidence.put("symbol", mappedDelta.symbol());
+        evidence.put("side", mappedDelta.side());
+        evidence.put("deltaType", mappedDelta.deltaType());
+        evidence.put("sourceTs", sourceTs(mappedDelta));
+        evidence.put("eventType", request == null ? null : request.eventType());
+        evidence.put("status", request == null ? null : request.status());
+        evidence.put("sizeQty", request == null ? null : request.sizeQty());
+        evidence.put("signedSizeQty",
+                request == null ? null : request.signedSizeQty());
+        evidence.put("notionalUsd",
+                request == null ? null : request.notionalUsd());
+        evidence.put("marginUsedUsd",
+                request == null ? null : request.marginUsedUsd());
+        evidence.put("entryPrice",
+                request == null ? null : request.entryPrice());
+        evidence.put("markPrice",
+                request == null ? null : request.markPrice());
+        evidence.put("leverage",
+                request == null ? null : request.leverage());
+        evidence.put("externalId",
+                request == null ? null : request.externalId());
+        evidence.put("economicEventKind",
+                request == null ? null : request.economicEventKind());
+        evidence.put("sourceSequence",
+                request == null ? null : request.sourceSequence());
+        evidence.put("sourceEstimated",
+                request == null ? null : request.sourceEstimated());
+        evidence.put("walletVersion",
+                request == null ? null : request.walletVersion());
+        evidence.put("snapshotVersion",
+                request == null ? null : request.snapshotVersion());
+        try {
+            return objectMapper.writeValueAsString(evidence);
+        } catch (JsonProcessingException serializationFailure) {
+            throw new IllegalStateException(
+                    "Could not serialize sanitized Hyperliquid payload evidence",
+                    serializationFailure);
+        }
+    }
+
+    private String differingFields(
+            String existingPayload,
+            String incomingPayload
+    ) {
+        if (existingPayload == null || existingPayload.isBlank()) {
+            return "[\"firstPayloadUnavailable\"]";
+        }
+        try {
+            JsonNode existing = objectMapper.readTree(existingPayload);
+            JsonNode incoming = objectMapper.readTree(incomingPayload);
+            TreeSet<String> names = new TreeSet<>();
+            existing.fieldNames().forEachRemaining(names::add);
+            incoming.fieldNames().forEachRemaining(names::add);
+            List<String> differences = new ArrayList<>();
+            for (String name : names) {
+                if (!java.util.Objects.equals(
+                        existing.get(name), incoming.get(name))) {
+                    differences.add(name);
+                }
+            }
+            return objectMapper.writeValueAsString(differences);
+        } catch (JsonProcessingException invalidEvidence) {
+            return "[\"evidenceParseFailed\"]";
         }
     }
 
