@@ -86,12 +86,59 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         HyperliquidDirectIngestIdempotencyGuard guard = guard(jdbc, registry, false);
         HyperliquidMappedDelta delta = delta("same-source-key", "BTCUSDT");
+        HyperliquidMappedDelta conflicting = new HyperliquidMappedDelta(
+                "same-source-key",
+                "replica-b-local-position-key",
+                "0xabc",
+                "BTCUSDT",
+                "SHORT",
+                "CLOSE",
+                null,
+                null);
 
         assertTrue(guard.tryAcquire(delta, "replica-a-derived-state"));
-        assertFalse(guard.tryAcquire(delta, "replica-b-derived-state"));
+        assertFalse(guard.tryAcquire(
+                conflicting, "replica-b-derived-state"));
         assertEquals(1.0d, registry.find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
                 .tag("result", "replica_payload_divergence").counter().count());
         assertEquals(1.0d, registry.find("replica_payload_divergence_total")
+                .tag("delta_type", "close").counter().count());
+        assertTrue(jdbc.updateSql.stream().anyMatch(sql ->
+                        sql.contains("hyperliquid_replica_payload_conflict")),
+                "a replica conflict must preserve durable evidence for reconciliation");
+        assertTrue(jdbc.updateArgs.stream().anyMatch(args ->
+                        java.util.Arrays.asList(args).contains("UNRESOLVED")),
+                "the conflicting identity must remain visibly unresolved");
+    }
+
+    @Test
+    void replicaLocalDedupeAndPositionKeysDoNotCreateEconomicDivergence() {
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestIdempotencyGuard guard =
+                guard(jdbc, registry, false);
+        HyperliquidMappedDelta first =
+                delta("same-source-key", "BTCUSDT");
+        HyperliquidMappedDelta second = new HyperliquidMappedDelta(
+                first.idempotencyKey(),
+                "another-replica-local-position-key",
+                first.wallet(),
+                first.symbol(),
+                first.side(),
+                first.deltaType(),
+                first.event(),
+                first.request());
+
+        assertTrue(guard.tryAcquire(first, "replica-a-dedupe"));
+        assertFalse(guard.tryAcquire(second, "replica-b-dedupe"));
+        assertNotNull(registry
+                .find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
+                .tag("result", "duplicate")
+                .counter());
+        assertEquals(0.0d, registry.find("replica_payload_divergence_total")
+                .tag("delta_type", "open").counter() == null
+                ? 0.0d
+                : registry.find("replica_payload_divergence_total")
                 .tag("delta_type", "open").counter().count());
     }
 
@@ -107,6 +154,32 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
                 .tag("result", "duplicate").counter();
         assertNotNull(duplicate, "replica-local eventId must not create a semantic divergence");
         assertEquals(1.0d, duplicate.count());
+    }
+
+    @Test
+    void replicaLocalSnapshotAndWalletVersionsDoNotChangeEconomicFingerprint() {
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestIdempotencyGuard guard =
+                guard(jdbc, registry, false);
+
+        assertTrue(guard.tryAcquire(
+                deltaWithLocalVersions("replica-a", 57L, 318L),
+                "same-economic-payload"));
+        assertFalse(guard.tryAcquire(
+                deltaWithLocalVersions("replica-b", 91L, 444L),
+                "same-economic-payload"));
+
+        assertNotNull(registry
+                        .find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
+                        .tag("result", "duplicate")
+                        .counter(),
+                "replica-local versions are transport evidence, not economic semantics");
+        assertEquals(0.0d, registry.find("replica_payload_divergence_total")
+                .tag("delta_type", "resize").counter() == null
+                ? 0.0d
+                : registry.find("replica_payload_divergence_total")
+                .tag("delta_type", "resize").counter().count());
     }
 
     @Test
@@ -185,6 +258,14 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
     }
 
     private static HyperliquidMappedDelta deltaWithEventId(String eventId) {
+        return deltaWithLocalVersions(eventId, 57L, 318L);
+    }
+
+    private static HyperliquidMappedDelta deltaWithLocalVersions(
+            String eventId,
+            long walletVersion,
+            long snapshotVersion
+    ) {
         var request = new com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest(
                 eventId,
                 "same-source-key",
@@ -216,8 +297,8 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
                 1784740813038L,
                 Instant.parse("2026-07-22T17:20:13.446Z"),
                 Instant.parse("2026-07-22T17:20:13.447Z"),
-                57L,
-                318L,
+                walletVersion,
+                snapshotVersion,
                 "wallet|HYPEUSDT|RESIZE|1784740813038|HYPE|867848868617277|hash",
                 "trade-sanitized-b001",
                 true
@@ -256,7 +337,10 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
         private String storedWallet;
         private String storedSymbol;
         private Long storedSourceTs;
+        private String storedFirstPayload;
         private String acquireSql;
+        private final List<String> updateSql = new ArrayList<>();
+        private final List<Object[]> updateArgs = new ArrayList<>();
         private RuntimeException failure;
 
         private FakeJdbcTemplate(Long... results) {
@@ -273,6 +357,7 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
                 storedWallet = String.valueOf(args[3]);
                 storedSymbol = String.valueOf(args[4]);
                 storedSourceTs = args[7] instanceof Number number ? number.longValue() : null;
+                storedFirstPayload = String.valueOf(args[9]);
             }
             return requiredType.cast(result);
         }
@@ -284,11 +369,13 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
                 Class<?> claimType = Class.forName(
                         HyperliquidDirectIngestIdempotencyGuard.class.getName() + "$ExistingClaim");
                 Constructor<?> constructor = claimType.getDeclaredConstructor(
-                        String.class, String.class, boolean.class, String.class, String.class, Long.class);
+                        String.class, String.class, boolean.class, String.class,
+                        String.class, Long.class, String.class);
                 constructor.setAccessible(true);
                 return List.of((T) constructor.newInstance(
                         storedFingerprint, "PROCESSED", false,
-                        storedWallet, storedSymbol, storedSourceTs));
+                        storedWallet, storedSymbol, storedSourceTs,
+                        storedFirstPayload));
             } catch (ReflectiveOperationException ex) {
                 throw new AssertionError(ex);
             }
@@ -296,6 +383,8 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
 
         @Override
         public int update(String sql, Object... args) {
+            updateSql.add(sql);
+            updateArgs.add(args);
             return 1;
         }
     }
