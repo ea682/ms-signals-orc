@@ -55,6 +55,7 @@ public record MetricMovementPersistedEvent(
         String executionPriceBasis,
         String notionalBasis,
         List<String> lifecycleQualityFlags,
-        Boolean sourceEstimated
+        Boolean sourceEstimated,
+        String sourceEconomicFingerprint
 ) {
 }

@@ -58,6 +58,7 @@ public record HyperliquidDeltaRequest(
         String notionalBasis,
         List<String> lifecycleQualityFlags,
         Boolean sourceEstimated,
+        String economicFingerprint,
         BigDecimal sourceAccountEquityUsd,
         Instant equityObservedAt,
         String equitySource,
@@ -118,7 +119,7 @@ public record HyperliquidDeltaRequest(
                 effectiveCloseQty, effectiveEntryPrice, effectiveExitPrice, effectiveRealizedPnlUsd,
                 normalizationStatus, normalizationReason, sourceTs, detectedAt, publishedAt, walletVersion,
                 snapshotVersion, externalId, rawReference, estimated, null, null, null, null, null, null,
-                null, null, List.of(), null, null, null, null, null, null, null, null, null, null, null,
+                null, null, List.of(), null, null, null, null, null, null, null, null, null, null, null, null,
                 null, null, List.of(), null, null
         );
     }

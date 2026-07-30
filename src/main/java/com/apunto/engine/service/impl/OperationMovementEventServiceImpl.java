@@ -239,17 +239,92 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                 "sourceCategory", safeTag(entitySourceCategory),
                 "metricEligible", String.valueOf(entityMetricEligible)
         ).increment();
+        String economicBasisStatus = economicBasisStatus(entity);
+        recordEconomicBasisMetrics(entity, economicBasisStatus);
         meterRegistry.timer("signals.operation_movement_event.persist.duration", "result", "ok", "eventType", safeTag(entity.getEventType()))
                 .record(Duration.ofNanos(System.nanoTime() - startedNs));
         String ledgerDiagnostic = entity.getReasonCode() == null ? "" : CopyLogAdvice.fields(
                 entity.getReasonCode(),
                 CopyLogAdvice.context(entity.getCopyEligibleUsers(), entity.getCopyEligibleUsers(), entity.getCopySubmittedTasks(), entity.getCopyBusinessSkipped(), queue.size(), null, null, "operation_movement_event")
         );
-        log.info("event=operation_movement_event.insert_ok category=audit reasonAlias=origin_movement_recorded friendlyReason=historial_de_operacion_actualizado explanation=se_guardo_el_movimiento_para_auditoria_y_etl copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} side={} eventType={} deltaType={} source={} sourceCategory={} metricEligible={} metricDecisionUse={} reasonCode={} previousSizeQty={} resultingSizeQty={} deltaSizeQty={} realizedPnlUsd={} copyEligibleUsers={} copySubmittedTasks={} copyBusinessSkipped={} queueDelayMs={} elapsedMs={} queueDepth={} {}",
+        log.info("event=operation_movement_event.insert_ok category=audit reasonAlias=origin_movement_recorded friendlyReason=historial_de_operacion_actualizado explanation=se_guardo_el_movimiento_para_auditoria_y_etl copyImpact=copy_not_blocked traceId={} originId={} wallet={} symbol={} side={} eventType={} deltaType={} source={} sourceCategory={} metricEligible={} metricDecisionUse={} reasonCode={} previousSizeQty={} resultingSizeQty={} deltaSizeQty={} realizedPnlUsd={} economicEventKind={} economicBasisStatus={} effectiveCloseQty={} effectiveExitPrice={} sourceEventId={} sourceSequence={} sourceEconomicFingerprint={} copyEligibleUsers={} copySubmittedTasks={} copyBusinessSkipped={} queueDelayMs={} elapsedMs={} queueDepth={} {}",
                 safe(entity.getTraceId()), safe(asString(entity.getIdOrderOrigin())), safe(entity.getIdWalletOrigin()), safe(entity.getParsymbol()), safe(entity.getTypeOperation()),
                 safe(entity.getEventType()), safe(entity.getDeltaType()), entitySource, entitySourceCategory, entityMetricEligible, metricDecisionUse(entity.getSource()), safe(entity.getReasonCode()),
                 entity.getPreviousSizeQty(), entity.getResultingSizeQty(), entity.getDeltaSizeQty(), entity.getRealizedPnlUsd(),
+                safe(entity.getEconomicEventKind()), economicBasisStatus,
+                entity.getEffectiveCloseQty(), entity.getEffectiveExitPrice(),
+                safe(entity.getSourceEventId()), entity.getSourceSequence(),
+                safe(sourceEconomicFingerprint(entity)),
                 entity.getCopyEligibleUsers(), entity.getCopySubmittedTasks(), entity.getCopyBusinessSkipped(), elapsedMs(acceptedNs), elapsedMs(startedNs), queue.size(), ledgerDiagnostic);
+    }
+
+    private void recordEconomicBasisMetrics(
+            OperationMovementEventEntity entity,
+            String status
+    ) {
+        if (!isClosingEvent(entity == null ? null : entity.getEventType())) {
+            return;
+        }
+        String metric = switch (status) {
+            case "COMPLETE" -> "signals_economic_basis_complete_total";
+            case "AMBIGUOUS" -> "signals_economic_basis_ambiguous_total";
+            default -> "signals_economic_basis_missing_total";
+        };
+        meterRegistry.counter(metric).increment();
+        if (!positiveValue(entity.getEffectiveExitPrice())) {
+            meterRegistry.counter(
+                    "signals_movement_event_missing_price_total").increment();
+        }
+        if (!positiveValue(entity.getEffectiveCloseQty())) {
+            meterRegistry.counter(
+                    "signals_movement_event_missing_quantity_total").increment();
+        }
+        if (!StringUtils.hasText(entity.getSourceEventId())
+                || entity.getSourceSequence() == null
+                || entity.getSourceSequence() <= 0L) {
+            meterRegistry.counter(
+                    "signals_movement_event_missing_source_identity_total")
+                    .increment();
+        }
+    }
+
+    private String economicBasisStatus(OperationMovementEventEntity entity) {
+        if (entity == null || !isClosingEvent(entity.getEventType())) {
+            return "NOT_APPLICABLE";
+        }
+        boolean userFill = "USER_FILL".equalsIgnoreCase(
+                entity.getEconomicEventKind())
+                && Boolean.FALSE.equals(entity.getSourceEstimated());
+        if (!userFill) {
+            return "MISSING_AUTHORITATIVE_FILL";
+        }
+        boolean complete = positiveValue(entity.getEffectiveCloseQty())
+                && positiveValue(entity.getEffectiveExitPrice())
+                && StringUtils.hasText(entity.getSourceEventId())
+                && entity.getSourceSequence() != null
+                && entity.getSourceSequence() > 0L
+                && entity.getSourceTs() != null
+                && StringUtils.hasText(sourceEconomicFingerprint(entity));
+        return complete ? "COMPLETE" : "AMBIGUOUS";
+    }
+
+    private boolean positiveValue(BigDecimal value) {
+        return value != null && value.compareTo(ZERO) > 0;
+    }
+
+    private String sourceEconomicFingerprint(
+            OperationMovementEventEntity entity
+    ) {
+        if (entity == null || entity.getRaw() == null) {
+            return null;
+        }
+        String value = entity.getRaw()
+                .path("request")
+                .path("economicFingerprint")
+                .asText(null);
+        return StringUtils.hasText(value)
+                ? value.trim().toLowerCase(Locale.ROOT)
+                : null;
     }
 
     private OperationMovementEventEntity previousMovement(OperationMovementEventRecordCommand command) {
