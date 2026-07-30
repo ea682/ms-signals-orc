@@ -130,8 +130,24 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
                 firstNonBlank(entity.getExecutionPriceBasis(), "PUBLIC_TRIGGER_TRADE_PX"),
                 firstNonBlank(entity.getNotionalBasis(), "POSITION_SNAPSHOT"),
                 lifecycleQualityFlags(entity),
-                sourceEstimated(entity)
+                sourceEstimated(entity),
+                sourceEconomicFingerprint(entity)
         );
+    }
+
+    private String sourceEconomicFingerprint(
+            OperationMovementEventEntity entity
+    ) {
+        if (entity == null || entity.getRaw() == null) {
+            return null;
+        }
+        String fingerprint = entity.getRaw()
+                .path("request")
+                .path("economicFingerprint")
+                .asText(null);
+        return StringUtils.hasText(fingerprint)
+                ? fingerprint.trim().toLowerCase(Locale.ROOT)
+                : null;
     }
 
     private Long sourceSequence(OperationMovementEventEntity entity) {

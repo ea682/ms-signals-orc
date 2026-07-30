@@ -5,6 +5,7 @@ import com.apunto.engine.shared.util.LogFmt;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -34,6 +35,7 @@ public class MetricMovementOutboxPublisher {
     private final JdbcTemplate jdbcTemplate;
     private final KafkaTemplate<Object, Object> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
 
     @Value("${metric.outbox.publisher.enabled:false}")
     private boolean enabled;
@@ -113,6 +115,10 @@ public class MetricMovementOutboxPublisher {
             String topic = topicFor(record.eventType());
             kafkaTemplate.send(topic, record.kafkaKey(), payload).get(Math.max(1000, publishTimeoutMs), TimeUnit.MILLISECONDS);
             markPublished(record.id());
+            if ("operation-movement-persisted-v1".equals(record.eventType())) {
+                meterRegistry.counter(
+                        "signals_movement_event_published_total").increment();
+            }
             return true;
         } catch (JsonProcessingException ex) {
             markFailed(record.id(), "json_processing:" + ex.getOriginalMessage());
