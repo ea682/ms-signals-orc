@@ -73,7 +73,13 @@ public record HyperliquidDeltaRequest(
         String sourceSide,
         List<HyperliquidSourcePortfolioPosition> sourcePortfolioPositions,
         Long sourcePortfolioSnapshotVersion,
-        Boolean sourcePortfolioComplete
+        Boolean sourcePortfolioComplete,
+        BigDecimal sourcePreviousPositionQuantity,
+        BigDecimal sourceResultingPositionQuantity,
+        BigDecimal sourceExecutionQuantity,
+        BigDecimal sourceSignedExecutionQuantity,
+        String sourceDeliveryMode,
+        Instant sourceRecoveredAt
 ) {
     public HyperliquidDeltaRequest(
             String eventId,
@@ -120,7 +126,7 @@ public record HyperliquidDeltaRequest(
                 normalizationStatus, normalizationReason, sourceTs, detectedAt, publishedAt, walletVersion,
                 snapshotVersion, externalId, rawReference, estimated, null, null, null, null, null, null,
                 null, null, List.of(), null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null, List.of(), null, null
+                null, null, List.of(), null, null, null, null, null, null, null, null
         );
     }
 

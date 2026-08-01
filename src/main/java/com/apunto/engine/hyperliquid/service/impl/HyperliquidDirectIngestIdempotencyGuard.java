@@ -629,7 +629,13 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 canonicalDecimal(request == null ? null : request.fundingPnlUsd()),
                 canonicalText(request == null ? null : request.executionPriceBasis()),
                 canonicalText(request == null ? null : request.notionalBasis()),
-                canonicalValue(request == null ? null : request.sourceEstimated())
+                canonicalValue(request == null ? null : request.sourceEstimated()),
+                canonicalDecimal(request == null ? null : request.sourcePreviousPositionQuantity()),
+                canonicalDecimal(request == null ? null : request.sourceResultingPositionQuantity()),
+                canonicalDecimal(request == null ? null : request.sourceExecutionQuantity()),
+                canonicalDecimal(request == null ? null : request.sourceSignedExecutionQuantity()),
+                canonicalText(request == null ? null : request.sourceDeliveryMode()),
+                canonicalValue(request == null ? null : request.sourceRecoveredAt())
         );
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
@@ -677,6 +683,18 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 request == null ? null : request.sourceSequence());
         evidence.put("sourceEstimated",
                 request == null ? null : request.sourceEstimated());
+        evidence.put("sourcePreviousPositionQuantity",
+                request == null ? null : request.sourcePreviousPositionQuantity());
+        evidence.put("sourceResultingPositionQuantity",
+                request == null ? null : request.sourceResultingPositionQuantity());
+        evidence.put("sourceExecutionQuantity",
+                request == null ? null : request.sourceExecutionQuantity());
+        evidence.put("sourceSignedExecutionQuantity",
+                request == null ? null : request.sourceSignedExecutionQuantity());
+        evidence.put("sourceDeliveryMode",
+                request == null ? null : request.sourceDeliveryMode());
+        evidence.put("sourceRecoveredAt",
+                request == null ? null : request.sourceRecoveredAt());
         evidence.put("walletVersion",
                 request == null ? null : request.walletVersion());
         evidence.put("snapshotVersion",

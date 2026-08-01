@@ -340,10 +340,10 @@ class OperationMovementEconomicNormalizationTest {
                 source.sourceSnapshotVersion(), source.sourcePositionNotionalUsd(),
                 source.sourcePositionQuantity(), source.sourceMarkPrice(),
                 source.sourceEntryPrice(), source.sourceLeverage(),
-                source.sourceSide(), source.sourcePortfolioPositions(),
-                source.sourcePortfolioSnapshotVersion(),
-                source.sourcePortfolioComplete()
-        );
+                 source.sourceSide(), source.sourcePortfolioPositions(),
+                 source.sourcePortfolioSnapshotVersion(),
+                 source.sourcePortfolioComplete(), null, null, null, null, null, null
+         );
     }
 
     @SuppressWarnings("unchecked")

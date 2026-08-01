@@ -140,4 +140,30 @@ class HyperliquidDeltaRequestV3ContractTest {
                 "hyperliquid:trade:0xabc:BTCUSDT:1710000000000|BTC|trade-77|hash-77",
                 mapped.idempotencyKey());
     }
+
+    @Test
+    void deserializesAuthoritativeUserFillBeforeAfterAndDeliveryContract() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        HyperliquidDeltaRequest request = mapper.readValue("""
+                {
+                  "deltaType":"RESIZE",
+                  "wallet":"0xabc",
+                  "symbol":"BTCUSDT",
+                  "side":"LONG",
+                  "sourcePreviousPositionQuantity":10,
+                  "sourceResultingPositionQuantity":8,
+                  "sourceExecutionQuantity":2,
+                  "sourceSignedExecutionQuantity":-2,
+                  "sourceDeliveryMode":"GAP_RECOVERY",
+                  "sourceRecoveredAt":"2026-08-01T12:00:00Z"
+                }
+                """, HyperliquidDeltaRequest.class);
+
+        assertEquals(0, new BigDecimal("10").compareTo(request.sourcePreviousPositionQuantity()));
+        assertEquals(0, new BigDecimal("8").compareTo(request.sourceResultingPositionQuantity()));
+        assertEquals(0, new BigDecimal("2").compareTo(request.sourceExecutionQuantity()));
+        assertEquals(0, new BigDecimal("-2").compareTo(request.sourceSignedExecutionQuantity()));
+        assertEquals("GAP_RECOVERY", request.sourceDeliveryMode());
+        assertEquals(Instant.parse("2026-08-01T12:00:00Z"), request.sourceRecoveredAt());
+    }
 }

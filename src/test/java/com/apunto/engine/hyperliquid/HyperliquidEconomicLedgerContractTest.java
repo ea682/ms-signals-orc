@@ -26,7 +26,9 @@ class HyperliquidEconomicLedgerContractTest {
     private static final Set<String> FIELDS = Set.of(
             "economicEventKind", "economicEventVersion", "sourceEventId", "sourceSequence",
             "sourceFeeUsd", "fundingPnlUsd", "executionPriceBasis", "notionalBasis",
-            "lifecycleQualityFlags", "sourceEstimated"
+            "lifecycleQualityFlags", "sourceEstimated", "sourcePreviousPositionQuantity",
+            "sourceResultingPositionQuantity", "sourceExecutionQuantity",
+            "sourceSignedExecutionQuantity", "sourceDeliveryMode", "sourceRecoveredAt"
     );
 
     @Test
@@ -63,6 +65,22 @@ class HyperliquidEconomicLedgerContractTest {
         assertNull(jdbcType, "String[] uses the PostgreSQL dialect's native ARRAY mapping");
         assertNotNull(column);
         assertEquals("", column.columnDefinition(), "Flyway owns the PostgreSQL text[] DDL");
+    }
+
+    @Test
+    void forwardOnlyMigrationPersistsAuthoritativeFillStateAndEligibility() throws IOException {
+        String resource = "/db/migration/V202608010001__hyperliquid_authoritative_fill_state_contract.sql";
+        var stream = getClass().getResourceAsStream(resource);
+        assertNotNull(stream, "authoritative fill state migration must exist");
+        String sql = new String(stream.readAllBytes(), StandardCharsets.UTF_8).toLowerCase();
+        for (String column : Set.of(
+                "source_previous_position_quantity", "source_resulting_position_quantity",
+                "source_execution_quantity", "source_signed_execution_quantity",
+                "source_delivery_mode", "source_recovered_at", "economic_basis_status",
+                "metric_eligible")) {
+            assertTrue(sql.contains(column), () -> "migration is missing " + column);
+        }
+        assertTrue(sql.contains("add column if not exists"));
     }
 
     private void assertRecordFields(Class<?> type) {

@@ -59,6 +59,12 @@ public class OperationMovementEventRecordCommand {
     private String notionalBasis;
     private List<String> lifecycleQualityFlags;
     private Boolean sourceEstimated;
+    private BigDecimal sourcePreviousPositionQuantity;
+    private BigDecimal sourceResultingPositionQuantity;
+    private BigDecimal sourceExecutionQuantity;
+    private BigDecimal sourceSignedExecutionQuantity;
+    private String sourceDeliveryMode;
+    private OffsetDateTime sourceRecoveredAt;
     private Long walletVersion;
     private Long snapshotVersion;
     private OffsetDateTime sourceTs;
