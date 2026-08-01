@@ -108,6 +108,47 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
     }
 
     @Test
+    void historicalReplayIsAuditedWithoutShadowOrLiveDispatch() throws Exception {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestProperties properties = new HyperliquidDirectIngestProperties();
+        properties.setEnabled(true);
+        properties.setWorkerThreads(1);
+        properties.setQueueCapacity(16);
+        properties.setDedupeEnabled(false);
+        properties.setDistributedDedupeEnabled(false);
+
+        CapturingDispatch dispatch = new CapturingDispatch();
+        CapturingMovementLedger movementLedger = new CapturingMovementLedger();
+        CapturingShadow shadow = new CapturingShadow();
+        HyperliquidOriginPositionStoreService originStore = originStore(registry);
+        HyperliquidDirectDeltaIngestServiceImpl service = new HyperliquidDirectDeltaIngestServiceImpl(
+                properties,
+                dispatch,
+                new HyperliquidDirectIngestIdempotencyGuard(properties, new JdbcTemplate(), registry),
+                originStore,
+                movementLedger,
+                shadow,
+                registry,
+                false,
+                16,
+                1,
+                0L,
+                100L);
+        service.start();
+        try {
+            service.accept(historicalReplay());
+            awaitAtLeast(movementLedger.calls, 1);
+
+            assertEquals(0, dispatch.calls.get());
+            assertEquals(0, shadow.calls.get());
+            assertEquals("HISTORICAL_REPLAY_AUDIT_ONLY", movementLedger.lastReason.get());
+        } finally {
+            service.stop();
+            originStore.stop();
+        }
+    }
+
+    @Test
     void adjustmentDedupeKeyIgnoresNoisyIdempotencyKeyWhenSourceStateIsTheSame() {
         HyperliquidMappedDelta first = mappedAdjustment("idempotency-a", "RESIZE", "100.0000", "4210.600", 1778905103699L);
         HyperliquidMappedDelta second = mappedAdjustment("idempotency-b", "RESIZE", "100.0", "4210.6000", 1778905103699L);
@@ -200,6 +241,22 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
             JsonNode root = mapper.readTree(fixture);
             HyperliquidDeltaRequest request = mapper.treeToValue(
                     root.get("request"), HyperliquidDeltaRequest.class);
+            return new HyperliquidDeltaOperacionMapper().map(request, request.idempotencyKey());
+        }
+    }
+
+    private HyperliquidMappedDelta historicalReplay() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        try (InputStream fixture = getClass().getResourceAsStream(
+                "/fixtures/production/anomaly-d-incomplete-flip.json")) {
+            assertNotNull(fixture);
+            JsonNode root = mapper.readTree(fixture);
+            var requestNode = (com.fasterxml.jackson.databind.node.ObjectNode) root.get("request");
+            requestNode.put("economicEventKind", "USER_FILL");
+            requestNode.put("sourceEstimated", false);
+            requestNode.put("sourceDeliveryMode", "HISTORICAL_REPLAY");
+            HyperliquidDeltaRequest request = mapper.treeToValue(
+                    requestNode, HyperliquidDeltaRequest.class);
             return new HyperliquidDeltaOperacionMapper().map(request, request.idempotencyKey());
         }
     }

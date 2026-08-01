@@ -420,6 +420,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                 blockFlipWithoutExecutionBasis(task, mapped, flipBasis, startedNs);
                 return;
             }
+            if (isHistoricalReplay(mapped)) {
+                persistHistoricalReplayAuditOnly(task, mapped, startedNs);
+                return;
+            }
             copyReady = originPositionStoreService.bindOriginIdForCopy(mapped);
             MDC.put("traceId", originTraceId(copyReady));
             ShadowEnqueueResult shadowEnqueue = enqueueShadowBeforeLive(copyReady, task.acceptedNs());
@@ -817,6 +821,45 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                 safeLog(mapped.request() == null ? null : mapped.request().economicEventKind()),
                 mapped.request() == null ? null : mapped.request().sourceEstimated(),
                 safeLog(decision.reason()),
+                elapsedMs(task.acceptedNs()),
+                elapsedMs(startedNs),
+                queueDepth());
+    }
+
+    private boolean isHistoricalReplay(HyperliquidMappedDelta mapped) {
+        return mapped != null
+                && mapped.request() != null
+                && "HISTORICAL_REPLAY".equalsIgnoreCase(
+                mapped.request().sourceDeliveryMode());
+    }
+
+    private void persistHistoricalReplayAuditOnly(
+            QueuedDelta task,
+            HyperliquidMappedDelta mapped,
+            long startedNs
+    ) {
+        String reasonCode = "HISTORICAL_REPLAY_AUDIT_ONLY";
+        HyperliquidDirectCopyDispatchResult blocked = HyperliquidDirectCopyDispatchResult.ok(
+                0, 0, 1, 0, false, reasonCode);
+        operationMovementEventService.recordAsync(mapped, blocked, reasonCode);
+        idempotencyGuard.markProcessed(mapped, reasonCode);
+        processed.incrementAndGet();
+        meterRegistry.counter(
+                "signals.hyperliquid.direct_ingest.audit_only.total",
+                "deliveryMode", "HISTORICAL_REPLAY"
+        ).increment();
+        meterRegistry.timer(
+                "signals.hyperliquid.direct_ingest.process.duration",
+                Tags.of("result", "audit_only", "deltaType", safeTag(mapped.deltaType()))
+        ).record(Duration.ofNanos(System.nanoTime() - startedNs));
+        log.info("event=hyperliquid.direct_ingest.audit_only reasonCode={} decision=NO_SHADOW_NO_LIVE auditLedger=true copyImpact=BLOCKED_BY_DELIVERY_MODE idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} sourceDeliveryMode=HISTORICAL_REPLAY queueDelayMs={} elapsedMs={} queueDepth={}",
+                reasonCode,
+                safeLog(mapped.idempotencyKey()),
+                safeLog(mapped.positionKey()),
+                safeLog(mapped.wallet()),
+                safeLog(mapped.symbol()),
+                safeLog(mapped.side()),
+                safeLog(mapped.deltaType()),
                 elapsedMs(task.acceptedNs()),
                 elapsedMs(startedNs),
                 queueDepth());

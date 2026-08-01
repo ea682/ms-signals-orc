@@ -183,6 +183,49 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
     }
 
     @Test
+    void twoReplicasProduceTheSameAuthoritativeStateFingerprint() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        var request = mapper.readValue("""
+                {
+                  "idempotencyKey":"hyperliquid:trade:0xabc:991",
+                  "deltaType":"RESIZE",
+                  "wallet":"0xabc",
+                  "symbol":"BTCUSDT",
+                  "side":"LONG",
+                  "status":"OPEN",
+                  "sourceTs":1785585600000,
+                  "economicEventKind":"USER_FILL",
+                  "sourceSequence":991,
+                  "sourceEstimated":false,
+                  "sourcePreviousPositionQuantity":10,
+                  "sourceResultingPositionQuantity":8,
+                  "sourceExecutionQuantity":2,
+                  "sourceSignedExecutionQuantity":-2,
+                  "sourceDeliveryMode":"LIVE_USER_FILL"
+                }
+                """, com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest.class);
+        HyperliquidMappedDelta first = new HyperliquidMappedDelta(
+                request.idempotencyKey(), "replica-a-position", request.wallet(), request.symbol(),
+                request.side(), request.deltaType(), null, request);
+        HyperliquidMappedDelta second = new HyperliquidMappedDelta(
+                request.idempotencyKey(), "replica-b-position", request.wallet(), request.symbol(),
+                request.side(), request.deltaType(), null, request);
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestIdempotencyGuard guard = guard(jdbc, registry, false);
+
+        assertTrue(guard.tryAcquire(first, "replica-a-local-dedupe"));
+        assertFalse(guard.tryAcquire(second, "replica-b-local-dedupe"));
+        assertNotNull(registry.find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
+                .tag("result", "duplicate").counter());
+        assertEquals(0.0d, registry.find("replica_payload_divergence_total")
+                .tag("delta_type", "resize").counter() == null
+                ? 0.0d
+                : registry.find("replica_payload_divergence_total")
+                .tag("delta_type", "resize").counter().count());
+    }
+
+    @Test
     void expiredOrFailedLeaseCanBeReacquiredOnlyForSamePayload() {
         FakeJdbcTemplate jdbc = new FakeJdbcTemplate(2L);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();

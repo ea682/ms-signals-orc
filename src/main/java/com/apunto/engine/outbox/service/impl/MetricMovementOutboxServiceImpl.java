@@ -92,8 +92,8 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
                 upper(entity.getStatus()),
                 sourceForLog(entity.getSource()),
                 sourceCategory(entity.getSource()),
-                metricEligible(entity.getSource()),
-                metricDecisionUse(entity.getSource()),
+                metricEligible(entity),
+                metricDecisionUse(entity),
                 entity.getEventTime(),
                 entity.getDateCreation(),
                 entity.getPreviousSizeQty(),
@@ -131,7 +131,14 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
                 firstNonBlank(entity.getNotionalBasis(), "POSITION_SNAPSHOT"),
                 lifecycleQualityFlags(entity),
                 sourceEstimated(entity),
-                sourceEconomicFingerprint(entity)
+                sourceEconomicFingerprint(entity),
+                entity.getSourcePreviousPositionQuantity(),
+                entity.getSourceResultingPositionQuantity(),
+                entity.getSourceExecutionQuantity(),
+                entity.getSourceSignedExecutionQuantity(),
+                entity.getSourceDeliveryMode(),
+                entity.getSourceRecoveredAt(),
+                firstNonBlank(entity.getEconomicBasisStatus(), "NOT_APPLICABLE")
         );
     }
 
@@ -235,12 +242,18 @@ public class MetricMovementOutboxServiceImpl implements MetricMovementOutboxServ
     private static final String SOURCE_COPY_JOB_INGEST = "copy_job_ingest";
     private static final String SOURCE_OPERATION_EVENT_INGEST = "operation_event_ingest";
 
-    private boolean metricEligible(String source) {
-        return SOURCE_DIRECT_INGEST.equals(sourceForLog(source));
+    private boolean metricEligible(OperationMovementEventEntity entity) {
+        if (entity == null
+                || !SOURCE_DIRECT_INGEST.equals(sourceForLog(entity.getSource()))
+                || !Boolean.TRUE.equals(entity.getMetricEligible())
+                || !"COMPLETE".equalsIgnoreCase(entity.getEconomicBasisStatus())) {
+            return false;
+        }
+        return !"HISTORICAL_REPLAY".equalsIgnoreCase(entity.getSourceDeliveryMode());
     }
 
-    private String metricDecisionUse(String source) {
-        return metricEligible(source) ? "eligible_for_joyas_and_wallet_metrics" : "audit_only_excluded_from_joyas";
+    private String metricDecisionUse(OperationMovementEventEntity entity) {
+        return metricEligible(entity) ? "eligible_for_joyas_and_wallet_metrics" : "audit_only_excluded_from_joyas";
     }
 
     private String sourceCategory(String source) {
