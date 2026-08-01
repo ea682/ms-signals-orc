@@ -15,6 +15,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.math.BigDecimal;
+import java.net.URI;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -37,6 +39,11 @@ class OperationMovementEventPostgresArrayIntegrationTest {
         jdbcUrl = System.getProperty("copy.postgres.test.jdbc-url");
         externalDatabase = jdbcUrl != null && !jdbcUrl.isBlank();
         if (externalDatabase) {
+            URI uri = URI.create(jdbcUrl.replaceFirst("^jdbc:", ""));
+            if (!"127.0.0.1".equals(uri.getHost())
+                    && !"localhost".equalsIgnoreCase(uri.getHost())) {
+                throw new IllegalStateException("PostgreSQL integration test refuses non-local host: " + uri.getHost());
+            }
             username = System.getProperty("copy.postgres.test.username");
             password = System.getProperty("copy.postgres.test.password");
         } else {
@@ -58,10 +65,8 @@ class OperationMovementEventPostgresArrayIntegrationTest {
         try (Connection connection = DriverManager.getConnection(
                 jdbcUrl, username, password);
              Statement statement = connection.createStatement()) {
-            if (!externalDatabase) {
-                statement.execute("create schema futuros_operaciones");
-                statement.execute(CREATE_MOVEMENT_TABLE);
-            }
+            statement.execute("create schema if not exists futuros_operaciones");
+            statement.execute(CREATE_MOVEMENT_TABLE);
         }
 
         registry = new StandardServiceRegistryBuilder()
@@ -98,6 +103,14 @@ class OperationMovementEventPostgresArrayIntegrationTest {
                 .eventType("OPEN")
                 .deltaType("OPEN")
                 .lifecycleQualityFlags(expected.toArray(String[]::new))
+                .sourcePreviousPositionQuantity(new BigDecimal("10"))
+                .sourceResultingPositionQuantity(new BigDecimal("8"))
+                .sourceExecutionQuantity(new BigDecimal("2"))
+                .sourceSignedExecutionQuantity(new BigDecimal("-2"))
+                .sourceDeliveryMode("LIVE_USER_FILL")
+                .sourceRecoveredAt(now)
+                .economicBasisStatus("COMPLETE")
+                .metricEligible(true)
                 .eventTime(now)
                 .dateCreation(now)
                 .build();
@@ -112,6 +125,12 @@ class OperationMovementEventPostgresArrayIntegrationTest {
 
                 OperationMovementEventEntity loaded = session.find(OperationMovementEventEntity.class, eventId);
                 assertEquals(expected, List.of(loaded.getLifecycleQualityFlags()));
+                assertEquals(0, new BigDecimal("10").compareTo(loaded.getSourcePreviousPositionQuantity()));
+                assertEquals(0, new BigDecimal("8").compareTo(loaded.getSourceResultingPositionQuantity()));
+                assertEquals(0, new BigDecimal("-2").compareTo(loaded.getSourceSignedExecutionQuantity()));
+                assertEquals("LIVE_USER_FILL", loaded.getSourceDeliveryMode());
+                assertEquals("COMPLETE", loaded.getEconomicBasisStatus());
+                assertEquals(Boolean.TRUE, loaded.getMetricEligible());
             } finally {
                 transaction.rollback();
             }
@@ -119,7 +138,7 @@ class OperationMovementEventPostgresArrayIntegrationTest {
     }
 
     private static final String CREATE_MOVEMENT_TABLE = """
-            create table futuros_operaciones.operation_movement_event (
+            create table if not exists futuros_operaciones.operation_movement_event (
                 id_event uuid primary key,
                 id_order_origin uuid not null,
                 movement_key varchar(600) not null,
@@ -147,6 +166,12 @@ class OperationMovementEventPostgresArrayIntegrationTest {
                 source_fee_usd numeric(38,18), funding_pnl_usd numeric(38,18),
                 execution_price_basis varchar(80), notional_basis varchar(80),
                 lifecycle_quality_flags text[], source_estimated boolean,
+                source_previous_position_quantity numeric(38,18),
+                source_resulting_position_quantity numeric(38,18),
+                source_execution_quantity numeric(38,18),
+                source_signed_execution_quantity numeric(38,18),
+                source_delivery_mode varchar(40), source_recovered_at timestamptz,
+                economic_basis_status varchar(40), metric_eligible boolean,
                 wallet_version bigint, snapshot_version bigint,
                 source_ts timestamptz, detected_at timestamptz, published_at timestamptz,
                 event_time timestamptz not null, trace_id varchar(128), source varchar(80),

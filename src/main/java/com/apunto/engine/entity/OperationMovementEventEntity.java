@@ -160,6 +160,30 @@ public class OperationMovementEventEntity {
     @Column(name = "source_estimated")
     private Boolean sourceEstimated;
 
+    @Column(name = "source_previous_position_quantity", precision = 38, scale = 18)
+    private BigDecimal sourcePreviousPositionQuantity;
+
+    @Column(name = "source_resulting_position_quantity", precision = 38, scale = 18)
+    private BigDecimal sourceResultingPositionQuantity;
+
+    @Column(name = "source_execution_quantity", precision = 38, scale = 18)
+    private BigDecimal sourceExecutionQuantity;
+
+    @Column(name = "source_signed_execution_quantity", precision = 38, scale = 18)
+    private BigDecimal sourceSignedExecutionQuantity;
+
+    @Column(name = "source_delivery_mode", length = 40)
+    private String sourceDeliveryMode;
+
+    @Column(name = "source_recovered_at", columnDefinition = "timestamp with time zone")
+    private OffsetDateTime sourceRecoveredAt;
+
+    @Column(name = "economic_basis_status", length = 40)
+    private String economicBasisStatus;
+
+    @Column(name = "metric_eligible")
+    private Boolean metricEligible;
+
     @Column(name = "wallet_version")
     private Long walletVersion;
 

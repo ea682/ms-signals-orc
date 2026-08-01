@@ -105,6 +105,17 @@ class AuthoritativeEconomicBasisPropagationTest {
                     kafkaPayload.path("sourceSequence").longValue());
             assertEquals(fixture.path("economicFingerprint").asText(),
                     kafkaPayload.path("sourceEconomicFingerprint").asText());
+            assertEquals(0, kafkaPayload.path("sourcePreviousPositionQuantity").decimalValue()
+                    .compareTo(fixture.path("sourcePreviousPositionQuantity").decimalValue()));
+            assertEquals(0, kafkaPayload.path("sourceResultingPositionQuantity").decimalValue()
+                    .compareTo(fixture.path("sourceResultingPositionQuantity").decimalValue()));
+            assertEquals(0, kafkaPayload.path("sourceExecutionQuantity").decimalValue()
+                    .compareTo(fixture.path("sourceExecutionQuantity").decimalValue()));
+            assertEquals(0, kafkaPayload.path("sourceSignedExecutionQuantity").decimalValue()
+                    .compareTo(fixture.path("sourceSignedExecutionQuantity").decimalValue()));
+            assertEquals("LIVE_USER_FILL", kafkaPayload.path("sourceDeliveryMode").asText());
+            assertEquals("COMPLETE", kafkaPayload.path("economicBasisStatus").asText());
+            assertTrue(kafkaPayload.path("metricEligible").asBoolean());
             serializedEvents.add(kafkaEvent);
         }
         writeB2bPayloadWhenRequested(serializedEvents);
@@ -118,6 +129,13 @@ class AuthoritativeEconomicBasisPropagationTest {
                 .collect(Collectors.toSet());
 
         assertTrue(components.contains("sourceEconomicFingerprint"));
+        assertTrue(components.contains("sourcePreviousPositionQuantity"));
+        assertTrue(components.contains("sourceResultingPositionQuantity"));
+        assertTrue(components.contains("sourceExecutionQuantity"));
+        assertTrue(components.contains("sourceSignedExecutionQuantity"));
+        assertTrue(components.contains("sourceDeliveryMode"));
+        assertTrue(components.contains("sourceRecoveredAt"));
+        assertTrue(components.contains("economicBasisStatus"));
     }
 
     private void writeB2bPayloadWhenRequested(

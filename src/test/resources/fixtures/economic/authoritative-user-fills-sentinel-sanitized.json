@@ -39,7 +39,12 @@
     "notionalBasis": "EXECUTED_QTY_X_PRICE",
     "lifecycleQualityFlags": ["AUTHORITATIVE_USER_FILL"],
     "sourceEstimated": false,
-    "economicFingerprint": "50ff56fdac046412bde7ed72b865b39796a7510d7f51836ba5ce931b78e9e619"
+    "economicFingerprint": "50ff56fdac046412bde7ed72b865b39796a7510d7f51836ba5ce931b78e9e619",
+    "sourcePreviousPositionQuantity": 2.0,
+    "sourceResultingPositionQuantity": 1.5,
+    "sourceExecutionQuantity": 0.5,
+    "sourceSignedExecutionQuantity": -0.5,
+    "sourceDeliveryMode": "LIVE_USER_FILL"
   },
   {
     "eventId": "f0000000-0000-0000-0000-000000000104",
@@ -80,6 +85,11 @@
     "notionalBasis": "EXECUTED_QTY_X_PRICE",
     "lifecycleQualityFlags": ["AUTHORITATIVE_USER_FILL"],
     "sourceEstimated": false,
-    "economicFingerprint": "f9d7ac3c750a1fc39addaf1ecea77a9afc1dec6b891f51023ee102ce720b9ac5"
+    "economicFingerprint": "f9d7ac3c750a1fc39addaf1ecea77a9afc1dec6b891f51023ee102ce720b9ac5",
+    "sourcePreviousPositionQuantity": 1.5,
+    "sourceResultingPositionQuantity": 0,
+    "sourceExecutionQuantity": 1.5,
+    "sourceSignedExecutionQuantity": -1.5,
+    "sourceDeliveryMode": "LIVE_USER_FILL"
   }
 ]
