@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -31,6 +32,7 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import java.util.function.BiFunction;
 
 @Component
 @Slf4j
@@ -156,9 +158,11 @@ public class MetricV2SnapshotStore {
         long started = System.nanoTime();
         try {
             Snapshot before = current.get();
-            List<MetricStrategySnapshotDto> summary = fetch(
+            List<MetricStrategySnapshotDto> summary = fetchWalletPages(
                     "summary",
-                    () -> client.metricStrategySnapshots(summaryLimit, historyDays, "summary")
+                    summaryLimit,
+                    (limit, offset) -> client.metricStrategySnapshotsPage(
+                            limit, offset, historyDays, "summary")
             );
             Map<String, MetricStrategySnapshotDto> summaryByKey = validateAndIndex(
                     summary,
@@ -170,26 +174,18 @@ public class MetricV2SnapshotStore {
                     && !before.walletGenerations().equals(nextWalletGenerations);
             boolean candidateSetChanged = !before.summaryByKey().keySet().equals(summaryByKey.keySet());
             Instant now = Instant.now();
-            boolean refreshFull = before.fullByKey().isEmpty()
-                    || generationChanged
-                    || candidateSetChanged
-                    || olderThan(before.fullFetchedAt(), fullRefreshAfter, now);
             boolean refreshGuard = before.guardByKey().isEmpty()
                     || generationChanged
                     || candidateSetChanged
                     || olderThan(before.guardFetchedAt(), guardRefreshAfter, now);
 
-            Map<String, MetricStrategySnapshotDto> fullByKey = refreshFull
-                    ? validateAndIndex(fetch(
-                            "full",
-                            () -> client.metricStrategySnapshots(fullLimit, historyDays, "full")
-                    ), MetricStrategySnapshotDto.EvaluationMode.FULL, false)
-                    : before.fullByKey();
             Map<String, MetricStrategySnapshotDto> guardByKey = refreshGuard
-                    ? validateAndIndex(fetch(
+                    ? validateAndIndex(fetchWalletPages(
                             "copy_guard",
-                            () -> client.metricStrategyCopyGuardWindows(
-                                    fullLimit,
+                            fullLimit,
+                            (limit, offset) -> client.metricStrategyCopyGuardWindowsPage(
+                                    limit,
+                                    offset,
                                     historyDays,
                                     "snapshot",
                                     windows
@@ -197,18 +193,34 @@ public class MetricV2SnapshotStore {
                     ), MetricStrategySnapshotDto.EvaluationMode.FULL, true)
                     : before.guardByKey();
 
-            assertGenerationCoherence(summaryByKey, fullByKey, guardByKey);
-            Snapshot next = new Snapshot(
-                    Map.copyOf(summaryByKey),
-                    Map.copyOf(fullByKey),
-                    Map.copyOf(guardByKey),
-                    Map.copyOf(nextWalletGenerations),
-                    now,
-                    refreshFull ? now : before.fullFetchedAt(),
-                    refreshGuard ? now : before.guardFetchedAt()
-            );
-            persistence.replace(next, maxStaleness);
-            current.set(next);
+            Map<String, MetricStrategySnapshotDto> fullByKey;
+            synchronized (current) {
+                Snapshot latest = current.get();
+                fullByKey = new LinkedHashMap<>();
+                for (Map.Entry<String, MetricStrategySnapshotDto> entry : latest.fullByKey().entrySet()) {
+                    MetricStrategySnapshotDto summaryItem = summaryByKey.get(entry.getKey());
+                    MetricStrategySnapshotDto guardItem = guardByKey.get(entry.getKey());
+                    if (summaryItem != null
+                            && guardItem != null
+                            && Objects.equals(entry.getValue().getGenerationId(), summaryItem.getGenerationId())
+                            && Objects.equals(entry.getValue().getGenerationId(), guardItem.getGenerationId())) {
+                        fullByKey.put(entry.getKey(), entry.getValue());
+                    }
+                }
+
+                assertGenerationCoherence(summaryByKey, fullByKey, guardByKey);
+                Snapshot next = new Snapshot(
+                        Map.copyOf(summaryByKey),
+                        Map.copyOf(fullByKey),
+                        Map.copyOf(guardByKey),
+                        Map.copyOf(nextWalletGenerations),
+                        now,
+                        fullByKey.isEmpty() ? null : latest.fullFetchedAt(),
+                        refreshGuard ? now : latest.guardFetchedAt()
+                );
+                persistence.replace(next, maxStaleness);
+                current.set(next);
+            }
             if (generationChanged) {
                 meters.counter("signals.metric_v2.generation.change.total").increment();
                 meters.counter("signals.metric_generation.change.total").increment();
@@ -221,6 +233,42 @@ public class MetricV2SnapshotStore {
             throw ex;
         } finally {
             refreshInFlight.set(false);
+        }
+    }
+
+    public void recordExactFull(MetricStrategySnapshotDto exact) {
+        Map<String, MetricStrategySnapshotDto> validated = validateAndIndex(
+                List.of(Objects.requireNonNull(exact, "exact")),
+                MetricStrategySnapshotDto.EvaluationMode.FULL,
+                false
+        );
+        String key = exact.getStrategyKey();
+        synchronized (current) {
+            Snapshot before = current.get();
+            MetricStrategySnapshotDto summary = before.summaryByKey().get(key);
+            MetricStrategySnapshotDto guard = before.guardByKey().get(key);
+            if (summary == null || guard == null) {
+                throw contractError(key, List.of("EXACT_SUMMARY_OR_GUARD_MISSING"));
+            }
+            if (!Objects.equals(exact.getGenerationId(), summary.getGenerationId())
+                    || !Objects.equals(exact.getGenerationId(), guard.getGenerationId())) {
+                throw contractError(key, List.of("EXACT_CACHE_GENERATION_MISMATCH"));
+            }
+            Map<String, MetricStrategySnapshotDto> full = new LinkedHashMap<>(before.fullByKey());
+            full.putAll(validated);
+            Instant now = Instant.now();
+            Snapshot next = new Snapshot(
+                    before.summaryByKey(),
+                    Map.copyOf(full),
+                    before.guardByKey(),
+                    before.walletGenerations(),
+                    before.summaryFetchedAt(),
+                    now,
+                    before.guardFetchedAt()
+            );
+            assertGenerationCoherence(next.summaryByKey(), next.fullByKey(), next.guardByKey());
+            persistence.replace(next, maxStaleness);
+            current.set(next);
         }
     }
 
@@ -268,8 +316,7 @@ public class MetricV2SnapshotStore {
         }
         meters.counter("signals.metric_v2.cache.hit.total", "cache", "decision").increment();
         Instant now = Instant.now();
-        if (olderThan(snapshot.fullFetchedAt(), maxStaleness, now)
-                || olderThan(snapshot.guardFetchedAt(), maxStaleness, now)
+        if (olderThan(snapshot.guardFetchedAt(), maxStaleness, now)
                 || staleData(full, now)
                 || staleData(guard, now)) {
             return block(key, "METRIC_V2_CACHE_STALE", "snapshotOrDataAsOfExceededMaxStaleness");
@@ -349,6 +396,39 @@ public class MetricV2SnapshotStore {
         }
     }
 
+    private List<MetricStrategySnapshotDto> fetchWalletPages(
+            String type,
+            int pageSize,
+            BiFunction<Integer, Integer, List<MetricStrategySnapshotDto>> pageFetcher
+    ) {
+        return fetch(type, () -> {
+            List<MetricStrategySnapshotDto> result = new ArrayList<>();
+            int offset = 0;
+            int pages = 0;
+            while (true) {
+                List<MetricStrategySnapshotDto> page = pageFetcher.apply(pageSize, offset);
+                if (page == null) throw new IllegalStateException("METRIC_V2_NULL_PAGE:" + type);
+                pages++;
+                if (page.isEmpty()) break;
+                result.addAll(page);
+                int wallets = new LinkedHashSet<>(page.stream()
+                        .map(MetricStrategySnapshotDto::getWalletId)
+                        .toList()).size();
+                if (wallets <= 0 || wallets > pageSize) {
+                    throw new IllegalStateException("METRIC_V2_INVALID_WALLET_PAGE:" + type);
+                }
+                if (wallets < pageSize) break;
+                offset = Math.addExact(offset, wallets);
+                if (offset > 2_000_000) {
+                    throw new IllegalStateException("METRIC_V2_WALLET_PAGINATION_LIMIT:" + type);
+                }
+            }
+            log.info("event=metric_v2.{}.pagination.finished pages={} walletsOffset={} items={}",
+                    type, pages, offset, result.size());
+            return result;
+        });
+    }
+
     private Map<String, MetricStrategySnapshotDto> validateAndIndex(
             List<MetricStrategySnapshotDto> values,
             MetricStrategySnapshotDto.EvaluationMode expected,
@@ -360,6 +440,11 @@ public class MetricV2SnapshotStore {
             if (value == null) throw contractError("METRIC_V2_NULL_ITEM", List.of());
             List<String> errors = new ArrayList<>(value.contractErrors());
             if (value.getEvaluationMode() != expected) errors.add("EVALUATION_MODE_MISMATCH");
+            if (!requireWindows
+                    && expected == MetricStrategySnapshotDto.EvaluationMode.FULL
+                    && Boolean.TRUE.equals(value.getSimulationExecuted())) {
+                errors.addAll(value.institutionalFinancialContractErrors());
+            }
             if (requireWindows) {
                 if (value.getWindows() == null || !value.getWindows().keySet().containsAll(ALL_WINDOWS)) {
                     errors.add("COPY_GUARD_WINDOWS_INCOMPLETE");
@@ -384,11 +469,17 @@ public class MetricV2SnapshotStore {
             Map<String, MetricStrategySnapshotDto> guard
     ) {
         Map<String, String> summaryGeneration = generationsByWallet(summary.values());
+        if (!summary.keySet().containsAll(guard.keySet())) {
+            throw contractError("aggregate", List.of("COPY_GUARD_KEY_MISSING_FROM_SUMMARY"));
+        }
         if (!guard.keySet().containsAll(full.keySet())) {
             throw contractError("aggregate", List.of("COPY_GUARD_KEYS_MISSING_FOR_FULL"));
         }
-        if (!full.keySet().containsAll(guard.keySet())) {
-            throw contractError("aggregate", List.of("COPY_GUARD_KEYS_EXTRA_OUTSIDE_FULL"));
+        for (Map.Entry<String, MetricStrategySnapshotDto> entry : guard.entrySet()) {
+            MetricStrategySnapshotDto summaryItem = summary.get(entry.getKey());
+            if (!Objects.equals(summaryItem.getGenerationId(), entry.getValue().getGenerationId())) {
+                throw contractError(entry.getKey(), List.of("SUMMARY_GUARD_GENERATION_MISMATCH"));
+            }
         }
         for (Map.Entry<String, MetricStrategySnapshotDto> entry : full.entrySet()) {
             MetricStrategySnapshotDto fullItem = entry.getValue();

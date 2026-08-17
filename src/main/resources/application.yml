@@ -547,6 +547,12 @@ futures:
     bnb-price-cache-ttl-ms: ${FUTURES_CAPITAL_MAINTENANCE_BNB_CACHE_TTL_MS:60000}
 
 hyperliquid:
+  kafka-ingest:
+    enabled: ${HYPERLIQUID_KAFKA_INGEST_ENABLED:false}
+    topic: ${HYPERLIQUID_DELTA_KAFKA_TOPIC:hyperliquid-position-deltas}
+    group-id: ${HYPERLIQUID_DELTA_KAFKA_GROUP_ID:ms-signals-orc-hyperliquid-position-deltas-v1}
+    concurrency: ${HYPERLIQUID_KAFKA_INGEST_CONCURRENCY:1}
+    auto-offset-reset: ${HYPERLIQUID_KAFKA_INGEST_AUTO_OFFSET_RESET:latest}
   direct-ingest:
     enabled: ${HYPERLIQUID_DIRECT_INGEST_ENABLED:true}
     queue-capacity: ${HYPERLIQUID_DIRECT_INGEST_QUEUE_CAPACITY:100000}

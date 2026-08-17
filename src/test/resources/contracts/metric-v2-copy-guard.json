@@ -1,7 +1,7 @@
 [
   {
     "metricVersion": 2,
-    "sourceVersion": "wallet_metric_economic_v2",
+    "sourceVersion": "economic-event-v2",
     "generationId": "11111111-1111-4111-8111-111111111111",
     "generationStatus": "ACTIVE",
     "generationActivatedAt": "2026-07-13T10:00:00Z",
@@ -14,6 +14,9 @@
     "coveragePct": 100,
     "evidenceStatus": "PASSED",
     "factPayloadLoaded": false,
+    "simulationExecuted": false,
+    "summaryMode": false,
+    "fullMaterialized": false,
     "walletId": "0xabc",
     "strategyCode": "LONG_ONLY",
     "scopeType": "DIRECTION",
@@ -21,8 +24,8 @@
     "strategyKey": "0xabc|LONG_ONLY|DIRECTION|LONG",
     "certificationStatus": "CERTIFIED",
     "degradationState": "ACTIVE",
-    "allowNewEntries": true,
-    "decisionFinal": true,
+    "allowNewEntries": false,
+    "decisionFinal": false,
     "qualityFlags": [],
     "reasonCodes": ["COPY_GUARD_WINDOWS_OK"],
     "completeCycles": 42,
@@ -31,7 +34,7 @@
     "coverage": { "status": "COMPLETE", "complete": true },
     "unknownEconomicFields": [],
     "evaluationMode": "FULL",
-    "requiresFullSimulation": false,
+    "requiresFullSimulation": true,
     "windows": {
       "1d": { "days": 1, "mature": true, "complete": true, "cycles": 2, "pnlNetUsd": 0.8, "coveragePct": 100.0, "reasonCodes": [] },
       "3d": { "days": 3, "mature": true, "complete": true, "cycles": 5, "pnlNetUsd": 1.4, "coveragePct": 100.0, "reasonCodes": [] },

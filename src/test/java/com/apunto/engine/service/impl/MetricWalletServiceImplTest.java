@@ -887,6 +887,12 @@ class MetricWalletServiceImplTest {
             return List.of();
         }
 
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategySnapshotsPage(int limit, int offsetWallet, int dayz, String simulation) {
+            return List.of();
+        }
+
         @Override
         public List<CopyGuardWindowSnapshotDto> copyGuardWindows(int limit, int dayz, String mode, String windows) {
             return List.of();
@@ -894,6 +900,12 @@ class MetricWalletServiceImplTest {
 
         @Override
         public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindows(int limit, int dayz, String mode, String windows) {
+            return List.of();
+        }
+
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindowsPage(int limit, int offsetWallet, int dayz, String mode, String windows) {
             return List.of();
         }
 
@@ -947,6 +959,12 @@ class MetricWalletServiceImplTest {
             return List.of();
         }
 
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategySnapshotsPage(int limit, int offsetWallet, int dayz, String simulation) {
+            return List.of();
+        }
+
         @Override
         public List<CopyGuardWindowSnapshotDto> copyGuardWindows(int limit, int dayz, String mode, String windows) {
             copyGuardWindowsCalls++;
@@ -959,6 +977,12 @@ class MetricWalletServiceImplTest {
 
         @Override
         public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindows(int limit, int dayz, String mode, String windows) {
+            return List.of();
+        }
+
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindowsPage(int limit, int offsetWallet, int dayz, String mode, String windows) {
             return List.of();
         }
 

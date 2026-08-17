@@ -43,6 +43,8 @@ engine:
       provider: ${ENGINE_COPY_LOCK_PROVIDER:postgres}
 
 hyperliquid:
+  kafka-ingest:
+    enabled: ${HYPERLIQUID_KAFKA_INGEST_ENABLED:true}
   direct-ingest:
     distributed-dedupe-enabled: ${HYPERLIQUID_DIRECT_INGEST_DISTRIBUTED_DEDUPE_ENABLED:true}
     fail-open-on-dedupe-error: ${HYPERLIQUID_DIRECT_INGEST_FAIL_OPEN_ON_DEDUPE_ERROR:false}

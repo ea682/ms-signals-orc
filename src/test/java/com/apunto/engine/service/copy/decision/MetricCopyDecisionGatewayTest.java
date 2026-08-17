@@ -55,6 +55,8 @@ class MetricCopyDecisionGatewayTest {
         assertEquals("V2_MONEY_PROMOTION_DISABLED", result.getReasonCode());
         assertEquals(1, client.exactCalls);
         assertEquals(0, client.legacyCalls);
+        assertEquals(0, client.bulkFullCalls);
+        assertEquals(1, store.snapshot().fullByKey().size());
     }
 
     @Test
@@ -120,6 +122,11 @@ class MetricCopyDecisionGatewayTest {
                 .coveragePct(100.0)
                 .evidenceStatus("PASSED")
                 .factPayloadLoaded(full && !guard)
+                .simulationExecuted(full && !guard)
+                .summaryMode(!full)
+                .fullMaterialized(full && !guard)
+                .requestedMode(full && !guard ? "micro-live-entry" : null)
+                .evaluatedMode(full && !guard ? "micro-live-entry" : null)
                 .generationActivatedAt(now.minusMinutes(5))
                 .computedAt(now)
                 .dataAsOf(now)
@@ -130,8 +137,8 @@ class MetricCopyDecisionGatewayTest {
                 .strategyKey("0xabc|MOVEMENT_ALL|ALL|ALL")
                 .certificationStatus(full ? "CERTIFIED" : "CANDIDATE")
                 .degradationState("ACTIVE")
-                .allowNewEntries(full)
-                .decisionFinal(full)
+                .allowNewEntries(full && !guard)
+                .decisionFinal(full && !guard)
                 .qualityFlags(List.of())
                 .reasonCodes(List.of())
                 .completeCycles(40)
@@ -150,9 +157,9 @@ class MetricCopyDecisionGatewayTest {
                         ? MetricStrategySnapshotDto.EvaluationMode.FULL
                         : MetricStrategySnapshotDto.EvaluationMode.SUMMARY)
                 .decisionUse(full ? "SHADOW" : "DISCOVERY_ONLY")
-                .requiresFullSimulation(!full)
+                .requiresFullSimulation(!full || guard)
                 .allowsMoney(false)
-                .eligibleForShadow(full)
+                .eligibleForShadow(full && !guard)
                 .simulationMatrix(full && !guard
                         ? completeMatrix("0xabc|MOVEMENT_ALL|ALL|ALL", "gen-1")
                         : null)
@@ -199,10 +206,19 @@ class MetricCopyDecisionGatewayTest {
         private CopyDecisionDto legacy;
         private int exactCalls;
         private int legacyCalls;
+        private int bulkFullCalls;
 
         @Override
         public List<MetricStrategySnapshotDto> metricStrategySnapshots(int limit, int dayz, String simulation) {
+            if ("full".equals(simulation)) bulkFullCalls++;
             return "full".equals(simulation) ? full : summary;
+        }
+
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategySnapshotsPage(
+                int limit, int offsetWallet, int dayz, String simulation) {
+            return offsetWallet == 0 ? metricStrategySnapshots(limit, dayz, simulation) : List.of();
         }
 
         @Override
@@ -213,6 +229,15 @@ class MetricCopyDecisionGatewayTest {
                 String windows
         ) {
             return guard;
+        }
+
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindowsPage(
+                int limit, int offsetWallet, int dayz, String mode, String windows) {
+            return offsetWallet == 0
+                    ? metricStrategyCopyGuardWindows(limit, dayz, mode, windows)
+                    : List.of();
         }
 
         @Override

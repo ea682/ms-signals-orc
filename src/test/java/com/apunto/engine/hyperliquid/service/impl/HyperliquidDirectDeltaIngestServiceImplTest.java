@@ -37,8 +37,65 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HyperliquidDirectDeltaIngestServiceImplTest {
+
+    @Test
+    void httpThenKafkaWithSameSourceIdentityProducesOneCanonicalDispatch() throws Exception {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestProperties properties = new HyperliquidDirectIngestProperties();
+        properties.setEnabled(true);
+        properties.setWorkerThreads(1);
+        properties.setQueueCapacity(16);
+        properties.setDedupeEnabled(true);
+        properties.setDedupeTtlSeconds(60);
+        properties.setDistributedDedupeEnabled(false);
+
+        CapturingDispatch dispatch = new CapturingDispatch();
+        CapturingMovementLedger movementLedger = new CapturingMovementLedger();
+        CapturingShadow shadow = new CapturingShadow();
+        HyperliquidOriginPositionStoreService originStore = originStore(registry);
+        HyperliquidDirectDeltaIngestServiceImpl service = new HyperliquidDirectDeltaIngestServiceImpl(
+                properties,
+                dispatch,
+                new HyperliquidDirectIngestIdempotencyGuard(properties, new JdbcTemplate(), registry),
+                originStore,
+                movementLedger,
+                shadow,
+                registry,
+                false,
+                16,
+                1,
+                0L,
+                100L
+        );
+        service.start();
+        try {
+            HyperliquidMappedDelta sameMovement =
+                    mappedAdjustment("same-source-movement", "RESIZE", "100", "4210.60", 1778905103699L);
+
+            var direct = service.accept(sameMovement);
+            var kafkaReplay = service.accept(sameMovement);
+            awaitAtLeast(dispatch.calls, 1);
+
+            assertFalse(direct.duplicate());
+            assertTrue(kafkaReplay.duplicate());
+            assertEquals(1, dispatch.calls.get());
+            assertEquals(1, movementLedger.calls.get());
+            assertEquals(1.0d, registry.find("signals.hyperliquid.direct_ingest.duplicates.total")
+                    .counter().count());
+            awaitCounter(
+                    registry,
+                    "signals.hyperliquid.direct_ingest.processed.total",
+                    "deltaType",
+                    "RESIZE",
+                    1.0d);
+        } finally {
+            service.stop();
+            originStore.stop();
+        }
+    }
 
     @Test
     void estimatedProductionFlipIsBlockedBeforeShadowAndLive() throws Exception {
@@ -312,6 +369,26 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
             Thread.sleep(10L);
         }
         assertEquals(expected, value.get(), "timed out waiting for asynchronous ingest");
+    }
+
+    private void awaitCounter(
+            SimpleMeterRegistry registry,
+            String name,
+            String tag,
+            String tagValue,
+            double expected
+    ) throws InterruptedException {
+        Instant deadline = Instant.now().plusSeconds(3);
+        io.micrometer.core.instrument.Counter counter = null;
+        while (Instant.now().isBefore(deadline)) {
+            counter = registry.find(name).tag(tag, tagValue).counter();
+            if (counter != null && counter.count() >= expected) {
+                break;
+            }
+            Thread.sleep(10L);
+        }
+        assertNotNull(counter, "timed out waiting for counter " + name);
+        assertEquals(expected, counter.count(), "unexpected counter " + name);
     }
 
     private static final class CapturingDispatch implements HyperliquidDirectCopyDispatchService {
