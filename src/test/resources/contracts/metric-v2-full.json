@@ -1,7 +1,7 @@
 [
   {
     "metricVersion": 2,
-    "sourceVersion": "wallet_metric_economic_v2",
+    "sourceVersion": "economic-event-v2",
     "generationId": "11111111-1111-4111-8111-111111111111",
     "generationStatus": "ACTIVE",
     "generationActivatedAt": "2026-07-13T10:00:00Z",
@@ -14,6 +14,11 @@
     "coveragePct": 100,
     "evidenceStatus": "PASSED",
     "factPayloadLoaded": true,
+    "simulationExecuted": true,
+    "summaryMode": false,
+    "fullMaterialized": true,
+    "requestedMode": "micro-live-entry",
+    "evaluatedMode": "micro-live-entry",
     "walletId": "0xabc",
     "strategyCode": "LONG_ONLY",
     "scopeType": "DIRECTION",

@@ -453,6 +453,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
             idempotencyGuard.markProcessed(copyReady, dispatchResult.reasonCode());
             processed.incrementAndGet();
+            meterRegistry.counter(
+                    "signals.hyperliquid.direct_ingest.processed.total",
+                    "deltaType", safeTag(mapped.deltaType())
+            ).increment();
             long elapsedMs = elapsedMs(startedNs);
             long queueDelayMs = elapsedMs(task.acceptedNs());
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "ok", "deltaType", safeTag(mapped.deltaType())))
@@ -473,6 +477,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                     liveDispatchElapsedMs, shadowEnqueue.enqueued(), safeLog(shadowEnqueue.reasonCode()), shadowEnqueue.enqueueLatencyMs(), shadowEnqueue.queueDepth(), shadowEnqueue.remainingCapacity(), elapsedMs);
         } catch (EngineException | DataAccessException | RestClientException | IllegalStateException | IllegalArgumentException ex) {
             failed.incrementAndGet();
+            meterRegistry.counter(
+                    "signals.hyperliquid.direct_ingest.failed.total",
+                    "deltaType", safeTag(mapped.deltaType())
+            ).increment();
             idempotencyGuard.markFailed(copyReady, "direct_ingest_processing_failed", ex);
             MDC.put("traceId", originTraceId(copyReady));
             meterRegistry.timer("signals.hyperliquid.direct_ingest.process.duration", Tags.of("result", "error", "deltaType", safeTag(mapped.deltaType())))

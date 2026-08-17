@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -24,6 +25,35 @@ import static com.apunto.engine.dto.client.MetricStrategySnapshotTestFixtures.co
 class MetricV2SnapshotStoreTest {
 
     private static final String WINDOWS = "1d,3d,1w,2w,3w,1mo,2mo,3mo,6mo,9mo,1y,2y,all";
+
+    @Test
+    void refreshPaginatesWalletsUntilEveryStrategyKeyIsLoaded() {
+        FakeMetricClient client = new FakeMetricClient();
+        List<MetricStrategySnapshotDto> summary = List.of(
+                walletSnapshot(1, false, false),
+                walletSnapshot(2, false, false),
+                walletSnapshot(3, false, false));
+        List<MetricStrategySnapshotDto> full = List.of(
+                walletSnapshot(1, true, false),
+                walletSnapshot(2, true, false),
+                walletSnapshot(3, true, false));
+        List<MetricStrategySnapshotDto> guard = List.of(
+                walletSnapshot(1, true, true),
+                walletSnapshot(2, true, true),
+                walletSnapshot(3, true, true));
+        stubRefresh(client, summary, full, guard);
+        MetricV2SnapshotStore store = store(
+                client, Duration.ofMinutes(10), new SimpleMeterRegistry(), 2, 2);
+
+        store.refreshNow();
+
+        assertEquals(3, store.snapshot().summaryByKey().size());
+        assertEquals(0, store.snapshot().fullByKey().size());
+        assertEquals(3, store.snapshot().guardByKey().size());
+        assertEquals(List.of(0, 2), client.summaryOffsets);
+        assertEquals(List.of(), client.fullOffsets);
+        assertEquals(List.of(0, 2), client.guardOffsets);
+    }
 
     @Test
     void fullAndGuardOfSameGenerationAllowOnlyTheExactStrategyScopeWithoutHotPathHttp() {
@@ -38,6 +68,8 @@ class MetricV2SnapshotStoreTest {
         MetricV2SnapshotStore store = store(client, Duration.ofMinutes(10));
 
         store.refreshNow();
+        store.recordExactFull(fullBtc);
+        store.recordExactFull(fullEth);
         int callsAfterRefresh = client.calls;
 
         CopyStrategyGuardDecision btc = store.evaluate("0xabc", "SYMBOL_SPECIALIST", "SYMBOL", "BTCUSDT");
@@ -62,6 +94,7 @@ class MetricV2SnapshotStoreTest {
         MetricV2SnapshotStore store = store(client, Duration.ofMinutes(10));
 
         store.refreshNow();
+        store.recordExactFull(full);
 
         assertFalse(store.evaluate("0xabc", "LONG_ONLY", "DIRECTION", "LONG").allowed());
 
@@ -76,12 +109,13 @@ class MetricV2SnapshotStoreTest {
         MetricV2SnapshotStore staleStore = store(staleClient, Duration.ofMinutes(10));
 
         staleStore.refreshNow();
+        staleStore.recordExactFull(staleFull);
 
         assertFalse(staleStore.evaluate("0xabc", "SHORT_ONLY", "DIRECTION", "SHORT").allowed());
     }
 
     @Test
-    void missingSimulationMatrixBlocksWithTheExactContractReason() {
+    void missingSimulationMatrixIsRejectedBeforeEnteringTheExactCache() {
         FakeMetricClient client = new FakeMetricClient();
         MetricStrategySnapshotDto summary = snapshot("gen-1", "MOVEMENT_ALL", "ALL", "ALL", false, false);
         MetricStrategySnapshotDto full = snapshot("gen-1", "MOVEMENT_ALL", "ALL", "ALL", true, false);
@@ -91,11 +125,13 @@ class MetricV2SnapshotStoreTest {
         MetricV2SnapshotStore store = store(client, Duration.ofMinutes(10));
 
         store.refreshNow();
-        CopyStrategyGuardDecision decision = store.evaluate(
-                "0xabc", "MOVEMENT_ALL", "ALL", "ALL");
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> store.recordExactFull(full)
+        );
 
-        assertFalse(decision.allowed());
-        assertEquals("SIMULATION_MATRIX_REQUIRED", decision.reason());
+        assertTrue(error.getMessage().contains("SIMULATION_MATRIX_REQUIRED"));
+        assertTrue(store.snapshot().fullByKey().isEmpty());
     }
 
     @Test
@@ -107,6 +143,7 @@ class MetricV2SnapshotStoreTest {
         stubRefresh(client, List.of(summaryV1), List.of(fullV1), List.of(guardV1));
         MetricV2SnapshotStore store = store(client, Duration.ofMinutes(10));
         store.refreshNow();
+        store.recordExactFull(fullV1);
 
         MetricStrategySnapshotDto summaryV2 = snapshot("gen-2", "MOVEMENT_ALL", "ALL", "ALL", false, false);
         MetricStrategySnapshotDto fullV2 = snapshot("gen-2", "MOVEMENT_ALL", "ALL", "ALL", true, false);
@@ -148,11 +185,11 @@ class MetricV2SnapshotStoreTest {
         MetricStrategySnapshotDto guard = snapshot("gen-1", "MOVEMENT_ALL", "ALL", "ALL", true, true);
         full.getCoverage().setStatus("INCOMPLETE");
         full.getCoverage().setComplete(false);
-        full.setFactPayloadLoaded(false);
         stubRefresh(client, List.of(summary), List.of(full), List.of(guard));
         MetricV2SnapshotStore store = store(client, Duration.ofMinutes(10), registry);
 
         store.refreshNow();
+        store.recordExactFull(full);
 
         assertFalse(store.evaluate("0xabc", "MOVEMENT_ALL", "ALL", "ALL").allowed());
         assertEquals(1.0, registry.get("signals.metric.v2.rejected.coverage.total").counter().count());
@@ -209,6 +246,7 @@ class MetricV2SnapshotStoreTest {
         MetricV2SnapshotStore store = store(client, Duration.ofMinutes(10));
 
         store.refreshNow();
+        store.recordExactFull(full);
 
         assertFalse(store.evaluate("0xabc", "MOVEMENT_ALL", "ALL", "ALL").allowed());
     }
@@ -222,6 +260,7 @@ class MetricV2SnapshotStoreTest {
         stubRefresh(client, List.of(summaryMovement), List.of(fullMovement), List.of(guardMovement));
         MetricV2SnapshotStore store = store(client, Duration.ofMinutes(10));
         store.refreshNow();
+        store.recordExactFull(fullMovement);
 
         MetricStrategySnapshotDto summaryBtc = snapshot("gen-1", "SYMBOL_SPECIALIST", "SYMBOL", "BTCUSDT", false, false);
         MetricStrategySnapshotDto fullBtc = snapshot("gen-1", "SYMBOL_SPECIALIST", "SYMBOL", "BTCUSDT", true, false);
@@ -229,6 +268,7 @@ class MetricV2SnapshotStoreTest {
         stubRefresh(client, List.of(summaryBtc), List.of(fullBtc), List.of(guardBtc));
 
         store.refreshNow();
+        store.recordExactFull(fullBtc);
 
         assertTrue(store.evaluate("0xabc", "SYMBOL_SPECIALIST", "SYMBOL", "BTCUSDT").allowed());
         assertFalse(store.evaluate("0xabc", "MOVEMENT_ALL", "ALL", "ALL").allowed());
@@ -241,13 +281,21 @@ class MetricV2SnapshotStoreTest {
     private static MetricV2SnapshotStore store(MetricWalletsInfoClient client,
                                                 Duration maxStaleness,
                                                 SimpleMeterRegistry registry) {
+        return store(client, maxStaleness, registry, 100, 20);
+    }
+
+    private static MetricV2SnapshotStore store(MetricWalletsInfoClient client,
+                                                Duration maxStaleness,
+                                                SimpleMeterRegistry registry,
+                                                int summaryLimit,
+                                                int fullLimit) {
         return new MetricV2SnapshotStore(
                 client,
                 new MetricStrategyShadowProjectionMapper(),
                 new MetricWalletReadModeResolver("V2"),
                 registry,
-                100,
-                20,
+                summaryLimit,
+                fullLimit,
                 30,
                 Duration.ofMinutes(10),
                 Duration.ofMinutes(2),
@@ -291,6 +339,11 @@ class MetricV2SnapshotStoreTest {
                 .coveragePct(100.0)
                 .evidenceStatus("PASSED")
                 .factPayloadLoaded(full && !guard)
+                .simulationExecuted(full && !guard)
+                .summaryMode(!full)
+                .fullMaterialized(full && !guard)
+                .requestedMode(full && !guard ? "micro-live-entry" : null)
+                .evaluatedMode(full && !guard ? "micro-live-entry" : null)
                 .generationActivatedAt(now.minusMinutes(5))
                 .computedAt(now)
                 .dataAsOf(now)
@@ -301,8 +354,8 @@ class MetricV2SnapshotStoreTest {
                 .strategyKey(key)
                 .certificationStatus(full ? "CERTIFIED" : "CANDIDATE")
                 .degradationState("ACTIVE")
-                .allowNewEntries(full)
-                .decisionFinal(full)
+                .allowNewEntries(full && !guard)
+                .decisionFinal(full && !guard)
                 .qualityFlags(List.of())
                 .reasonCodes(List.of())
                 .completeCycles(40)
@@ -321,15 +374,48 @@ class MetricV2SnapshotStoreTest {
                         ? MetricStrategySnapshotDto.EvaluationMode.FULL
                         : MetricStrategySnapshotDto.EvaluationMode.SUMMARY)
                 .decisionUse(full ? "SHADOW" : "DISCOVERY_ONLY")
-                .requiresFullSimulation(!full)
+                .requiresFullSimulation(!full || guard)
                 .allowsMoney(false)
-                .eligibleForShadow(full)
+                .eligibleForShadow(full && !guard)
                 .rankWithinStrategy(1)
                 .globalRank(1)
                 .simulation(full ? Map.of("copyNetPnlUsd", 10.0) : null)
+                .financialMetrics(full && !guard
+                        ? Map.of("capacityUsd", Map.of("value", 100.0))
+                        : null)
+                .scores(full && !guard
+                        ? Map.of("evidenceScore", Map.of("value", 100.0))
+                        : null)
+                .operationalDecision(full && !guard
+                        ? Map.of(
+                                "operationalState", "CANDIDATE",
+                                "allowNewEntries", true,
+                                "capitalMultiplier", 1)
+                        : null)
+                .fieldAvailability(full && !guard
+                        ? Map.of("executionFacts", Map.of("available", true))
+                        : null)
+                .versions(full && !guard
+                        ? Map.of(
+                                "metricVersion", 2,
+                                "sourceVersion", MetricStrategySnapshotDto.SOURCE_VERSION)
+                        : null)
                 .build();
         if (guard) result.setWindows(allWindows());
         if (full && !guard) result.setSimulationMatrix(completeMatrix(key, generation));
+        return result;
+    }
+
+    private static MetricStrategySnapshotDto walletSnapshot(
+            int walletNumber,
+            boolean full,
+            boolean guard
+    ) {
+        MetricStrategySnapshotDto result = snapshot(
+                "gen-" + walletNumber, "MOVEMENT_ALL", "ALL", "ALL", full, guard);
+        String wallet = String.format("0x%040x", walletNumber);
+        result.setWalletId(wallet);
+        result.setStrategyKey(wallet + "|MOVEMENT_ALL|ALL|ALL");
         return result;
     }
 
@@ -353,12 +439,23 @@ class MetricV2SnapshotStoreTest {
         private List<MetricStrategySnapshotDto> summary = List.of();
         private List<MetricStrategySnapshotDto> full = List.of();
         private List<MetricStrategySnapshotDto> guard = List.of();
+        private final List<Integer> summaryOffsets = new java.util.ArrayList<>();
+        private final List<Integer> fullOffsets = new java.util.ArrayList<>();
+        private final List<Integer> guardOffsets = new java.util.ArrayList<>();
         private int calls;
 
         @Override
         public List<MetricStrategySnapshotDto> metricStrategySnapshots(int limit, int dayz, String simulation) {
             calls++;
             return "full".equals(simulation) ? full : summary;
+        }
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategySnapshotsPage(
+                int limit, int offsetWallet, int dayz, String simulation) {
+            calls++;
+            ("full".equals(simulation) ? fullOffsets : summaryOffsets).add(offsetWallet);
+            return page("full".equals(simulation) ? full : summary, limit, offsetWallet);
         }
 
         @Override
@@ -370,6 +467,34 @@ class MetricV2SnapshotStoreTest {
         ) {
             calls++;
             return guard;
+        }
+
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindowsPage(
+                int limit,
+                int offsetWallet,
+                int dayz,
+                String mode,
+                String windows
+        ) {
+            calls++;
+            guardOffsets.add(offsetWallet);
+            return page(guard, limit, offsetWallet);
+        }
+
+        private static List<MetricStrategySnapshotDto> page(
+                List<MetricStrategySnapshotDto> source,
+                int limit,
+                int offsetWallet
+        ) {
+            List<String> wallets = new java.util.ArrayList<>(source.stream()
+                    .map(MetricStrategySnapshotDto::getWalletId)
+                    .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new)));
+            if (offsetWallet >= wallets.size()) return List.of();
+            int end = Math.min(wallets.size(), offsetWallet + limit);
+            java.util.Set<String> selected = new LinkedHashSet<>(wallets.subList(offsetWallet, end));
+            return source.stream().filter(item -> selected.contains(item.getWalletId())).toList();
         }
 
         @Override

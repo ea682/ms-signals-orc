@@ -1,10 +1,12 @@
 package com.apunto.engine.config;
 
 import com.apunto.engine.events.OperacionEvent;
+import com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.context.annotation.Bean;
@@ -36,6 +38,9 @@ public class KafkaConsumerConfig {
 
     @Value("${spring.kafka.consumer.properties.max.poll.records:100}")
     private int maxPollRecords;
+
+    @Value("${hyperliquid.kafka-ingest.auto-offset-reset:latest}")
+    private String hyperliquidAutoOffsetReset;
 
     @Bean
     public ConsumerFactory<String, OperacionEvent> consumerFactoryOperacionEvents() {
@@ -73,6 +78,44 @@ public class KafkaConsumerConfig {
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         factory.getContainerProperties().setSyncCommits(true);
 
+        return factory;
+    }
+
+    @Bean
+    public ConsumerFactory<String, HyperliquidDeltaRequest> consumerFactoryHyperliquidPositionDeltas() {
+        Map<String, Object> props = new HashMap<>(kafkaProperties.buildConsumerProperties(null));
+
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, hyperliquidAutoOffsetReset);
+        props.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, fetchMaxWaitMs);
+        props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, fetchMinBytes);
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, maxPollRecords);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class);
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, HyperliquidDeltaRequest.class.getName());
+        props.put(JsonDeserializer.USE_TYPE_INFO_HEADERS, false);
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.apunto.engine.hyperliquid.dto");
+
+        log.info("event=hyperliquid.kafka_ingest.consumer_config autoOffsetReset={} fetchMaxWaitMs={} fetchMinBytes={} maxPollRecords={} enableAutoCommit={}",
+                hyperliquidAutoOffsetReset, fetchMaxWaitMs, fetchMinBytes, maxPollRecords,
+                props.get(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG));
+
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
+
+    @Bean(name = "kafkaListenerContainerFactoryHyperliquidPositionDeltas")
+    public ConcurrentKafkaListenerContainerFactory<String, HyperliquidDeltaRequest>
+    kafkaListenerContainerFactoryHyperliquidPositionDeltas(
+            @Qualifier("consumerFactoryHyperliquidPositionDeltas")
+            ConsumerFactory<String, HyperliquidDeltaRequest> consumerFactoryHyperliquidPositionDeltas
+    ) {
+        ConcurrentKafkaListenerContainerFactory<String, HyperliquidDeltaRequest> factory =
+                new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(consumerFactoryHyperliquidPositionDeltas);
+        factory.setCommonErrorHandler(kafkaErrorHandler);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
+        factory.getContainerProperties().setSyncCommits(true);
         return factory;
     }
 }

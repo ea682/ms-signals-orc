@@ -282,6 +282,11 @@ class MetricV2SnapshotPostgresIntegrationTest {
                 .coveragePct(100.0)
                 .evidenceStatus("PASSED")
                 .factPayloadLoaded(full && !guard)
+                .simulationExecuted(full && !guard)
+                .summaryMode(!full)
+                .fullMaterialized(full && !guard)
+                .requestedMode(full && !guard ? "micro-live-entry" : null)
+                .evaluatedMode(full && !guard ? "micro-live-entry" : null)
                 .generationActivatedAt(now.minusMinutes(5))
                 .computedAt(now)
                 .dataAsOf(now)
@@ -292,8 +297,8 @@ class MetricV2SnapshotPostgresIntegrationTest {
                 .strategyKey("0xabc|MOVEMENT_ALL|ALL|ALL")
                 .certificationStatus(full ? "CERTIFIED" : "CANDIDATE")
                 .degradationState("ACTIVE")
-                .allowNewEntries(full)
-                .decisionFinal(full)
+                .allowNewEntries(full && !guard)
+                .decisionFinal(full && !guard)
                 .qualityFlags(List.of())
                 .reasonCodes(List.of())
                 .completeCycles(40)
@@ -307,9 +312,9 @@ class MetricV2SnapshotPostgresIntegrationTest {
                         ? MetricStrategySnapshotDto.EvaluationMode.FULL
                         : MetricStrategySnapshotDto.EvaluationMode.SUMMARY)
                 .decisionUse(full ? "SHADOW" : "DISCOVERY_ONLY")
-                .requiresFullSimulation(!full)
+                .requiresFullSimulation(!full || guard)
                 .allowsMoney(false)
-                .eligibleForShadow(full)
+                .eligibleForShadow(full && !guard)
                 .build();
         if (guard) dto.setWindows(allWindows());
         if (full && !guard) {

@@ -87,6 +87,7 @@ class MetricStrategySnapshotDtoContractTest {
         for (String field : List.of(
                 "generationStatus", "readMode", "responseSource", "calculatorVersion",
                 "policyVersion", "coveragePct", "evidenceStatus", "factPayloadLoaded",
+                "simulationExecuted", "summaryMode", "fullMaterialized",
                 "requiresFullSimulation")) {
             incomplete.remove(field);
         }
@@ -96,6 +97,8 @@ class MetricStrategySnapshotDtoContractTest {
                 "GENERATION_STATUS_REQUIRED", "READ_MODE_INVALID", "RESPONSE_SOURCE_INVALID",
                 "CALCULATOR_VERSION_REQUIRED", "POLICY_VERSION_REQUIRED", "COVERAGE_PCT_INVALID",
                 "EVIDENCE_STATUS_REQUIRED", "FACT_PAYLOAD_LOADED_REQUIRED",
+                "SIMULATION_EXECUTED_REQUIRED", "SUMMARY_MODE_REQUIRED",
+                "FULL_MATERIALIZED_REQUIRED",
                 "REQUIRES_FULL_SIMULATION_REQUIRED"
         )));
         assertFalse(decoded.isEligibleForShadow());

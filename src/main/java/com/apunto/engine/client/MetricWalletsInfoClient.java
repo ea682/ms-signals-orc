@@ -30,6 +30,14 @@ public interface MetricWalletsInfoClient {
             @RequestParam("simulation") String simulation
     );
 
+    @GetExchange("/operaciones/metrica/joyas")
+    List<MetricStrategySnapshotDto> metricStrategySnapshotsPage(
+            @RequestParam("limitWallet") int limit,
+            @RequestParam("offsetWallet") int offsetWallet,
+            @RequestParam("dayz") int dayz,
+            @RequestParam("simulation") String simulation
+    );
+
     @GetExchange("/operaciones/metrica/copy-guard/windows")
     List<CopyGuardWindowSnapshotDto> copyGuardWindows(
             @RequestParam("limit") int limit,
@@ -41,6 +49,15 @@ public interface MetricWalletsInfoClient {
     @GetExchange("/operaciones/metrica/copy-guard/windows")
     List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindows(
             @RequestParam("limitWallet") int limit,
+            @RequestParam("dayz") int dayz,
+            @RequestParam("mode") String mode,
+            @RequestParam("windows") String windows
+    );
+
+    @GetExchange("/operaciones/metrica/copy-guard/windows")
+    List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindowsPage(
+            @RequestParam("limitWallet") int limit,
+            @RequestParam("offsetWallet") int offsetWallet,
             @RequestParam("dayz") int dayz,
             @RequestParam("mode") String mode,
             @RequestParam("windows") String windows

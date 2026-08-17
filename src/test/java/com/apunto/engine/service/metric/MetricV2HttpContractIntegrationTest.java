@@ -31,13 +31,14 @@ class MetricV2HttpContractIntegrationTest {
 
         MetricWalletsInfoClient client = client(baseUrl);
         MetricWalletReadModeResolver resolver = new MetricWalletReadModeResolver("V2");
+        int pageSize = Integer.getInteger("metric.v2.http.page-size", 100);
         MetricV2SnapshotStore store = new MetricV2SnapshotStore(
                 client,
                 new MetricStrategyShadowProjectionMapper(),
                 resolver,
                 new SimpleMeterRegistry(),
-                100,
-                100,
+                pageSize,
+                pageSize,
                 30,
                 Duration.ofMinutes(10),
                 Duration.ofMinutes(2),
@@ -49,36 +50,32 @@ class MetricV2HttpContractIntegrationTest {
 
         store.refreshNow();
         MetricV2SnapshotStore.Snapshot snapshot = store.snapshot();
+        int expectedItems = Integer.getInteger("metric.v2.http.expected-items", 5);
 
-        assertEquals(5, snapshot.summaryByKey().size());
-        assertEquals(5, snapshot.fullByKey().size());
-        assertEquals(5, snapshot.guardByKey().size());
-        assertEquals(snapshot.fullByKey().keySet(), snapshot.guardByKey().keySet());
-        assertTrue(snapshot.summaryByKey().keySet().containsAll(snapshot.fullByKey().keySet()));
-        assertEquals(5, snapshot.summaryByKey().keySet().stream().distinct().count());
+        assertEquals(expectedItems, snapshot.summaryByKey().size());
+        assertEquals(0, snapshot.fullByKey().size());
+        assertEquals(expectedItems, snapshot.guardByKey().size());
+        assertTrue(snapshot.summaryByKey().keySet().containsAll(snapshot.guardByKey().keySet()));
+        assertEquals(expectedItems, snapshot.summaryByKey().keySet().stream().distinct().count());
         assertTrue(snapshot.summaryByKey().values().stream().allMatch(item ->
                 Integer.valueOf(2).equals(item.getMetricVersion())
                         && item.getEvaluationMode() == MetricStrategySnapshotDto.EvaluationMode.SUMMARY
                         && !item.isDecisionFinal()
                         && !item.isAllowNewEntries()
         ));
-        assertTrue(snapshot.fullByKey().values().stream().allMatch(item ->
-                item.getEvaluationMode() == MetricStrategySnapshotDto.EvaluationMode.FULL
-                        && item.contractErrors().isEmpty()
-        ));
         assertTrue(snapshot.guardByKey().values().stream().allMatch(item ->
                 item.getWindows() != null
                         && item.getWindows().keySet().containsAll(Set.of(WINDOWS.split(",")))
         ));
 
-        MetricStrategySnapshotDto exactUnit = snapshot.fullByKey().values().iterator().next();
+        MetricStrategySnapshotDto exactUnit = snapshot.summaryByKey().values().iterator().next();
         CopyDecisionDto decision = new MetricCopyDecisionGateway(client, resolver, store).getFullDecisionExact(
                 new CopyDecisionRequest(
                         exactUnit.getWalletId(),
                         exactUnit.getStrategyCode(),
                         exactUnit.getScopeType(),
                         exactUnit.getScopeValue(),
-                        "shadow-entry",
+                        "micro-live-entry",
                         "full",
                         30,
                         90,
