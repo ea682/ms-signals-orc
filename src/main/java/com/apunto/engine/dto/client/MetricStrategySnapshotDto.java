@@ -27,7 +27,7 @@ import java.util.Set;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class MetricStrategySnapshotDto {
 
-    public static final String SOURCE_VERSION = "wallet_metric_economic_v2";
+    public static final String SOURCE_VERSION = "economic-event-v2";
     public static final String RESPONSE_SOURCE = "ECONOMIC_V2_ACTIVE_GENERATION";
 
     public enum EvaluationMode {
@@ -49,6 +49,11 @@ public class MetricStrategySnapshotDto {
     private Double coveragePct;
     private String evidenceStatus;
     private Boolean factPayloadLoaded;
+    private Boolean simulationExecuted;
+    private Boolean summaryMode;
+    private Boolean fullMaterialized;
+    private String requestedMode;
+    private String evaluatedMode;
     private String walletId;
     private String strategyCode;
     private String scopeType;
@@ -107,6 +112,9 @@ public class MetricStrategySnapshotDto {
                 || coveragePct < 0 || coveragePct > 100) errors.add("COVERAGE_PCT_INVALID");
         if (blank(evidenceStatus)) errors.add("EVIDENCE_STATUS_REQUIRED");
         if (factPayloadLoaded == null) errors.add("FACT_PAYLOAD_LOADED_REQUIRED");
+        if (simulationExecuted == null) errors.add("SIMULATION_EXECUTED_REQUIRED");
+        if (summaryMode == null) errors.add("SUMMARY_MODE_REQUIRED");
+        if (fullMaterialized == null) errors.add("FULL_MATERIALIZED_REQUIRED");
         if (requiresFullSimulation == null) errors.add("REQUIRES_FULL_SIMULATION_REQUIRED");
         if (blank(walletId)) errors.add("WALLET_ID_REQUIRED");
         if (blank(strategyCode)) errors.add("STRATEGY_CODE_REQUIRED");
@@ -146,9 +154,35 @@ public class MetricStrategySnapshotDto {
             if (!Boolean.TRUE.equals(requiresFullSimulation)) {
                 errors.add("SUMMARY_REQUIRES_FULL_SIMULATION_INVALID");
             }
+            if (!Boolean.TRUE.equals(summaryMode)) errors.add("SUMMARY_MODE_INVALID");
+            if (!Boolean.FALSE.equals(simulationExecuted)) errors.add("SUMMARY_SIMULATION_EXECUTED_INVALID");
+            if (!Boolean.FALSE.equals(factPayloadLoaded)) errors.add("SUMMARY_FACT_PAYLOAD_INVALID");
+            if (!Boolean.FALSE.equals(fullMaterialized)) errors.add("SUMMARY_FULL_MATERIALIZED_INVALID");
         }
-        if (evaluationMode == EvaluationMode.FULL && !Boolean.FALSE.equals(requiresFullSimulation)) {
-            errors.add("FULL_REQUIRES_FULL_SIMULATION_INVALID");
+        if (evaluationMode == EvaluationMode.FULL) {
+            if (!Boolean.FALSE.equals(summaryMode)) errors.add("FULL_SUMMARY_MODE_INVALID");
+            if (isExactFull()) {
+                if (blank(requestedMode)) errors.add("FULL_REQUESTED_MODE_REQUIRED");
+                if (blank(evaluatedMode)) errors.add("FULL_EVALUATED_MODE_REQUIRED");
+                if (!blank(requestedMode) && !Objects.equals(requestedMode, evaluatedMode)) {
+                    errors.add("FULL_MODE_NOT_PROPAGATED");
+                }
+                if (!Boolean.TRUE.equals(simulationExecuted)) errors.add("FULL_SIMULATION_NOT_EXECUTED");
+                if (!Boolean.TRUE.equals(factPayloadLoaded)) errors.add("FULL_FACT_PAYLOAD_NOT_LOADED");
+                if (!Boolean.TRUE.equals(fullMaterialized)) errors.add("FULL_NOT_MATERIALIZED");
+                if (!Boolean.FALSE.equals(requiresFullSimulation)) {
+                    errors.add("FULL_REQUIRES_FULL_SIMULATION_INVALID");
+                }
+            } else {
+                if (!Boolean.FALSE.equals(simulationExecuted)) errors.add("FULL_PLACEHOLDER_SIMULATION_INVALID");
+                if (!Boolean.FALSE.equals(factPayloadLoaded)) errors.add("FULL_PLACEHOLDER_FACT_PAYLOAD_INVALID");
+                if (!Boolean.FALSE.equals(fullMaterialized)) errors.add("FULL_PLACEHOLDER_MATERIALIZED_INVALID");
+                if (!Boolean.TRUE.equals(requiresFullSimulation)) {
+                    errors.add("FULL_PLACEHOLDER_REQUIRES_EXACT_SIMULATION");
+                }
+                if (decisionFinal) errors.add("FULL_PLACEHOLDER_DECISION_FINAL_INVALID");
+                if (allowNewEntries) errors.add("FULL_PLACEHOLDER_ALLOW_NEW_ENTRIES_INVALID");
+            }
         }
         return new ArrayList<>(errors);
     }
@@ -156,6 +190,7 @@ public class MetricStrategySnapshotDto {
     public boolean isEligibleForShadow() {
         return contractErrors().isEmpty()
                 && evaluationMode == EvaluationMode.FULL
+                && isExactFull()
                 && decisionFinal
                 && allowNewEntries
                 && Boolean.TRUE.equals(eligibleForShadow)
@@ -165,7 +200,7 @@ public class MetricStrategySnapshotDto {
                 && coverage != null
                 && coverage.isComplete()
                 && safe(qualityFlags).isEmpty()
-                && safe(unknownEconomicFields).isEmpty()
+                && safe(unknownEconomicFields).stream().noneMatch(MetricStrategySnapshotDto::blocksExactCopy)
                 && "CERTIFIED".equals(certificationStatus)
                 && ("ACTIVE".equals(degradationState) || "WATCH".equals(degradationState));
     }
@@ -173,12 +208,11 @@ public class MetricStrategySnapshotDto {
     public boolean isCopyGuardAllowed() {
         return contractErrors().isEmpty()
                 && evaluationMode == EvaluationMode.FULL
+                && !isExactFull()
                 && windows != null
                 && !windows.isEmpty()
                 && "PASSED".equals(evidenceStatus)
-                && decisionFinal
-                && allowNewEntries
-                && safe(unknownEconomicFields).isEmpty();
+                && windows.values().stream().allMatch(WindowDto::isUsableForCopyGuard);
     }
 
     public List<String> institutionalFinancialContractErrors() {
@@ -229,6 +263,16 @@ public class MetricStrategySnapshotDto {
         return values == null ? List.of("NULL_LIST") : values;
     }
 
+    private boolean isExactFull() {
+        return Boolean.TRUE.equals(simulationExecuted)
+                || Boolean.TRUE.equals(factPayloadLoaded)
+                || Boolean.TRUE.equals(fullMaterialized);
+    }
+
+    private static boolean blocksExactCopy(String field) {
+        return !Set.of("sourceRoiPct", "sourceMaxDrawdownPct").contains(field);
+    }
+
     @Data
     @Builder
     @NoArgsConstructor
@@ -241,6 +285,9 @@ public class MetricStrategySnapshotDto {
         private Integer factsReturned;
         private Integer factsAvailable;
         private Boolean truncated;
+        private Integer aggregateFactCount;
+        private Double aggregateCoveragePct;
+        private Double simulationCoveragePct;
     }
 
     @Data
@@ -249,14 +296,56 @@ public class MetricStrategySnapshotDto {
     @AllArgsConstructor
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class WindowDto {
+        private String window;
         private Integer days;
         private boolean mature;
         private boolean complete;
         private Integer cycles;
         private Double pnlNetUsd;
+        private Integer executionFacts;
+        private Integer closedCycles;
+        private Integer wins;
+        private Integer losses;
+        private Integer breakevens;
+        private Double sourceGrossPnlUsd;
+        private Double sourceFeesUsd;
+        private Double sourceFundingEffectUsd;
+        private Double sourceNetPnlUsd;
+        private Double sourceNetIdentityDeltaUsd;
+        private Double sourceRoiPct;
+        private Double copyGrossPnlUsd;
+        private Double copyFeesUsd;
+        private Double copyFundingCostUsd;
+        private Double copySlippageUsd;
+        private Double copyNetPnlUsd;
+        private Double winRate;
+        private Double profitFactorNet;
+        private Double expectancyNetUsd;
+        private Double maxDrawdownUsd;
+        private Double maxDrawdownPct;
+        private Double holdingP50Seconds;
+        private Double holdingP95Seconds;
+        private Double peakNotionalUsd;
+        private Double peakMarginUsd;
+        private Integer partialCloseFacts;
+        private Integer finalCloseFacts;
         private Double coveragePct;
         @Builder.Default
         private List<String> reasonCodes = List.of();
+
+        public boolean isUsableForCopyGuard() {
+            Integer effectiveCycles = closedCycles == null ? cycles : closedCycles;
+            Double effectiveNet = copyNetPnlUsd == null ? pnlNetUsd : copyNetPnlUsd;
+            return mature
+                    && complete
+                    && coveragePct != null
+                    && Double.isFinite(coveragePct)
+                    && coveragePct >= 99.999999
+                    && effectiveCycles != null
+                    && effectiveCycles > 0
+                    && effectiveNet != null
+                    && Double.isFinite(effectiveNet);
+        }
     }
 
     @Data
@@ -422,6 +511,7 @@ public class MetricStrategySnapshotDto {
         private Integer minNotionalSkips;
         private BigDecimal feesUsd;
         private BigDecimal fundingUsd;
+        private BigDecimal fundingEffectUsd;
         private BigDecimal slippageUsd;
         private BigDecimal grossPnlUsd;
         private BigDecimal netPnlUsd;

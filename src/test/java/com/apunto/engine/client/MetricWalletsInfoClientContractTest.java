@@ -48,17 +48,19 @@ class MetricWalletsInfoClientContractTest {
 
     @Test
     void v2DiscoveryAndFullUseCanonicalLimitWalletParameter() {
-        client.metricStrategySnapshots(17, 30, "summary");
+        client.metricStrategySnapshotsPage(17, 34, 30, "summary");
 
         assertTrue(joyasQuery.get().contains("limitWallet=17"), joyasQuery::get);
+        assertTrue(joyasQuery.get().contains("offsetWallet=34"), joyasQuery::get);
         assertFalse(joyasQuery.get().contains("limit=17"), joyasQuery::get);
     }
 
     @Test
     void v2CopyGuardUsesCanonicalLimitWalletParameter() {
-        client.metricStrategyCopyGuardWindows(19, 30, "snapshot", "1d,all");
+        client.metricStrategyCopyGuardWindowsPage(19, 38, 30, "snapshot", "1d,all");
 
         assertTrue(guardQuery.get().contains("limitWallet=19"), guardQuery::get);
+        assertTrue(guardQuery.get().contains("offsetWallet=38"), guardQuery::get);
         assertFalse(guardQuery.get().contains("limit=19"), guardQuery::get);
     }
 

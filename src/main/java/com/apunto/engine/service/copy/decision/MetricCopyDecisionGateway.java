@@ -87,8 +87,19 @@ public class MetricCopyDecisionGateway implements CopyDecisionGateway {
             if (!expectedKey.equals(snapshot.getStrategyKey())) {
                 errors.add("METRIC_V2_EXACT_STRATEGY_KEY_MISMATCH");
             }
+            if (!Objects.equals(request.mode(), snapshot.getRequestedMode())
+                    || !Objects.equals(request.mode(), snapshot.getEvaluatedMode())) {
+                errors.add("METRIC_V2_EXACT_MODE_MISMATCH");
+            }
         }
 
+        if (errors.isEmpty()) {
+            try {
+                metricV2SnapshotStore.recordExactFull(snapshot);
+            } catch (RuntimeException ex) {
+                errors.add("METRIC_V2_EXACT_CACHE_REJECTED");
+            }
+        }
         CopyStrategyGuardDecision guard = errors.isEmpty()
                 ? metricV2SnapshotStore.evaluate(
                         snapshot.getWalletId(),

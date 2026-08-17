@@ -50,6 +50,7 @@ class MetricV2SnapshotPerformanceTest {
                 WINDOWS
         );
         store.refreshNow();
+        store.recordExactFull(client.full.getFirst());
         int callsAfterRefresh = client.calls;
 
         for (int i = 0; i < 10_000; i++) store.evaluate("0xabc", "MOVEMENT_ALL", "ALL", "ALL");
@@ -69,7 +70,7 @@ class MetricV2SnapshotPerformanceTest {
 
         assertEquals(batches * operationsPerBatch, allowed);
         assertEquals(callsAfterRefresh, client.calls, "hot path must remain HTTP-free");
-        assertEquals(3, callsAfterRefresh, "one coordinated refresh uses summary, full and guard once");
+        assertEquals(2, callsAfterRefresh, "one coordinated refresh uses summary and guard only");
         System.out.printf(Locale.ROOT,
                 "PERF_METRIC_V2_HOT_PATH batches=%d operations=%d remoteCallsDuringHotPath=0 minUs=%.4f p50Us=%.4f p95Us=%.4f maxUs=%.4f%n",
                 batches,
@@ -99,6 +100,11 @@ class MetricV2SnapshotPerformanceTest {
                 .coveragePct(100.0)
                 .evidenceStatus("PASSED")
                 .factPayloadLoaded(full && !guard)
+                .simulationExecuted(full && !guard)
+                .summaryMode(!full)
+                .fullMaterialized(full && !guard)
+                .requestedMode(full && !guard ? "micro-live-entry" : null)
+                .evaluatedMode(full && !guard ? "micro-live-entry" : null)
                 .generationActivatedAt(now.minusMinutes(5))
                 .computedAt(now)
                 .dataAsOf(now)
@@ -109,8 +115,8 @@ class MetricV2SnapshotPerformanceTest {
                 .strategyKey("0xabc|MOVEMENT_ALL|ALL|ALL")
                 .certificationStatus(full ? "CERTIFIED" : "CANDIDATE")
                 .degradationState("ACTIVE")
-                .allowNewEntries(full)
-                .decisionFinal(full)
+                .allowNewEntries(full && !guard)
+                .decisionFinal(full && !guard)
                 .qualityFlags(List.of())
                 .reasonCodes(List.of())
                 .completeCycles(40)
@@ -129,9 +135,9 @@ class MetricV2SnapshotPerformanceTest {
                         ? MetricStrategySnapshotDto.EvaluationMode.FULL
                         : MetricStrategySnapshotDto.EvaluationMode.SUMMARY)
                 .decisionUse(full ? "SHADOW" : "DISCOVERY_ONLY")
-                .requiresFullSimulation(!full)
+                .requiresFullSimulation(!full || guard)
                 .allowsMoney(false)
-                .eligibleForShadow(full)
+                .eligibleForShadow(full && !guard)
                 .build();
         if (guard) result.setWindows(allWindows());
         if (full && !guard) {
@@ -169,6 +175,12 @@ class MetricV2SnapshotPerformanceTest {
         }
 
         @Override
+        public List<MetricStrategySnapshotDto> metricStrategySnapshotsPage(
+                int limit, int offsetWallet, int dayz, String simulation) {
+            return offsetWallet == 0 ? metricStrategySnapshots(limit, dayz, simulation) : List.of();
+        }
+
+        @Override
         public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindows(
                 int limit,
                 int dayz,
@@ -177,6 +189,15 @@ class MetricV2SnapshotPerformanceTest {
         ) {
             calls++;
             return guard;
+        }
+
+
+        @Override
+        public List<MetricStrategySnapshotDto> metricStrategyCopyGuardWindowsPage(
+                int limit, int offsetWallet, int dayz, String mode, String windows) {
+            return offsetWallet == 0
+                    ? metricStrategyCopyGuardWindows(limit, dayz, mode, windows)
+                    : List.of();
         }
 
         @Override
