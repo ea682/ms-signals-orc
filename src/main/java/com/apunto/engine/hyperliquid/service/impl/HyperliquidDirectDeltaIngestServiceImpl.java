@@ -217,7 +217,19 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         }
 
         final String dedupeKey = buildDedupeKey(mappedDelta);
-        if (properties.isDedupeEnabled() && recentKeys.asMap().putIfAbsent(dedupeKey, Boolean.TRUE) != null) {
+        boolean authoritativeUserFill = isAuthoritativeUserFill(mappedDelta);
+        if (authoritativeUserFill) {
+            meterRegistry.counter(
+                    "signals.hyperliquid.user_fill.ingress.total",
+                    "deliveryMode",
+                    safeTag(mappedDelta.request().sourceDeliveryMode()))
+                    .increment();
+        }
+        boolean localDuplicate = properties.isDedupeEnabled()
+                && !authoritativeUserFill
+                && recentKeys.asMap().putIfAbsent(
+                        dedupeKey, Boolean.TRUE) != null;
+        if (localDuplicate) {
             duplicates.incrementAndGet();
             incrementDuplicateMetric(mappedDelta.deltaType(), "in_memory");
             log.info("event=hyperliquid.direct_ingest.duplicate dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} reasonCode=movement_already_recorded queueDepth={} {}",
@@ -226,14 +238,32 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             return response(mappedDelta, true);
         }
 
-        boolean distributedAcquired = idempotencyGuard.tryAcquire(mappedDelta, dedupeKey);
-        if (!distributedAcquired) {
+        HyperliquidDirectIngestIdempotencyGuard.AcquireDecision acquireDecision =
+                idempotencyGuard.acquire(mappedDelta, dedupeKey);
+        if (!acquireDecision.acquired()) {
+            if (authoritativeUserFill && !acquireDecision.completed()) {
+                meterRegistry.counter(
+                        "signals.hyperliquid.direct_ingest.rejected.total",
+                        "reason", "durable_handoff_in_progress").increment();
+                throw rejected(
+                        "durable_handoff_in_progress",
+                        mappedDelta,
+                        queueDepth());
+            }
             duplicates.incrementAndGet();
             incrementDuplicateMetric(mappedDelta.deltaType(), "distributed");
             return response(mappedDelta, true);
         }
 
         QueuedDelta queuedDelta = new QueuedDelta(mappedDelta, dedupeKey, System.nanoTime());
+        if (authoritativeUserFill) {
+            accepted.incrementAndGet();
+            meterRegistry.counter(
+                    "signals.hyperliquid.direct_ingest.accepted.total",
+                    "deltaType", safeTag(mappedDelta.deltaType())).increment();
+            process(queuedDelta, true);
+            return response(mappedDelta, false);
+        }
         BlockingQueue<QueuedDelta> lane = lanes[laneFor(mappedDelta, dedupeKey)];
         if (!lane.offer(queuedDelta)) {
             if (properties.isDedupeEnabled()) {
@@ -366,7 +396,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
 
     private void processSafely(QueuedDelta task, int laneIndex) {
         try {
-            process(task);
+            process(task, false);
         } catch (Throwable ex) {
             failed.incrementAndGet();
             workerUncaughtFailures.incrementAndGet();
@@ -409,7 +439,7 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         }
     }
 
-    private void process(QueuedDelta task) {
+    private void process(QueuedDelta task, boolean propagateFailure) {
         long startedNs = System.nanoTime();
         HyperliquidMappedDelta mapped = task.mappedDelta();
         HyperliquidMappedDelta copyReady = mapped;
@@ -449,7 +479,18 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                 shadowEnqueue = shadowEnqueue.asDurableDeferred();
             }
             logShadowLiveSeparation(copyReady, dispatchResult, shadowEnqueue);
-            operationMovementEventService.recordAsync(copyReady, dispatchResult, dispatchResult.reasonCode());
+            if (isAuthoritativeUserFill(copyReady)) {
+                operationMovementEventService.recordDurably(
+                        copyReady,
+                        dispatchResult,
+                        dispatchResult.reasonCode());
+                authoritativeUserFillDurable(copyReady);
+            } else {
+                operationMovementEventService.recordAsync(
+                        copyReady,
+                        dispatchResult,
+                        dispatchResult.reasonCode());
+            }
             originPositionStoreService.submitAfterCopy(copyReady, dispatchResult);
             idempotencyGuard.markProcessed(copyReady, dispatchResult.reasonCode());
             processed.incrementAndGet();
@@ -490,6 +531,9 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             log.error("event=hyperliquid.direct_ingest.failed dedupeKey={} idempotencyKey={} positionKey={} wallet={} symbol={} side={} deltaType={} errClass={} errMsg=\"{}\" queueDelayMs={} elapsedMs={} queueDepth={}",
                     task.dedupeKey(), copyReady.idempotencyKey(), copyReady.positionKey(), copyReady.wallet(), copyReady.symbol(), copyReady.side(), copyReady.deltaType(),
                     ex.getClass().getSimpleName(), safeLog(ex.getMessage()), elapsedMs(task.acceptedNs()), elapsedMs(startedNs), queueDepth());
+            if (propagateFailure) {
+                throw ex;
+            }
         } finally {
             MDC.remove("traceId");
         }
@@ -841,6 +885,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
                 mapped.request().sourceDeliveryMode());
     }
 
+    private boolean isAuthoritativeUserFill(HyperliquidMappedDelta mapped) {
+        return mapped != null
+                && mapped.request() != null
+                && "USER_FILL".equalsIgnoreCase(
+                mapped.request().economicEventKind())
+                && !Boolean.TRUE.equals(mapped.request().sourceEstimated());
+    }
+
     private void persistHistoricalReplayAuditOnly(
             QueuedDelta task,
             HyperliquidMappedDelta mapped,
@@ -849,7 +901,10 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
         String reasonCode = "HISTORICAL_REPLAY_AUDIT_ONLY";
         HyperliquidDirectCopyDispatchResult blocked = HyperliquidDirectCopyDispatchResult.ok(
                 0, 0, 1, 0, false, reasonCode);
-        operationMovementEventService.recordAsync(mapped, blocked, reasonCode);
+        operationMovementEventService.recordDurably(mapped, blocked, reasonCode);
+        if (isAuthoritativeUserFill(mapped)) {
+            authoritativeUserFillDurable(mapped);
+        }
         idempotencyGuard.markProcessed(mapped, reasonCode);
         processed.incrementAndGet();
         meterRegistry.counter(
@@ -888,6 +943,14 @@ public class HyperliquidDirectDeltaIngestServiceImpl implements HyperliquidDirec
             symbol = firstNonBlank(symbol, mappedDelta.event().getOperacion().getParSymbol(), "NA");
         }
         return CopyTraceIdUtil.copyTraceId(originId, "origin", wallet, symbol);
+    }
+
+    private void authoritativeUserFillDurable(HyperliquidMappedDelta mapped) {
+        meterRegistry.counter(
+                "signals.hyperliquid.user_fill.durable.total",
+                "deliveryMode",
+                safeTag(mapped.request().sourceDeliveryMode()))
+                .increment();
     }
 
     private HyperliquidDeltaAcceptedResponse response(HyperliquidMappedDelta mappedDelta, boolean duplicate) {

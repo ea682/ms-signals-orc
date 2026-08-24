@@ -24,8 +24,8 @@ class FullFlywayProductionBaselinePostgres16IntegrationTest {
                 .withPassword("copy_test")) {
             postgres.start();
             MigrateResult result = ProductionBaselinePostgres.restoreAndMigrate(postgres);
-            assertEquals(8, result.migrationsExecuted,
-                    "the production baseline must receive exactly the lifecycle migrations");
+            assertEquals(11, result.migrationsExecuted,
+                    "the production baseline must receive the lifecycle and subsequent guard migrations");
             MigrationInfo[] pending = ProductionBaselinePostgres.flyway(postgres).info().pending();
             assertEquals(0, pending.length,
                     "all real Flyway migrations must be applied, pending=" + Arrays.toString(pending));

@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HyperliquidDirectDeltaIngestServiceImplTest {
@@ -194,11 +195,178 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
         service.start();
         try {
             service.accept(historicalReplay());
-            awaitAtLeast(movementLedger.calls, 1);
 
             assertEquals(0, dispatch.calls.get());
             assertEquals(0, shadow.calls.get());
+            assertEquals(1, movementLedger.durableCalls.get());
+            assertEquals(0, movementLedger.asyncCalls.get());
             assertEquals("HISTORICAL_REPLAY_AUDIT_ONLY", movementLedger.lastReason.get());
+            assertEquals(1.0d, registry.get(
+                            "signals.hyperliquid.user_fill.durable.total")
+                    .tag("deliveryMode", "HISTORICAL_REPLAY")
+                    .counter().count());
+        } finally {
+            service.stop();
+            originStore.stop();
+        }
+    }
+
+    @Test
+    void liveAuthoritativeFillIsDurableBeforeAcceptReturns()
+            throws Exception {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestProperties properties =
+                new HyperliquidDirectIngestProperties();
+        properties.setEnabled(true);
+        properties.setWorkerThreads(1);
+        properties.setQueueCapacity(16);
+        properties.setDedupeEnabled(false);
+        properties.setDistributedDedupeEnabled(false);
+        CapturingDispatch dispatch = new CapturingDispatch();
+        CapturingMovementLedger movementLedger =
+                new CapturingMovementLedger();
+        HyperliquidOriginPositionStoreService originStore =
+                originStore(registry);
+        HyperliquidDirectDeltaIngestServiceImpl service =
+                new HyperliquidDirectDeltaIngestServiceImpl(
+                        properties,
+                        dispatch,
+                        new HyperliquidDirectIngestIdempotencyGuard(
+                                properties, new JdbcTemplate(), registry),
+                        originStore,
+                        movementLedger,
+                        new CapturingShadow(),
+                        registry,
+                        false,
+                        16,
+                        1,
+                        0L,
+                        100L);
+        service.start();
+        try {
+            service.accept(authoritativeUserFill("LIVE_USER_FILL"));
+
+            assertEquals(1, dispatch.calls.get());
+            assertEquals(1, movementLedger.durableCalls.get());
+            assertEquals(0, movementLedger.asyncCalls.get());
+            assertEquals(1.0d, registry.get(
+                            "signals.hyperliquid.user_fill.durable.total")
+                    .tag("deliveryMode", "LIVE_USER_FILL")
+                    .counter().count());
+            assertEquals(1.0d, registry.get(
+                            "signals.hyperliquid.user_fill.ingress.total")
+                    .tag("deliveryMode", "LIVE_USER_FILL")
+                    .counter().count());
+        } finally {
+            service.stop();
+            originStore.stop();
+        }
+    }
+
+    @Test
+    void recentAuthoritativeFillCannotBypassDurablePayloadConflictGuard()
+            throws Exception {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestProperties properties =
+                new HyperliquidDirectIngestProperties();
+        properties.setEnabled(true);
+        properties.setWorkerThreads(1);
+        properties.setQueueCapacity(16);
+        properties.setDedupeEnabled(true);
+        properties.setDedupeTtlSeconds(60);
+        properties.setDistributedDedupeEnabled(true);
+        SecondAcquireConflictGuard guard =
+                new SecondAcquireConflictGuard(properties, registry);
+        HyperliquidOriginPositionStoreService originStore =
+                originStore(registry);
+        HyperliquidDirectDeltaIngestServiceImpl service =
+                new HyperliquidDirectDeltaIngestServiceImpl(
+                        properties,
+                        new CapturingDispatch(),
+                        guard,
+                        originStore,
+                        new CapturingMovementLedger(),
+                        new CapturingShadow(),
+                        registry,
+                        false,
+                        16,
+                        1,
+                        0L,
+                        100L);
+        service.start();
+        try {
+            HyperliquidMappedDelta original =
+                    authoritativeUserFill("LIVE_USER_FILL");
+            ObjectMapper mapper =
+                    new ObjectMapper().findAndRegisterModules();
+            var contradictoryNode =
+                    (com.fasterxml.jackson.databind.node.ObjectNode)
+                            mapper.valueToTree(original.request());
+            contradictoryNode.put("notionalUsd", 999.99d);
+            contradictoryNode.put(
+                    "economicFingerprint", "contradictory-fingerprint");
+            HyperliquidDeltaRequest contradictoryRequest =
+                    mapper.treeToValue(
+                            contradictoryNode,
+                            HyperliquidDeltaRequest.class);
+            HyperliquidMappedDelta contradictory =
+                    new HyperliquidDeltaOperacionMapper().map(
+                            contradictoryRequest,
+                            original.idempotencyKey());
+
+            service.accept(original);
+
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> service.accept(contradictory));
+            assertEquals(2, guard.acquireCalls.get(),
+                    "every authoritative USER_FILL must reach the durable "
+                            + "fingerprint guard even while its key is recent");
+        } finally {
+            service.stop();
+            originStore.stop();
+        }
+    }
+
+    @Test
+    void authoritativeDurabilityFailurePreventsSuccessfulAccept()
+            throws Exception {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestProperties properties =
+                new HyperliquidDirectIngestProperties();
+        properties.setEnabled(true);
+        properties.setWorkerThreads(1);
+        properties.setQueueCapacity(16);
+        properties.setDedupeEnabled(false);
+        properties.setDistributedDedupeEnabled(false);
+        CapturingMovementLedger movementLedger =
+                new CapturingMovementLedger();
+        movementLedger.failDurable = true;
+        HyperliquidOriginPositionStoreService originStore =
+                originStore(registry);
+        HyperliquidDirectDeltaIngestServiceImpl service =
+                new HyperliquidDirectDeltaIngestServiceImpl(
+                        properties,
+                        new CapturingDispatch(),
+                        new HyperliquidDirectIngestIdempotencyGuard(
+                                properties, new JdbcTemplate(), registry),
+                        originStore,
+                        movementLedger,
+                        new CapturingShadow(),
+                        registry,
+                        false,
+                        16,
+                        1,
+                        0L,
+                        100L);
+        service.start();
+        try {
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> service.accept(
+                            authoritativeUserFill("LIVE_USER_FILL")));
+            assertEquals(1, movementLedger.durableCalls.get());
+            assertEquals(0, movementLedger.asyncCalls.get());
         } finally {
             service.stop();
             originStore.stop();
@@ -303,15 +471,27 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
     }
 
     private HyperliquidMappedDelta historicalReplay() throws Exception {
+        return authoritativeUserFill("HISTORICAL_REPLAY");
+    }
+
+    private HyperliquidMappedDelta authoritativeUserFill(
+            String deliveryMode
+    ) throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         try (InputStream fixture = getClass().getResourceAsStream(
                 "/fixtures/production/anomaly-d-incomplete-flip.json")) {
             assertNotNull(fixture);
             JsonNode root = mapper.readTree(fixture);
             var requestNode = (com.fasterxml.jackson.databind.node.ObjectNode) root.get("request");
+            requestNode.put("eventType", "HYPERLIQUID_POSITION_OPENED");
+            requestNode.put("deltaType", "OPEN");
             requestNode.put("economicEventKind", "USER_FILL");
             requestNode.put("sourceEstimated", false);
-            requestNode.put("sourceDeliveryMode", "HISTORICAL_REPLAY");
+            requestNode.put("sourceDeliveryMode", deliveryMode);
+            requestNode.put("sourcePreviousPositionQuantity", 0);
+            requestNode.put("sourceResultingPositionQuantity", 84.28);
+            requestNode.put("sourceExecutionQuantity", 84.28);
+            requestNode.put("sourceSignedExecutionQuantity", 84.28);
             HyperliquidDeltaRequest request = mapper.treeToValue(
                     requestNode, HyperliquidDeltaRequest.class);
             return new HyperliquidDeltaOperacionMapper().map(request, request.idempotencyKey());
@@ -402,9 +582,59 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
         }
     }
 
+    private static final class SecondAcquireConflictGuard
+            extends HyperliquidDirectIngestIdempotencyGuard {
+        private final AtomicInteger acquireCalls = new AtomicInteger();
+
+        private SecondAcquireConflictGuard(
+                HyperliquidDirectIngestProperties properties,
+                SimpleMeterRegistry registry
+        ) {
+            super(properties, new JdbcTemplate(), registry);
+        }
+
+        @Override
+        public AcquireDecision acquire(
+                HyperliquidMappedDelta mappedDelta,
+                String dedupeKey
+        ) {
+            if (acquireCalls.incrementAndGet() == 1) {
+                return AcquireDecision.ACQUIRED;
+            }
+            throw new IllegalStateException(
+                    "simulated durable payload conflict");
+        }
+
+        @Override
+        public void markProcessed(
+                HyperliquidMappedDelta mappedDelta,
+                String reasonCode
+        ) {
+            // The test isolates acquire routing from persistence details.
+        }
+    }
+
     private static final class CapturingMovementLedger implements OperationMovementEventService {
         private final AtomicInteger calls = new AtomicInteger();
+        private final AtomicInteger durableCalls = new AtomicInteger();
+        private final AtomicInteger asyncCalls = new AtomicInteger();
         private final AtomicReference<String> lastReason = new AtomicReference<>();
+        private volatile boolean failDurable;
+
+        @Override
+        public void recordDurably(
+                HyperliquidMappedDelta mappedDelta,
+                HyperliquidDirectCopyDispatchResult dispatchResult,
+                String reasonCode
+        ) {
+            lastReason.set(reasonCode);
+            durableCalls.incrementAndGet();
+            calls.incrementAndGet();
+            if (failDurable) {
+                throw new IllegalStateException(
+                        "simulated durable movement failure");
+            }
+        }
 
         @Override
         public void recordAsync(
@@ -413,6 +643,7 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
                 String reasonCode
         ) {
             lastReason.set(reasonCode);
+            asyncCalls.incrementAndGet();
             calls.incrementAndGet();
         }
 
