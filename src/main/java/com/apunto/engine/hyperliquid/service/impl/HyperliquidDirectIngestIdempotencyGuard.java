@@ -222,8 +222,15 @@ public class HyperliquidDirectIngestIdempotencyGuard {
     }
 
     public boolean tryAcquire(HyperliquidMappedDelta mappedDelta, String dedupeKey) {
+        return acquire(mappedDelta, dedupeKey).acquired();
+    }
+
+    public AcquireDecision acquire(
+            HyperliquidMappedDelta mappedDelta,
+            String dedupeKey
+    ) {
         if (!properties.isDistributedDedupeEnabled()) {
-            return true;
+            return AcquireDecision.ACQUIRED;
         }
         String idempotencyKey = requireIdempotencyKey(mappedDelta);
         String payloadFingerprint = payloadFingerprint(mappedDelta, dedupeKey);
@@ -254,7 +261,7 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 }
                 if (existing.payloadFingerprint() == null || existing.payloadFingerprint().isBlank()) {
                     markPayloadUnverified(idempotencyKey, mappedDelta, dedupeKey, existing);
-                    return false;
+                    return duplicateDecision(existing);
                 }
                 if (existing.payloadFingerprint() != null
                         && !existing.payloadFingerprint().isBlank()
@@ -269,7 +276,7 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                         markReplicaPayloadDivergence(
                                 idempotencyKey, mappedDelta, dedupeKey, existing,
                                 payloadFingerprint, payloadEvidence);
-                        return false;
+                        return duplicateDecision(existing);
                     }
                     markPayloadConflict(idempotencyKey, mappedDelta, dedupeKey, existing, payloadFingerprint);
                 }
@@ -283,7 +290,9 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                             safe(mappedDelta.side()), safe(mappedDelta.deltaType()), acquired);
                 }
             }
-            return allowed;
+            return allowed
+                    ? AcquireDecision.ACQUIRED
+                    : duplicateDecision(existingClaim(idempotencyKey));
         } catch (DataAccessException ex) {
             recordDedupeMetric("error");
             if (properties.isFailOpenOnDedupeError()) {
@@ -291,7 +300,7 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                         safe(idempotencyKey), safe(mappedDelta.positionKey()), safe(mappedDelta.wallet()), safe(mappedDelta.symbol()), safe(mappedDelta.side()), safe(mappedDelta.deltaType()),
                         ex.getClass().getSimpleName(), safeLog(ex.getMessage()),
                         CopyLogAdvice.fields("dedupe_guard_unavailable", CopyLogAdvice.context(null, null, null, null, null, null, null, "direct_ingest_dedupe")));
-                return true;
+                return AcquireDecision.ACQUIRED;
             }
             throw new HyperliquidDirectIngestDedupeException(
                     "No se pudo validar idempotencia distribuida de Hyperliquid direct ingest",
@@ -306,6 +315,26 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                             "deltaType", safe(mappedDelta.deltaType())
                     )
             );
+        }
+    }
+
+    private AcquireDecision duplicateDecision(ExistingClaim existing) {
+        return existing != null && STATUS_PROCESSED.equals(existing.status())
+                ? AcquireDecision.DUPLICATE_COMPLETED
+                : AcquireDecision.DUPLICATE_IN_FLIGHT;
+    }
+
+    public enum AcquireDecision {
+        ACQUIRED,
+        DUPLICATE_COMPLETED,
+        DUPLICATE_IN_FLIGHT;
+
+        public boolean acquired() {
+            return this == ACQUIRED;
+        }
+
+        public boolean completed() {
+            return this == DUPLICATE_COMPLETED;
         }
     }
 

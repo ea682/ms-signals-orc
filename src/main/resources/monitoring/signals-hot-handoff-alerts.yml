@@ -1,0 +1,58 @@
+groups:
+  - name: signals-hot-handoff
+    rules:
+      - alert: SignalsHotInboxStaleProcessing
+        expr: signals_hyperliquid_direct_ingest_processing_stale > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Signals has expired durable USER_FILL claims"
+
+      - alert: SignalsHotOutboxOldestPending
+        expr: signals_metric_outbox_oldest_pending_age_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Signals economic outbox is not draining"
+
+      - alert: SignalsHotOutboxPublishFailures
+        expr: increase(signals_metric_outbox_publish_total{result="failure"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Signals cannot publish durable outbox rows to Kafka"
+
+      - alert: SignalsHotIdempotencyConflict
+        expr: increase(signals_hyperliquid_direct_ingest_distributed_dedupe_total{result=~"payload_conflict|replica_payload_divergence"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Signals rejected contradictory economics for one source identity"
+
+      - alert: SignalsHotDuplicateIngest
+        expr: increase(duplicate_noop_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Signals received duplicate Hyperliquid transport deliveries"
+
+      - alert: SignalsHotIngressWithoutDurableHandoff
+        expr: increase(signals_hyperliquid_user_fill_ingress_total{deliveryMode="LIVE_USER_FILL"}[5m]) > 0 and increase(signals_hyperliquid_user_fill_durable_total{deliveryMode="LIVE_USER_FILL"}[5m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Signals accepts HOT ingress without durable USER_FILL progress"
+
+      - alert: SignalsUpButEconomicHandoffStalled
+        expr: up{job=~".*signals.*"} == 1 and signals_metric_outbox_pending > 0 and increase(signals_movement_event_published_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Signals is UP but its economic Kafka handoff is stalled"

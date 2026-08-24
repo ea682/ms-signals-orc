@@ -135,6 +135,48 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     }
 
     @Override
+    public void recordDurably(
+            HyperliquidMappedDelta mappedDelta,
+            HyperliquidDirectCopyDispatchResult dispatchResult,
+            String reasonCode
+    ) {
+        if (!enabled) {
+            throw new IllegalStateException(
+                    "operation movement ledger is disabled for durable USER_FILL");
+        }
+        OperationMovementEventRecordCommand command =
+                fromMappedDelta(mappedDelta, dispatchResult, reasonCode);
+        if (!isRecordable(command)) {
+            throw new IllegalArgumentException(
+                    "authoritative movement payload is incomplete");
+        }
+        QueuedMovement task = new QueuedMovement(command, System.nanoTime());
+        try (MDC.MDCCloseable ignored =
+                     MDC.putCloseable("traceId", safeTraceId(command))) {
+            long startedNs = System.nanoTime();
+            transactionTemplate.executeWithoutResult(
+                    status -> persist(command, task.acceptedNs(), startedNs));
+        } catch (DataIntegrityViolationException ex) {
+            if (isUniqueViolation(ex)) {
+                skipped.incrementAndGet();
+                log.info("event=operation_movement_event.durable_duplicate category=audit reasonCode=ledger_duplicate_ignored movementKey={} sourceEventId={} decision=DURABLE_HANDOFF_ALREADY_EXISTS",
+                        safe(command.getMovementKey()),
+                        safe(command.getSourceEventId()));
+                return;
+            }
+            failed(command, task, ex);
+            throw ex;
+        } catch (MetricOutboxSerializationException
+                 | MetricOutboxHashException
+                 | DataAccessException
+                 | IllegalStateException
+                 | IllegalArgumentException ex) {
+            failed(command, task, ex);
+            throw ex;
+        }
+    }
+
+    @Override
     public void recordAsync(HyperliquidMappedDelta mappedDelta, HyperliquidDirectCopyDispatchResult dispatchResult, String reasonCode) {
         if (!enabled) {
             return;

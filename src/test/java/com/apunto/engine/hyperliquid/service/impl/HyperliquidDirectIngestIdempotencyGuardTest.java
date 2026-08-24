@@ -183,6 +183,31 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
     }
 
     @Test
+    void duplicateInFlightIsDistinguishedFromCompletedDuplicate() {
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L, 0L);
+        HyperliquidDirectIngestIdempotencyGuard guard = guard(
+                jdbc,
+                new SimpleMeterRegistry(),
+                false);
+        HyperliquidMappedDelta delta = delta("same-key", "BTCUSDT");
+
+        assertEquals(
+                HyperliquidDirectIngestIdempotencyGuard.AcquireDecision
+                        .ACQUIRED,
+                guard.acquire(delta, "dedupe-key"));
+        jdbc.storedStatus = "PROCESSING";
+        assertEquals(
+                HyperliquidDirectIngestIdempotencyGuard.AcquireDecision
+                        .DUPLICATE_IN_FLIGHT,
+                guard.acquire(delta, "dedupe-key"));
+        jdbc.storedStatus = "PROCESSED";
+        assertEquals(
+                HyperliquidDirectIngestIdempotencyGuard.AcquireDecision
+                        .DUPLICATE_COMPLETED,
+                guard.acquire(delta, "dedupe-key"));
+    }
+
+    @Test
     void twoReplicasProduceTheSameAuthoritativeStateFingerprint() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         var request = mapper.readValue("""
@@ -381,6 +406,7 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
         private String storedSymbol;
         private Long storedSourceTs;
         private String storedFirstPayload;
+        private String storedStatus = "PROCESSED";
         private String acquireSql;
         private final List<String> updateSql = new ArrayList<>();
         private final List<Object[]> updateArgs = new ArrayList<>();
@@ -416,7 +442,7 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
                         String.class, Long.class, String.class);
                 constructor.setAccessible(true);
                 return List.of((T) constructor.newInstance(
-                        storedFingerprint, "PROCESSED", false,
+                        storedFingerprint, storedStatus, false,
                         storedWallet, storedSymbol, storedSourceTs,
                         storedFirstPayload));
             } catch (ReflectiveOperationException ex) {
