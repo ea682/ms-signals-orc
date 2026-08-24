@@ -705,7 +705,9 @@ class CopyDispatchCoordinatorTest {
         private volatile String lastAmbiguousReason;
 
         @Override
-        public CopyDispatchPermit acquire(CopyDispatchRequest request) {
+        public synchronized CopyDispatchPermit acquire(
+                CopyDispatchRequest request
+        ) {
             lastRequest = request;
             AtomicBoolean created = new AtomicBoolean(false);
             UUID id = ids.computeIfAbsent(request.idempotencyKey(), ignored -> {
