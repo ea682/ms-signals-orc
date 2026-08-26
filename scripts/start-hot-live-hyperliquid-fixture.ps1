@@ -5,6 +5,14 @@ param(
     [Parameter(Mandatory = $true)][long]$Tid,
     [Parameter(Mandatory = $true)][long]$SourceTimestamp,
     [string]$StartPosition = '0',
+    [string]$Coin = 'HYPE',
+    [string]$Price = '21.25',
+    [string]$Size = '1',
+    [ValidateSet('A', 'B')][string]$Side = 'B',
+    [string]$Direction = 'Open Long',
+    [string]$ClosedPnl = '0',
+    [string]$Fee = '0.01',
+    [string]$FillsPath,
     [string]$PythonPath = 'python',
     [string]$OutputDirectory = 'target/hot-live-cert'
 )
@@ -23,11 +31,19 @@ $resolvedOutputDirectory = if ([IO.Path]::IsPathRooted($OutputDirectory)) {
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
 $stdoutPath = Join-Path $resolvedOutputDirectory "fixture-$stamp.out.log"
 $stderrPath = Join-Path $resolvedOutputDirectory "fixture-$stamp.err.log"
-$process = Start-Process -FilePath $resolvedPython -ArgumentList @(
+$arguments = @(
     $fixturePath, '--port', $Port.ToString(), '--wallet', $Wallet,
     '--tid', $Tid.ToString(), '--source-timestamp', $SourceTimestamp.ToString(),
-    '--start-position', $StartPosition
-) -WorkingDirectory (Split-Path -Parent $fixturePath) -WindowStyle Hidden `
+    '--start-position', $StartPosition, '--coin', $Coin, '--price', $Price,
+    '--size', $Size, '--side', $Side, '--direction', ('"' + $Direction + '"'),
+    '--closed-pnl', $ClosedPnl, '--fee', $Fee
+)
+if ($FillsPath) {
+    $resolvedFills = (Resolve-Path -LiteralPath $FillsPath).Path
+    $arguments += @('--fills-file', $resolvedFills)
+}
+$process = Start-Process -FilePath $resolvedPython -ArgumentList $arguments `
+    -WorkingDirectory (Split-Path -Parent $fixturePath) -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
 $deadline = (Get-Date).AddSeconds(10)
 $healthy = $false

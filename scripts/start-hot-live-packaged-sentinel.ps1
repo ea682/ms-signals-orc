@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $true)][ValidateRange(1024, 65535)][int]$Port,
     [Parameter(Mandatory = $true)][string]$FixtureBaseUrl,
     [Parameter(Mandatory = $true)][string]$SignalsBaseUrl,
+    [string]$InstanceId = 'packaged-hot-b2b',
     [string]$ExpectedSha256,
     [string]$JavaPath = 'java',
     [string]$DatabaseHost = '127.0.0.1',
@@ -50,7 +51,7 @@ $arguments = @(
     "--spring.datasource.url=jdbc:postgresql://${DatabaseHost}:${DatabasePort}/${DatabaseName}",
     "--spring.datasource.username=$DatabaseUser", "--spring.datasource.password=$DatabasePassword",
     '--spring.flyway.enabled=true', '--spring.flyway.baseline-on-migrate=true',
-    '--hyperliquid.instance-id=packaged-hot-b2b', "--hyperliquid.info-base=$FixtureBaseUrl",
+    "--hyperliquid.instance-id=$InstanceId", "--hyperliquid.info-base=$FixtureBaseUrl",
     "--hyperliquid.direct.url=$SignalsBaseUrl/internal/v1/hyperliquid/deltas",
     '--hyperliquid.direct.timeout-ms=5000', '--hyperliquid.direct.connect-timeout-ms=1000',
     '--hyperliquid.direct.fallback-kafka-on-failure=false', '--hyperliquid.kafka.enabled=false',
@@ -65,7 +66,10 @@ $arguments = @(
     '--hyperliquid.authoritative-fills.worker-delay-ms=50',
     '--hyperliquid.authoritative-fills.worker-threads=1',
     '--hyperliquid.authoritative-fills.claim-batch-size=2',
-    '--hyperliquid.authoritative-fills.retry-delay-ms=100',
+    '--hyperliquid.authoritative-fills.retry-delay-ms=500',
+    '--hyperliquid.authoritative-fills.max-attempts=120',
+    '--hyperliquid.authoritative-fills.gap-lookback-ms=0',
+    '--hyperliquid.authoritative-fills.live-fill-max-age-ms=604800000',
     '--hyperliquid.wallets.refresh-interval=PT1H', '--hyperliquid.markets.refresh-interval=PT1H',
     '--hyperliquid.websocket.connection-start-stagger-ms=0',
     '--hyperliquid.websocket.catalog-reconcile-interval=PT1H'
@@ -94,6 +98,6 @@ if (-not $ready) {
     artifactPath = $resolvedArtifact; artifactSha256 = $artifactHash
     javaVersion = $javaVersion; processId = $process.Id; port = $Port; ready = $ready
     database = "${DatabaseHost}:${DatabasePort}/${DatabaseName}"
-    fixture = $FixtureBaseUrl; signals = $SignalsBaseUrl
+    instanceId = $InstanceId; fixture = $FixtureBaseUrl; signals = $SignalsBaseUrl
     stdoutPath = $stdoutPath; stderrPath = $stderrPath
 } | ConvertTo-Json -Compress

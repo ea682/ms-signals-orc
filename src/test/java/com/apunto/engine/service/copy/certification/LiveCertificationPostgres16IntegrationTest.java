@@ -20,7 +20,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.UUID;
 
@@ -127,8 +129,18 @@ class LiveCertificationPostgres16IntegrationTest {
         assertTrue(adoption.persisted());
         assertTrue(adoption.decision().valid());
 
+        OffsetDateTime persistedValidationTime = jdbc.queryForObject("""
+                select validated_at
+                from futuros_operaciones.user_live_certification_adoption
+                where certification_id = ? and user_id = ? and allocation_id = ?
+                """, OffsetDateTime.class, created.certification().id(),
+                USER_ID, liveAllocationId);
         ManualLiveAllocationActivationService activationService =
-                new ManualLiveAllocationActivationService(new PostgresLiveAllocationActivationStore(jdbc));
+                new ManualLiveAllocationActivationService(
+                        new PostgresLiveAllocationActivationStore(jdbc),
+                        Clock.fixed(
+                                persistedValidationTime.plusNanos(1).toInstant(),
+                                ZoneOffset.UTC));
         LiveAllocationActivationResult activation = activationService.activate(
                 new LiveAllocationActivationCommand(liveAllocationId, created.certification().id(),
                         "integration-operator", "activate", "pg-activate-1"));
@@ -152,7 +164,8 @@ class LiveCertificationPostgres16IntegrationTest {
                 "proportional-portfolio-v3", "binance-symbol-map-v3", "binance-fee-v3",
                 "binance-funding-v3", "binance-slippage-v3", "order-book-liquidity-v3");
         LiveEntryAuthorizationDecision gate = new LiveEntryAuthorizationService(
-                new PostgresLiveCertificationReadStore(jdbc)).evaluate(request, OffsetDateTime.now());
+                new PostgresLiveCertificationReadStore(jdbc)).evaluate(
+                request, persistedValidationTime.plusNanos(2));
         assertTrue(gate.allowed(), gate.reasonCode());
 
         assertEquals(2L, jdbc.queryForObject(
