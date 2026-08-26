@@ -830,14 +830,13 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
                     localPrevious.getSourceResultingPositionQuantity();
             if (localAfter == null || localAfter.compareTo(before) != 0) {
                 return new EconomicContractEvaluation(
-                        "SOURCE_LEDGER_DIVERGENCE",
-                        "SOURCE_LEDGER_STATE_DIVERGENCE");
+                        "COMPLETE",
+                        "AUTHORITATIVE_CAUSAL_GAP_BOUNDARY");
             }
         }
 
         if (DELIVERY_GAP_RECOVERY.equals(deliveryMode)
-                && (entity.getSourceRecoveredAt() == null
-                || !orderedAfter(localPrevious, entity))) {
+                && entity.getSourceRecoveredAt() == null) {
             return new EconomicContractEvaluation("AMBIGUOUS", "GAP_RECOVERY_ORDER_NOT_RECONCILED");
         }
         if (DELIVERY_HISTORICAL_REPLAY.equals(deliveryMode)) {
@@ -921,10 +920,12 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
             addIfMissing(flags, evaluation.status());
         }
         if ("AUTHORITATIVE_PREEXISTING_POSITION_BOUNDARY".equals(
+                evaluation.reason())
+                || "AUTHORITATIVE_CAUSAL_GAP_BOUNDARY".equals(
                 evaluation.reason())) {
             addIfMissing(
                     flags,
-                    "AUTHORITATIVE_PREEXISTING_POSITION_BOUNDARY");
+                    evaluation.reason());
         }
         if (DELIVERY_HISTORICAL_REPLAY.equals(normalizeUpper(entity.getSourceDeliveryMode(), null))) {
             addIfMissing(flags, "AUDIT_ONLY_HISTORICAL_REPLAY");

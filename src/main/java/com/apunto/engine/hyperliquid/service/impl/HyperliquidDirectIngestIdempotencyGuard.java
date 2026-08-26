@@ -662,9 +662,7 @@ public class HyperliquidDirectIngestIdempotencyGuard {
                 canonicalDecimal(request == null ? null : request.sourcePreviousPositionQuantity()),
                 canonicalDecimal(request == null ? null : request.sourceResultingPositionQuantity()),
                 canonicalDecimal(request == null ? null : request.sourceExecutionQuantity()),
-                canonicalDecimal(request == null ? null : request.sourceSignedExecutionQuantity()),
-                canonicalText(request == null ? null : request.sourceDeliveryMode()),
-                canonicalValue(request == null ? null : request.sourceRecoveredAt())
+                canonicalDecimal(request == null ? null : request.sourceSignedExecutionQuantity())
         );
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
