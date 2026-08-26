@@ -56,3 +56,35 @@ groups:
           severity: critical
         annotations:
           summary: "Signals is UP but its economic Kafka handoff is stalled"
+
+      - alert: SignalsUserFillWithoutEligibleEconomics
+        expr: |
+          increase(signals_hyperliquid_user_fill_economic_total[15m]) > 0
+          and
+          increase(signals_hyperliquid_user_fill_economic_total{metricEligible="true"}[15m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+          contract: hot-economic
+        annotations:
+          summary: "Signals persists USER_FILL but none remain economically eligible"
+
+      - alert: SignalsUserFillSourceLedgerDivergence
+        expr: |
+          increase(signals_hyperliquid_user_fill_economic_total{economicBasisStatus="SOURCE_LEDGER_DIVERGENCE"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: high
+          contract: hot-economic
+        annotations:
+          summary: "An authoritative USER_FILL contradicted the trusted authoritative ledger"
+
+      - alert: SignalsUserFillPreexistingBoundaryRate
+        expr: |
+          increase(signals_hyperliquid_user_fill_economic_total{reason="AUTHORITATIVE_PREEXISTING_POSITION_BOUNDARY"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: info
+          contract: hot-economic
+        annotations:
+          summary: "Signals established an authoritative boundary for a preexisting position"

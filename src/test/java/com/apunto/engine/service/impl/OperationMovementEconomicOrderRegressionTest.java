@@ -94,6 +94,26 @@ class OperationMovementEconomicOrderRegressionTest {
         assertFalse(sql.contains("date_creation"));
     }
 
+    @Test
+    void authoritativeContinuityIgnoresAuditOnlyPositionDeltas() throws Exception {
+        Method method = OperationMovementEventRepository.class.getMethod(
+                "findPreviousAuthoritativeUserFillByEconomicOrder",
+                String.class,
+                OffsetDateTime.class,
+                Long.class,
+                String.class
+        );
+        Query query = method.getAnnotation(Query.class);
+
+        assertNotNull(query);
+        String sql = query.value().toLowerCase();
+        assertTrue(sql.contains("economic_event_kind = 'user_fill'"));
+        assertTrue(sql.contains("source_estimated is false"));
+        assertTrue(sql.contains("metric_eligible is true"));
+        assertTrue(sql.contains("economic_basis_status = 'complete'"));
+        assertFalse(sql.contains("date_creation"));
+    }
+
     private Long sourceSequence(Object value) throws Exception {
         return (Long) value.getClass().getMethod("sourceSequence").invoke(value);
     }

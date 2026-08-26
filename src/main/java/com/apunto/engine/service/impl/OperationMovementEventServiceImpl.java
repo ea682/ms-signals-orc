@@ -286,6 +286,10 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         ).increment();
         String economicBasisStatus = economicBasisStatus(entity);
         recordEconomicBasisMetrics(entity, economicBasisStatus);
+        recordAuthoritativeUserFillMetric(
+                entity,
+                entityMetricEligible,
+                economicBasisStatus);
         meterRegistry.timer("signals.operation_movement_event.persist.duration", "result", "ok", "eventType", safeTag(entity.getEventType()))
                 .record(Duration.ofNanos(System.nanoTime() - startedNs));
         String ledgerDiagnostic = entity.getReasonCode() == null ? "" : CopyLogAdvice.fields(
@@ -333,6 +337,28 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         }
     }
 
+    private void recordAuthoritativeUserFillMetric(
+            OperationMovementEventEntity entity,
+            boolean metricEligible,
+            String economicBasisStatus
+    ) {
+        if (entity == null || !"USER_FILL".equalsIgnoreCase(
+                entity.getEconomicEventKind())) {
+            return;
+        }
+        String reason = entity.getRaw() == null
+                ? "unknown"
+                : entity.getRaw()
+                        .path("economicBasisReason")
+                        .asText("unknown");
+        meterRegistry.counter(
+                "signals.hyperliquid.user_fill.economic.total",
+                "metricEligible", String.valueOf(metricEligible),
+                "economicBasisStatus", safeTag(economicBasisStatus),
+                "reason", safeTag(reason))
+                .increment();
+    }
+
     private String economicBasisStatus(OperationMovementEventEntity entity) {
         if (entity == null) {
             return "NOT_APPLICABLE";
@@ -366,6 +392,15 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         if (command.getEventTime() != null) {
             if (command.getSourceSequence() != null
                     && StringUtils.hasText(command.getMovementKey())) {
+                if (hasAuthoritativeStateContract(command)) {
+                    return repository
+                            .findPreviousAuthoritativeUserFillByEconomicOrder(
+                                    command.getPositionKey(),
+                                    command.getEventTime(),
+                                    command.getSourceSequence(),
+                                    command.getMovementKey())
+                            .orElse(null);
+                }
                 return repository.findPreviousByEconomicOrder(
                                 command.getPositionKey(),
                                 command.getEventTime(),
@@ -576,20 +611,27 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
     private OperationMovementEventEntity toEntity(OperationMovementEventRecordCommand command, OperationMovementEventEntity previous) {
         OffsetDateTime now = utcNow();
         boolean authoritativeState = hasAuthoritativeStateContract(command);
-        BigDecimal previousSize = authoritativeState
+        BigDecimal signedPreviousSize = authoritativeState
                 ? command.getSourcePreviousPositionQuantity()
                 : positive(firstNonNull(command.getPreviousSizeQty(), previous == null ? null : previous.getResultingSizeQty()));
-        BigDecimal resultingSize = authoritativeState
+        BigDecimal signedResultingSize = authoritativeState
                 ? command.getSourceResultingPositionQuantity()
                 : resultingSize(command);
+        BigDecimal previousSize = authoritativeState
+                ? positive(signedPreviousSize)
+                : signedPreviousSize;
+        BigDecimal resultingSize = authoritativeState
+                ? positive(signedResultingSize)
+                : signedResultingSize;
         BigDecimal deltaSize = authoritativeState
-                ? resultingSize.subtract(previousSize)
+                ? signedResultingSize.subtract(signedPreviousSize)
                 : command.getDeltaSizeQty();
         if (!authoritativeState && deltaSize == null && resultingSize != null && previousSize != null) {
             deltaSize = resultingSize.subtract(previousSize);
         }
         String eventType = authoritativeState
-                ? classifyAuthoritativeState(previousSize, resultingSize)
+                ? classifyAuthoritativeState(
+                        signedPreviousSize, signedResultingSize)
                 : classifyEvent(command, previousSize, resultingSize, deltaSize);
         boolean estimatedPositionDelta = isEstimatedPositionDelta(command);
         BigDecimal realizedPnl = estimatedPositionDelta
@@ -783,13 +825,14 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
             return new EconomicContractEvaluation("AMBIGUOUS", "AUTHORITATIVE_EXECUTION_PRICE_MISSING");
         }
 
-        if (localPrevious == null) {
-            if (before.compareTo(ZERO) != 0) {
-                return new EconomicContractEvaluation("SOURCE_LEDGER_DIVERGENCE", "SOURCE_LEDGER_STATE_DIVERGENCE");
+        if (trustedAuthoritativePredecessor(localPrevious)) {
+            BigDecimal localAfter =
+                    localPrevious.getSourceResultingPositionQuantity();
+            if (localAfter == null || localAfter.compareTo(before) != 0) {
+                return new EconomicContractEvaluation(
+                        "SOURCE_LEDGER_DIVERGENCE",
+                        "SOURCE_LEDGER_STATE_DIVERGENCE");
             }
-        } else if (localPrevious.getResultingSizeQty() == null
-                || localPrevious.getResultingSizeQty().compareTo(before) != 0) {
-            return new EconomicContractEvaluation("SOURCE_LEDGER_DIVERGENCE", "SOURCE_LEDGER_STATE_DIVERGENCE");
         }
 
         if (DELIVERY_GAP_RECOVERY.equals(deliveryMode)
@@ -800,7 +843,26 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         if (DELIVERY_HISTORICAL_REPLAY.equals(deliveryMode)) {
             return new EconomicContractEvaluation("COMPLETE", "HISTORICAL_REPLAY_AUDIT_ONLY");
         }
+        if (!trustedAuthoritativePredecessor(localPrevious)
+                && before.compareTo(ZERO) != 0) {
+            return new EconomicContractEvaluation(
+                    "COMPLETE",
+                    "AUTHORITATIVE_PREEXISTING_POSITION_BOUNDARY");
+        }
         return new EconomicContractEvaluation("COMPLETE", "AUTHORITATIVE_STATE_CONTRACT_VALID");
+    }
+
+    private boolean trustedAuthoritativePredecessor(
+            OperationMovementEventEntity previous
+    ) {
+        return previous != null
+                && "USER_FILL".equalsIgnoreCase(
+                previous.getEconomicEventKind())
+                && Boolean.FALSE.equals(previous.getSourceEstimated())
+                && Boolean.TRUE.equals(previous.getMetricEligible())
+                && "COMPLETE".equalsIgnoreCase(
+                previous.getEconomicBasisStatus())
+                && previous.getSourceResultingPositionQuantity() != null;
     }
 
     private boolean hasAuthoritativeStateContract(OperationMovementEventEntity entity) {
@@ -857,6 +919,12 @@ public class OperationMovementEventServiceImpl implements OperationMovementEvent
         }
         if (!"COMPLETE".equals(evaluation.status())) {
             addIfMissing(flags, evaluation.status());
+        }
+        if ("AUTHORITATIVE_PREEXISTING_POSITION_BOUNDARY".equals(
+                evaluation.reason())) {
+            addIfMissing(
+                    flags,
+                    "AUTHORITATIVE_PREEXISTING_POSITION_BOUNDARY");
         }
         if (DELIVERY_HISTORICAL_REPLAY.equals(normalizeUpper(entity.getSourceDeliveryMode(), null))) {
             addIfMissing(flags, "AUDIT_ONLY_HISTORICAL_REPLAY");

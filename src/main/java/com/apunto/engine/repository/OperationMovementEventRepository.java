@@ -59,6 +59,42 @@ public interface OperationMovementEventRepository extends JpaRepository<Operatio
     );
 
     @Query(value = """
+            SELECT e.*
+            FROM futuros_operaciones.operation_movement_event e
+            WHERE e.position_key = :positionKey
+              AND e.economic_event_kind = 'USER_FILL'
+              AND e.source_estimated IS FALSE
+              AND e.metric_eligible IS TRUE
+              AND e.economic_basis_status = 'COMPLETE'
+              AND (
+                e.event_time < :eventTime
+                OR (
+                  e.event_time = :eventTime
+                  AND (
+                    COALESCE(e.source_sequence, (-9223372036854775807 - 1))
+                      < COALESCE(:sourceSequence, (-9223372036854775807 - 1))
+                    OR (
+                      COALESCE(e.source_sequence, (-9223372036854775807 - 1))
+                        = COALESCE(:sourceSequence, (-9223372036854775807 - 1))
+                      AND e.movement_key < :movementKey
+                    )
+                  )
+                )
+              )
+            ORDER BY e.event_time DESC,
+                     COALESCE(e.source_sequence, (-9223372036854775807 - 1)) DESC,
+                     e.movement_key DESC
+            LIMIT 1
+            """, nativeQuery = true)
+    Optional<OperationMovementEventEntity>
+    findPreviousAuthoritativeUserFillByEconomicOrder(
+            @Param("positionKey") String positionKey,
+            @Param("eventTime") OffsetDateTime eventTime,
+            @Param("sourceSequence") Long sourceSequence,
+            @Param("movementKey") String movementKey
+    );
+
+    @Query(value = """
             SELECT pg_advisory_xact_lock(
               hashtextextended(:positionKey, 0)
             )

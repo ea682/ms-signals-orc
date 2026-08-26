@@ -4,6 +4,7 @@
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 
 def main() -> None:
@@ -13,19 +14,91 @@ def main() -> None:
     parser.add_argument("--tid", type=int, required=True)
     parser.add_argument("--source-timestamp", type=int, required=True)
     parser.add_argument("--start-position", default="0")
+    parser.add_argument("--coin", default="HYPE")
+    parser.add_argument("--price", default="21.25")
+    parser.add_argument("--size", default="1")
+    parser.add_argument("--side", default="B")
+    parser.add_argument("--direction", default="Open Long")
+    parser.add_argument("--closed-pnl", default="0")
+    parser.add_argument("--fee", default="0.01")
+    parser.add_argument("--fills-file")
     args = parser.parse_args()
 
     wallet = args.wallet.lower()
+    if args.fills_file:
+        with open(args.fills_file, "r", encoding="utf-8") as stream:
+            configured_fills = json.load(stream)
+        if not isinstance(configured_fills, list) or not configured_fills:
+            raise ValueError("fills file must contain a non-empty JSON array")
+        active_tids: set[int] = set()
+    else:
+        configured_fills = [
+            {
+                "wallet": wallet,
+                "coin": args.coin,
+                "px": args.price,
+                "sz": args.size,
+                "side": args.side,
+                "time": args.source_timestamp,
+                "startPosition": args.start_position,
+                "dir": args.direction,
+                "closedPnl": args.closed_pnl,
+                "hash": f"0xpackaged{args.tid}",
+                "fee": args.fee,
+                "tid": args.tid,
+                "oid": args.tid,
+            }
+        ]
+        active_tids = {args.tid}
+
+    def fills_for(request_wallet: str, request: dict) -> list[dict]:
+        result = []
+        start_time = request.get("startTime")
+        end_time = request.get("endTime")
+        for configured in configured_fills:
+            owner = str(configured.get("wallet", wallet)).lower()
+            if owner != request_wallet.lower():
+                continue
+            fill_time = int(configured.get("time", 0))
+            fill_tid = int(configured.get("tid", 0))
+            if fill_tid not in active_tids:
+                continue
+            if start_time is not None and fill_time < int(start_time):
+                continue
+            if end_time is not None and fill_time > int(end_time):
+                continue
+            fill = {key: value for key, value in configured.items()
+                    if key != "wallet"}
+            result.append(fill)
+        return result
+
+    universe = sorted({str(fill.get("coin", "HYPE"))
+                       for fill in configured_fills})
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - HTTP handler contract
-            if self.path == "/health":
-                self._respond(200, {"status": "UP"})
+            parsed = urlparse(self.path)
+            if parsed.path == "/health":
+                self._respond(200, {
+                    "status": "UP", "activeFills": len(active_tids)
+                })
             else:
                 self._respond(404, {"error": "not_found"})
 
         def do_POST(self) -> None:  # noqa: N802 - HTTP handler contract
-            if self.path != "/info":
+            parsed = urlparse(self.path)
+            if parsed.path == "/activate":
+                values = parse_qs(parsed.query).get("tid", [])
+                if len(values) != 1:
+                    self._respond(400, {"error": "tid_required"})
+                    return
+                active_tids.add(int(values[0]))
+                self._respond(200, {
+                    "activated": int(values[0]),
+                    "activeFills": len(active_tids),
+                })
+                return
+            if parsed.path != "/info":
                 self._respond(404, {"error": "not_found"})
                 return
             try:
@@ -43,7 +116,8 @@ def main() -> None:
                 flush=True,
             )
             if request_type == "meta":
-                body = {"universe": [{"name": "HYPE"}], "tokens": []}
+                body = {"universe": [{"name": coin} for coin in universe],
+                        "tokens": []}
             elif request_type.lower() == "clearinghousestate":
                 body = {
                     "marginSummary": {
@@ -56,22 +130,7 @@ def main() -> None:
                     "time": args.source_timestamp,
                 }
             elif request_type.lower() in ("userfills", "userfillsbytime"):
-                body = [
-                    {
-                        "coin": "HYPE",
-                        "px": "21.25",
-                        "sz": "1",
-                        "side": "B",
-                        "time": args.source_timestamp,
-                        "startPosition": args.start_position,
-                        "dir": "Open Long",
-                        "closedPnl": "0",
-                        "hash": f"0xpackaged{args.tid}",
-                        "fee": "0.01",
-                        "tid": args.tid,
-                        "oid": args.tid,
-                    }
-                ] if str(request.get("user", "")).lower() == wallet else []
+                body = fills_for(str(request.get("user", "")), request)
             else:
                 body = {}
             self._respond(200, body)
@@ -110,6 +169,7 @@ def main() -> None:
                 "listen": f"127.0.0.1:{args.port}",
                 "wallet": wallet,
                 "tid": args.tid,
+                "fills": len(configured_fills),
             },
             separators=(",", ":"),
         ),
