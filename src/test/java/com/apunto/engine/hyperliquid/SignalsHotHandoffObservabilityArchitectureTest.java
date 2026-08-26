@@ -39,10 +39,16 @@ class SignalsHotHandoffObservabilityArchitectureTest {
                 "signals_hyperliquid_user_fill_durable_total",
                 "signals.hyperliquid.user_fill.durable.total");
         assertContract(alerts, Files.readString(Path.of(
+                        "src/main/java/com/apunto/engine/service/impl/OperationMovementEventServiceImpl.java")),
+                "signals_hyperliquid_user_fill_economic_total",
+                "signals.hyperliquid.user_fill.economic.total");
+        assertContract(alerts, Files.readString(Path.of(
                         "src/main/java/com/apunto/engine/hyperliquid/service/impl/HyperliquidDirectIngestIdempotencyGuard.java")),
                 "duplicate_noop_total",
                 "duplicate_noop_total");
         assertTrue(alerts.contains("SignalsUpButEconomicHandoffStalled"));
+        assertTrue(alerts.contains("SignalsUserFillWithoutEligibleEconomics"));
+        assertTrue(alerts.contains("SOURCE_LEDGER_DIVERGENCE"));
         assertTrue(alerts.contains("signals_movement_event_published_total"));
     }
 

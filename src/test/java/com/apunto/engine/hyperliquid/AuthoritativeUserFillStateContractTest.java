@@ -59,6 +59,67 @@ class AuthoritativeUserFillStateContractTest {
     }
 
     @Test
+    void productionZecReductionEstablishesBoundaryOverAuditOnlySnapshot()
+            throws Exception {
+        HyperliquidDeltaRequest request = productionRequest(
+                "hyperliquid:trade:0x29998ebd5be758fdaa06f0ef48d6c890978b65de:970505954175203",
+                970505954175203L,
+                "ZECUSDT",
+                "LONG",
+                "259.57",
+                "209.57",
+                "-50",
+                "50",
+                "745",
+                "2312.385",
+                "15.924375");
+        OperationMovementEventEntity entity = entity(
+                request,
+                auditPrevious("388.5", "POSITION_DELTA"));
+
+        assertEquals("USER_FILL", entity.getEconomicEventKind());
+        assertEquals("REDUCE", entity.getEventType());
+        assertDecimal("259.57", entity.getPreviousSizeQty());
+        assertDecimal("209.57", entity.getResultingSizeQty());
+        assertDecimal("-50", entity.getDeltaSizeQty());
+        assertEquals("COMPLETE", economicBasisStatus(entity));
+        assertEquals("AUTHORITATIVE_PREEXISTING_POSITION_BOUNDARY",
+                entity.getRaw().path("economicBasisReason").asText());
+        assertTrue(kafkaEvent(entity).metricEligible());
+    }
+
+    @Test
+    void productionShortReductionStoresMagnitudesAndKeepsSignedSourceState()
+            throws Exception {
+        HyperliquidDeltaRequest request = productionRequest(
+                "hyperliquid:trade:0xa9b95f2a2e7ef219021efc5c04c32761b8553bbd:1003441918511961",
+                1003441918511961L,
+                "BTCUSDT",
+                "SHORT",
+                "-171.572390",
+                "-171.572190",
+                "0.000200",
+                "0.000200",
+                "70018",
+                "-0.095580",
+                "0.006301");
+        OperationMovementEventEntity entity = entity(
+                request,
+                auditPrevious("171.6", "POSITION_DELTA"));
+
+        assertDecimal("171.572390", entity.getPreviousSizeQty());
+        assertDecimal("171.572190", entity.getResultingSizeQty());
+        assertDecimal("0.000200", entity.getDeltaSizeQty());
+        assertDecimal("-171.572390",
+                entity.getSourcePreviousPositionQuantity());
+        assertDecimal("-171.572190",
+                entity.getSourceResultingPositionQuantity());
+        assertEquals("REDUCE", entity.getEventType());
+        assertEquals("COMPLETE", economicBasisStatus(entity));
+        assertTrue(kafkaEvent(entity).metricEligible());
+    }
+
+    @Test
     void increaseCarriesNoPositiveCloseQuantity() throws Exception {
         OperationMovementEventEntity entity = entity(
                 request("RESIZE", "LONG", "OPEN", "10", "12", "2", "0", "LIVE_USER_FILL"),
@@ -91,7 +152,8 @@ class AuthoritativeUserFillStateContractTest {
         assertEquals("FLIP", entity.getEventType());
         assertDecimal("-15", entity.getDeltaSizeQty());
         assertDecimal("10", entity.getEffectiveCloseQty());
-        assertDecimal("-5", entity.getResultingSizeQty());
+        assertDecimal("5", entity.getResultingSizeQty());
+        assertDecimal("-5", entity.getSourceResultingPositionQuantity());
         assertEquals("COMPLETE", economicBasisStatus(entity));
     }
 
@@ -193,6 +255,7 @@ class AuthoritativeUserFillStateContractTest {
                   "economicEventVersion":3,
                   "sourceEventId":"hyperliquid:user-fill:0xabc:101",
                   "sourceSequence":101,
+                  "sourceFeeUsd":0.1,
                   "executionPriceBasis":"HYPERLIQUID_USER_FILL_PX",
                   "notionalBasis":"EXECUTED_QTY_X_PRICE",
                   "sourceEstimated":false,
@@ -202,6 +265,45 @@ class AuthoritativeUserFillStateContractTest {
                   %s
                 }
                 """.formatted(deltaType, side, status, sizeQty, closeQty, deliveryMode, stateContract);
+    }
+
+    private HyperliquidDeltaRequest productionRequest(
+            String sourceEventId,
+            long sourceSequence,
+            String symbol,
+            String side,
+            String before,
+            String after,
+            String signedExecution,
+            String closeQty,
+            String executionPrice,
+            String realizedPnl,
+            String fee
+    ) throws Exception {
+        String json = baseJson(
+                "RESIZE", side, "OPEN", after, closeQty,
+                "LIVE_USER_FILL", true)
+                .replace("\"__BEFORE__\"", before)
+                .replace("\"__AFTER__\"", after)
+                .replace("\"__SIGNED__\"", signedExecution)
+                .replace("\"__EXECUTION__\"",
+                        new BigDecimal(signedExecution).abs().toPlainString())
+                .replace("fill-event-101", sourceEventId)
+                .replace("fill-idempotency-101", sourceEventId)
+                .replace("hyperliquid:user-fill:0xabc:101", sourceEventId)
+                .replace("\"sourceSequence\":101",
+                        "\"sourceSequence\":" + sourceSequence)
+                .replace("\"symbol\":\"BTCUSDT\"",
+                        "\"symbol\":\"" + symbol + "\"")
+                .replace("\"effectiveEntryPrice\":100",
+                        "\"effectiveEntryPrice\":" + executionPrice)
+                .replace("\"effectiveExitPrice\":101",
+                        "\"effectiveExitPrice\":" + executionPrice)
+                .replace("\"effectiveRealizedPnlUsd\":2",
+                        "\"effectiveRealizedPnlUsd\":" + realizedPnl)
+                .replace("\"sourceFeeUsd\":0.1",
+                        "\"sourceFeeUsd\":" + fee);
+        return mapper.readValue(json, HyperliquidDeltaRequest.class);
     }
 
     private OperationMovementEventEntity entity(
@@ -235,11 +337,35 @@ class AuthoritativeUserFillStateContractTest {
     private OperationMovementEventEntity previous(String resulting) {
         return OperationMovementEventEntity.builder()
                 .resultingSizeQty(new BigDecimal(resulting))
+                .sourceResultingPositionQuantity(new BigDecimal(resulting))
+                .economicEventKind("USER_FILL")
+                .economicBasisStatus("COMPLETE")
+                .metricEligible(true)
+                .sourceEstimated(false)
                 .entryPrice(new BigDecimal("100"))
                 .typeOperation("LONG")
                 .eventTime(java.time.OffsetDateTime.parse("2026-08-01T11:59:59Z"))
                 .sourceSequence(100L)
                 .movementKey("movement|sha256:" + "0".repeat(64))
+                .build();
+    }
+
+    private OperationMovementEventEntity auditPrevious(
+            String resulting,
+            String economicEventKind
+    ) {
+        return OperationMovementEventEntity.builder()
+                .resultingSizeQty(new BigDecimal(resulting))
+                .economicEventKind(economicEventKind)
+                .economicBasisStatus("NOT_APPLICABLE")
+                .metricEligible(false)
+                .sourceEstimated(true)
+                .entryPrice(new BigDecimal("700"))
+                .typeOperation("LONG")
+                .eventTime(java.time.OffsetDateTime.parse(
+                        "2026-08-22T05:02:00.035Z"))
+                .sourceSequence(970505954175000L)
+                .movementKey("movement|sha256:" + "1".repeat(64))
                 .build();
     }
 
