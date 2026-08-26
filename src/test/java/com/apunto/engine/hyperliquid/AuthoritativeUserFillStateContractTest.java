@@ -46,7 +46,7 @@ class AuthoritativeUserFillStateContractTest {
     }
 
     @Test
-    void localLedgerIsOnlyAContinuityCheckAndNeverReplacesSourceBefore() throws Exception {
+    void outOfOrderFillUsesItsAuthoritativeBoundaryInsteadOfCurrentLedger() throws Exception {
         OperationMovementEventEntity entity = entity(
                 request("RESIZE", "LONG", "OPEN", "10", "8", "-2", "2", "LIVE_USER_FILL"),
                 previous("15"));
@@ -54,8 +54,10 @@ class AuthoritativeUserFillStateContractTest {
         assertDecimal("10", entity.getPreviousSizeQty());
         assertDecimal("8", entity.getResultingSizeQty());
         assertDecimal("-2", entity.getDeltaSizeQty());
-        assertEquals("SOURCE_LEDGER_DIVERGENCE", economicBasisStatus(entity));
-        assertFalse(kafkaEvent(entity).metricEligible());
+        assertEquals("COMPLETE", economicBasisStatus(entity));
+        assertEquals("AUTHORITATIVE_CAUSAL_GAP_BOUNDARY",
+                entity.getRaw().path("economicBasisReason").asText());
+        assertTrue(kafkaEvent(entity).metricEligible());
     }
 
     @Test

@@ -251,6 +251,68 @@ class HyperliquidDirectIngestIdempotencyGuardTest {
     }
 
     @Test
+    void sameAuthoritativeFillLiveThenRecoveryIsHealthyDuplicate() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        var liveRequest = mapper.readValue("""
+                {
+                  "idempotencyKey":"hyperliquid:user-fill:0xabc:991",
+                  "deltaType":"RESIZE",
+                  "wallet":"0xabc",
+                  "symbol":"BTCUSDT",
+                  "side":"LONG",
+                  "status":"OPEN",
+                  "sourceTs":1785585600000,
+                  "economicEventKind":"USER_FILL",
+                  "sourceSequence":991,
+                  "sourceEstimated":false,
+                  "sourcePreviousPositionQuantity":10,
+                  "sourceResultingPositionQuantity":8,
+                  "sourceExecutionQuantity":2,
+                  "sourceSignedExecutionQuantity":-2,
+                  "sourceDeliveryMode":"LIVE_USER_FILL"
+                }
+                """, com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest.class);
+        var recoveredRequest = mapper.readValue("""
+                {
+                  "idempotencyKey":"hyperliquid:user-fill:0xabc:991",
+                  "deltaType":"RESIZE",
+                  "wallet":"0xabc",
+                  "symbol":"BTCUSDT",
+                  "side":"LONG",
+                  "status":"OPEN",
+                  "sourceTs":1785585600000,
+                  "economicEventKind":"USER_FILL",
+                  "sourceSequence":991,
+                  "sourceEstimated":false,
+                  "sourcePreviousPositionQuantity":10,
+                  "sourceResultingPositionQuantity":8,
+                  "sourceExecutionQuantity":2,
+                  "sourceSignedExecutionQuantity":-2,
+                  "sourceDeliveryMode":"GAP_RECOVERY",
+                  "sourceRecoveredAt":"2026-08-01T12:00:00Z"
+                }
+                """, com.apunto.engine.hyperliquid.dto.HyperliquidDeltaRequest.class);
+        HyperliquidMappedDelta live = new HyperliquidMappedDelta(
+                liveRequest.idempotencyKey(), "position-a", liveRequest.wallet(),
+                liveRequest.symbol(), liveRequest.side(), liveRequest.deltaType(),
+                null, liveRequest);
+        HyperliquidMappedDelta recovered = new HyperliquidMappedDelta(
+                recoveredRequest.idempotencyKey(), "position-a", recoveredRequest.wallet(),
+                recoveredRequest.symbol(), recoveredRequest.side(), recoveredRequest.deltaType(),
+                null, recoveredRequest);
+        FakeJdbcTemplate jdbc = new FakeJdbcTemplate(1L, 0L);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        HyperliquidDirectIngestIdempotencyGuard guard = guard(jdbc, registry, false);
+
+        assertTrue(guard.tryAcquire(live, "same-fill"));
+        assertFalse(guard.tryAcquire(recovered, "same-fill"));
+        assertNotNull(registry
+                .find("signals.hyperliquid.direct_ingest.distributed_dedupe.total")
+                .tag("result", "duplicate")
+                .counter());
+    }
+
+    @Test
     void expiredOrFailedLeaseCanBeReacquiredOnlyForSamePayload() {
         FakeJdbcTemplate jdbc = new FakeJdbcTemplate(2L);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();

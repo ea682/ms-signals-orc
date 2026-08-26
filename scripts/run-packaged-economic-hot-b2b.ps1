@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param(
-    [string]$SentinelArtifactPath = '..\ms-sentinel-hyperliquid\target\ms-sentinel-hyperliquid-1.0.36.jar',
+    [string]$SentinelArtifactPath = '..\ms-sentinel-hyperliquid\target\ms-sentinel-hyperliquid-1.0.37.jar',
     [string]$SentinelTestClassesPath = '..\ms-sentinel-hyperliquid\target\test-classes',
-    [string]$SignalsArtifactPath = 'target\ms-signals-orc-1.4.36.jar',
-    [string]$EtlArtifactPath = '..\ms-wallet-metric-etl\target\ms-wallet-metric-etl-1.0.20.jar',
+    [string]$SignalsArtifactPath = 'target\ms-signals-orc-1.4.37.jar',
+    [string]$EtlArtifactPath = '..\ms-wallet-metric-etl\target\ms-wallet-metric-etl-1.0.21.jar',
     [string]$SignalsBaselineSchemaPath = 'C:\Users\erika\Downloads\signals-hot-live-cert-evidence-20260824\audit-schema-baseline.sql',
     [string]$SignalsBaselineHistoryPath = 'C:\Users\erika\Downloads\signals-hot-live-cert-evidence-20260824\audit-flyway-history.sql',
     [string]$JavaPath = 'C:\Users\erika\.jdks\graalvm-ce-21.0.2\bin\java.exe',
