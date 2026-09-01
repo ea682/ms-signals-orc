@@ -6,11 +6,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.testcontainers.containers.PostgreSQLContainer;
 
 import javax.sql.DataSource;
 import java.net.URI;
@@ -31,20 +33,34 @@ class HyperliquidDirectIngestIdempotencyGuardPostgresIT {
 
     private static DataSource dataSource;
     private static JdbcTemplate jdbc;
+    private static PostgreSQLContainer<?> postgres;
 
     @BeforeAll
     static void applyRelevantProductionMigrations() {
-        String url = System.getProperty(
-                "hl.it.db.url",
-                "jdbc:postgresql://127.0.0.1:55441/hyperliquid_it");
+        String configuredUrl = System.getProperty("hl.it.db.url");
+        String url;
+        String username;
+        String password;
+        if (configuredUrl == null || configuredUrl.isBlank()) {
+            postgres = new PostgreSQLContainer<>("postgres:16-alpine")
+                    .withDatabaseName("hyperliquid_it")
+                    .withUsername("signals_it")
+                    .withPassword("signals_it_local_only");
+            postgres.start();
+            url = postgres.getJdbcUrl();
+            username = postgres.getUsername();
+            password = postgres.getPassword();
+        } else {
+            url = configuredUrl;
+            username = System.getProperty("hl.it.db.user", "postgres");
+            password = System.getProperty("hl.it.db.password", "codex_hl_only");
+        }
         assertLocalDatabase(url);
         DriverManagerDataSource configured = new DriverManagerDataSource();
         configured.setDriverClassName("org.postgresql.Driver");
         configured.setUrl(url);
-        configured.setUsername(System.getProperty(
-                "hl.it.db.user", "postgres"));
-        configured.setPassword(System.getProperty(
-                "hl.it.db.password", "codex_hl_only"));
+        configured.setUsername(username);
+        configured.setPassword(password);
         dataSource = configured;
         jdbc = new JdbcTemplate(dataSource);
         jdbc.execute("CREATE SCHEMA IF NOT EXISTS futuros_operaciones");
@@ -80,6 +96,13 @@ class HyperliquidDirectIngestIdempotencyGuardPostgresIT {
                         + "V202607110003__hyperliquid_dedupe_payload_fingerprint.sql",
                 "db/migration/"
                         + "V202607250001__hyperliquid_replica_payload_conflict.sql");
+    }
+
+    @AfterAll
+    static void stopIsolatedPostgres() {
+        if (postgres != null) {
+            postgres.stop();
+        }
     }
 
     @BeforeEach

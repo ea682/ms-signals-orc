@@ -4,6 +4,7 @@
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
 from urllib.parse import parse_qs, urlparse
 
 
@@ -51,6 +52,9 @@ def main() -> None:
         ]
         active_tids = {args.tid}
 
+    control_lock = Lock()
+    rate_limit_remaining = 0
+
     def fills_for(request_wallet: str, request: dict) -> list[dict]:
         result = []
         start_time = request.get("startTime")
@@ -79,13 +83,18 @@ def main() -> None:
         def do_GET(self) -> None:  # noqa: N802 - HTTP handler contract
             parsed = urlparse(self.path)
             if parsed.path == "/health":
+                with control_lock:
+                    remaining = rate_limit_remaining
                 self._respond(200, {
-                    "status": "UP", "activeFills": len(active_tids)
+                    "status": "UP",
+                    "activeFills": len(active_tids),
+                    "rateLimitRemaining": remaining,
                 })
             else:
                 self._respond(404, {"error": "not_found"})
 
         def do_POST(self) -> None:  # noqa: N802 - HTTP handler contract
+            nonlocal rate_limit_remaining
             parsed = urlparse(self.path)
             if parsed.path == "/activate":
                 values = parse_qs(parsed.query).get("tid", [])
@@ -98,8 +107,30 @@ def main() -> None:
                     "activeFills": len(active_tids),
                 })
                 return
+            if parsed.path == "/rate-limit":
+                values = parse_qs(parsed.query).get("count", [])
+                if len(values) != 1 or int(values[0]) < 0:
+                    self._respond(400, {"error": "non_negative_count_required"})
+                    return
+                with control_lock:
+                    rate_limit_remaining = int(values[0])
+                    remaining = rate_limit_remaining
+                self._respond(200, {"rateLimitRemaining": remaining})
+                return
             if parsed.path != "/info":
                 self._respond(404, {"error": "not_found"})
+                return
+            with control_lock:
+                if rate_limit_remaining > 0:
+                    rate_limit_remaining -= 1
+                    remaining = rate_limit_remaining
+                else:
+                    remaining = -1
+            if remaining >= 0:
+                self._respond(429, {
+                    "error": "fixture_rate_limited",
+                    "rateLimitRemaining": remaining,
+                })
                 return
             try:
                 request = json.loads(self._read_request_body() or b"{}")

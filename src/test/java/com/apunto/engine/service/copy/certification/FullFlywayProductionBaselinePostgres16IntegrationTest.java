@@ -17,15 +17,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class FullFlywayProductionBaselinePostgres16IntegrationTest {
 
     @Test
-    void productionSchemaBaselineValidatesEveryHistoricalMigrationAndAppliesLifecycleMigrations() throws Exception {
+    void productionSchemaBaselineValidatesHistoricalUpgradeOrCurrentSchema() throws Exception {
         try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
                 .withDatabaseName("copy_full_flyway_test")
                 .withUsername("copy_test")
                 .withPassword("copy_test")) {
             postgres.start();
             MigrateResult result = ProductionBaselinePostgres.restoreAndMigrate(postgres);
-            assertEquals(11, result.migrationsExecuted,
-                    "the production baseline must receive the lifecycle and subsequent guard migrations");
+            int expectedMigrations = switch (result.initialSchemaVersion) {
+                case "202607140002" -> 11;
+                case "202608010001" -> 0;
+                default -> throw new AssertionError(
+                        "unsupported production baseline version: "
+                                + result.initialSchemaVersion);
+            };
+            assertEquals(expectedMigrations, result.migrationsExecuted,
+                    "the production baseline must apply every migration after its recorded version");
             MigrationInfo[] pending = ProductionBaselinePostgres.flyway(postgres).info().pending();
             assertEquals(0, pending.length,
                     "all real Flyway migrations must be applied, pending=" + Arrays.toString(pending));
@@ -91,6 +98,11 @@ class FullFlywayProductionBaselinePostgres16IntegrationTest {
                                       '202607180003', '202607180004', '202607180005',
                                       '202607180006') and success
                     """));
+            assertEquals("202608010001", scalarText(statement, """
+                    select max(version)
+                    from futuros_operaciones.flyway_schema_history
+                    where success
+                    """), "the restored production baseline must reach the current schema");
             assertEquals(0L, scalar(statement, """
                     select count(*)
                     from pg_constraint
@@ -114,6 +126,13 @@ class FullFlywayProductionBaselinePostgres16IntegrationTest {
         try (ResultSet rows = statement.executeQuery(sql)) {
             assertTrue(rows.next());
             return rows.getLong(1);
+        }
+    }
+
+    private static String scalarText(Statement statement, String sql) throws Exception {
+        try (ResultSet rows = statement.executeQuery(sql)) {
+            assertTrue(rows.next());
+            return rows.getString(1);
         }
     }
 }

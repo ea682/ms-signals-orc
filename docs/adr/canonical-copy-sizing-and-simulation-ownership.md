@@ -3,6 +3,11 @@
 Estado: ACEPTADO  
 Fecha: 2026-07-14
 
+> Parcialmente reemplazado el 2026-08-28 por
+> `copy-policy-v1-path-dependent-replay-ownership.md`. En particular, ya no son vigentes
+> la semántica de leverage de los puntos 3/4, la matriz estática como certificación
+> suficiente ni la derivación implícita de margen sin provenance certificado.
+
 ## Contexto
 
 El repositorio contiene el modulo real `modules/copy-target-core`. Signals lo consume

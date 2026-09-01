@@ -39,6 +39,7 @@ public final class TargetPortfolioCalculator {
         List<TargetLegDecision> omitted = new ArrayList<>();
         List<Candidate> candidates = new ArrayList<>();
         Set<String> sourceLegIds = new HashSet<>();
+        Set<String> unavailableMarginProtectedPositionKeys = new HashSet<>();
 
         for (SourcePosition position : request.sourcePositions()) {
             if (!sourceLegIds.add(position.sourceLegId())) {
@@ -46,6 +47,13 @@ public final class TargetPortfolioCalculator {
             }
             if (equityFailure != null) {
                 omitted.add(omitted(position, equityFailure, "source equity is not entry-eligible"));
+                continue;
+            }
+            if (position.notionalUsd().compareTo(DecimalSupport.ZERO) > 0
+                    && !position.marginProvenance().usableForEntrySizing()) {
+                omitted.add(omitted(position, DecisionCode.BLOCKED_SOURCE_MARGIN_UNAVAILABLE,
+                        "source margin provenance is unavailable for entry sizing"));
+                unavailableMarginProtectedPositionKeys.add(key(position.targetSymbol(), position.side()));
                 continue;
             }
             CandidateResolution resolution = resolveCandidate(request, position, filters);
@@ -74,9 +82,12 @@ public final class TargetPortfolioCalculator {
             }
             candidates = unambiguous;
         }
+        boolean marginUnavailableWithoutCandidate = !unavailableMarginProtectedPositionKeys.isEmpty()
+                && candidates.isEmpty();
         boolean entrySizingAllowed = equityFailure == null
                 && targetPositionFailure == null
-                && collisionKeys.isEmpty();
+                && collisionKeys.isEmpty()
+                && !marginUnavailableWithoutCandidate;
 
         candidates.sort(SELECTION_ORDER);
         BigDecimal availableTargetMargin = availableTargetMargin(request);
@@ -89,6 +100,7 @@ public final class TargetPortfolioCalculator {
 
         List<TargetLegDecision> selected = new ArrayList<>();
         Set<String> desiredPositionKeys = new HashSet<>(collisionProtectedPositionKeys);
+        desiredPositionKeys.addAll(unavailableMarginProtectedPositionKeys);
         BigDecimal selectedSourceRawNotional = DecimalSupport.ZERO;
         BigDecimal finalTargetNotional = DecimalSupport.ZERO;
         int selectedSourceMovements = 0;
@@ -112,7 +124,9 @@ public final class TargetPortfolioCalculator {
             addRequiredCloses(existing, desiredPositionKeys, selected, filters);
         }
 
+        boolean hasUnavailableMargin = !unavailableMarginProtectedPositionKeys.isEmpty();
         BigDecimal totalRawNotional = request.sourcePositions().stream()
+                .filter(position -> position.marginProvenance().usableForEntrySizing())
                 .map(position -> rawTargetNotional(request, position))
                 .reduce(DecimalSupport.ZERO, BigDecimal::add);
         boolean equityBlockedWithSourcePositions = equityFailure != null
@@ -123,7 +137,7 @@ public final class TargetPortfolioCalculator {
                 ? DecimalSupport.ONE
                 : DecimalSupport.ratio(BigDecimal.valueOf(selectedSourceMovements),
                 BigDecimal.valueOf(request.sourcePositions().size()));
-        BigDecimal notionalCoverage = equityBlockedWithSourcePositions
+        BigDecimal notionalCoverage = equityBlockedWithSourcePositions || hasUnavailableMargin
                 ? DecimalSupport.ZERO
                 : totalRawNotional.compareTo(DecimalSupport.ZERO) <= 0
                 ? DecimalSupport.ONE
@@ -140,6 +154,8 @@ public final class TargetPortfolioCalculator {
             portfolioCode = DecisionCode.BLOCKED_TARGET_SYMBOL_COLLISION;
         } else if (targetPositionFailure != null) {
             portfolioCode = targetPositionFailure;
+        } else if (marginUnavailableWithoutCandidate) {
+            portfolioCode = DecisionCode.BLOCKED_SOURCE_MARGIN_UNAVAILABLE;
         } else if (!request.sourcePositions().isEmpty()
                 && availableTargetMargin.compareTo(DecimalSupport.ZERO) <= 0) {
             portfolioCode = DecisionCode.BLOCKED_INSUFFICIENT_MARGIN;
