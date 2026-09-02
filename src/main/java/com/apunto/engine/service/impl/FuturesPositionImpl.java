@@ -1,5 +1,6 @@
 package com.apunto.engine.service.impl;
 
+import com.apunto.copytarget.MarginProvenance;
 import com.apunto.engine.dto.FuturesPositionDto;
 import com.apunto.engine.dto.OriginBasketPositionDto;
 import com.apunto.engine.entity.FuturesPositionEntity;
@@ -90,6 +91,10 @@ public class FuturesPositionImpl implements FuturesPositionService {
                 .entryPrice(entity.getEntryPrice())
                 .markPrice(entity.getMarkPrice())
                 .marginUsedUsd(entity.getMarginUsedUsd())
+                .marginProvenance(entity.getMarginUsedUsd() != null
+                        && entity.getMarginUsedUsd().signum() > 0
+                        ? MarginProvenance.EXPLICIT
+                        : MarginProvenance.UNAVAILABLE)
                 .notionalUsd(entity.getNotionalUsd())
                 .leverage(entity.getLeverage())
                 .sizeQty(entity.getSizeQty())
