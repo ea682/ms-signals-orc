@@ -71,6 +71,30 @@ public final class TargetPortfolioRequest {
         return new Builder();
     }
 
+    public Builder toBuilder() {
+        return builder()
+                .calculatedAt(calculatedAt)
+                .sourceAccountEquityUsd(sourceAccountEquityUsd)
+                .equityObservedAt(equityObservedAt)
+                .equitySource(equitySource)
+                .maximumEquityAge(maximumEquityAge)
+                .sourceSnapshotVersion(sourceSnapshotVersion)
+                .sourcePositions(sourcePositions)
+                .targetAllocatedCapitalUsd(targetAllocatedCapitalUsd)
+                .targetLeverage(targetLeverage)
+                .availableMarginUsd(availableMarginUsd)
+                .usedMarginUsd(usedMarginUsd)
+                .reservedMarginUsd(reservedMarginUsd)
+                .existingPositions(existingPositions)
+                .managedExistingPositions(managedExistingPositions)
+                .portfolioExistingPositions(portfolioExistingPositions)
+                .targetPositionSnapshotStatus(targetPositionSnapshotStatus)
+                .filters(filters)
+                .quoteAsset(quoteAsset)
+                .userMaxConcurrentPositions(userMaxConcurrentPositions)
+                .versions(versions);
+    }
+
     public Instant calculatedAt() { return calculatedAt; }
     public BigDecimal sourceAccountEquityUsd() { return sourceAccountEquityUsd; }
     public Instant equityObservedAt() { return equityObservedAt; }

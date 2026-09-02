@@ -78,7 +78,7 @@ class HyperliquidDirectDeltaIngestServiceImplTest {
 
             var direct = service.accept(sameMovement);
             var kafkaReplay = service.accept(sameMovement);
-            awaitAtLeast(dispatch.calls, 1);
+            awaitAtLeast(movementLedger.calls, 1);
 
             assertFalse(direct.duplicate());
             assertTrue(kafkaReplay.duplicate());

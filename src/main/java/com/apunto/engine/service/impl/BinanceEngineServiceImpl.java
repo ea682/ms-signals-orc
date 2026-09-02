@@ -92,6 +92,7 @@ import com.apunto.copytarget.BinanceSymbolFilter;
 import com.apunto.copytarget.CalculationVersions;
 import com.apunto.copytarget.DecisionCode;
 import com.apunto.copytarget.ExistingTargetPosition;
+import com.apunto.copytarget.MarginProvenance;
 import com.apunto.copytarget.SourcePosition;
 import com.apunto.copytarget.SourcePortfolioAuthorityPolicy;
 import com.apunto.copytarget.SourceSide;
@@ -2158,6 +2159,7 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                         .entryPrice(source.sourceEntryPrice())
                         .markPrice(source.sourceMarkPrice())
                         .marginUsedUsd(null)
+                        .marginProvenance(MarginProvenance.UNAVAILABLE)
                         .notionalUsd(source.sourcePositionNotionalUsd())
                         .leverage(source.sourceLeverage())
                         .sizeQty(source.sourcePositionQuantity())
@@ -2215,6 +2217,9 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     .entryPrice(originOperation.getPrecioEntrada())
                     .markPrice(originOperation.getPrecioMercado())
                     .marginUsedUsd(originOperation.getMarginUsedUsd())
+                    .marginProvenance(positive(originOperation.getMarginUsedUsd())
+                            ? MarginProvenance.EXPLICIT
+                            : MarginProvenance.UNAVAILABLE)
                     .notionalUsd(inferredNotional)
                     .leverage(originOperation.getLeverage())
                     .sizeQty(originOperation.getSizeQty())
@@ -2343,7 +2348,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                     SourceSide.valueOf(leg.getSide().name()),
                     safeQty(leg.getSizeQty()),
                     safeQty(leg.getNotionalUsd()),
-                    safeQty(leg.getMarginUsedUsd()),
+                    leg.getMarginUsedUsd(),
+                    leg.getMarginProvenance() == null
+                            ? MarginProvenance.UNAVAILABLE
+                            : leg.getMarginProvenance(),
                     safeQty(targetPrice),
                     safeQty(targetEntryPrice),
                     positive(leg.getLeverage()) ? leg.getLeverage() : ONE,
@@ -2414,9 +2422,10 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
                 continue;
             }
             OriginBasketPositionDto leg = context.leg();
-            BigDecimal sourceMargin = positive(leg.getLeverage())
-                    ? safeQty(leg.getNotionalUsd()).divide(leg.getLeverage(), DEFAULT_CALC_SCALE, RoundingMode.DOWN)
-                    : ZERO;
+            BigDecimal sourceMargin = leg.getMarginProvenance() != null
+                    && leg.getMarginProvenance().usableForEntrySizing()
+                    ? leg.getMarginUsedUsd()
+                    : null;
             targets.put(leg.getOriginId(), new TargetLeg(
                     leg.getOriginId(),
                     leg.getWalletId(),
@@ -7084,23 +7093,8 @@ public class BinanceEngineServiceImpl implements BinanceEngineService, BinanceCo
         if (margin.compareTo(ZERO) > 0) {
             return margin;
         }
-
-        final BigDecimal leverageRef = originOperation.getLeverage();
-        if (leverageRef == null || leverageRef.compareTo(ZERO) <= 0) {
-            return ZERO;
-        }
-
-        BigDecimal notional = abs(originOperation.getNotionalUsd());
-        if (notional.compareTo(ZERO) > 0) {
-            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
-        }
-
-        final BigDecimal priceRef = resolvePriceRef(originOperation.getPrecioMercado(), originOperation.getPrecioEntrada());
-        notional = safeQty(originOperation.getSizeQty()).multiply(priceRef);
-        if (notional.compareTo(ZERO) > 0) {
-            return notional.divide(leverageRef, DEFAULT_CALC_SCALE, RoundingMode.HALF_UP);
-        }
-
+        // Copy Policy V1 forbids deriving margin unless both notional and leverage carry
+        // explicit certified provenance. OperacionDto does not expose that provenance yet.
         return ZERO;
     }
 

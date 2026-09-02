@@ -1,5 +1,6 @@
 package com.apunto.engine.dto;
 
+import com.apunto.copytarget.MarginProvenance;
 import com.apunto.engine.shared.enums.PositionSide;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -21,6 +22,7 @@ public class OriginBasketPositionDto {
     private BigDecimal entryPrice;
     private BigDecimal markPrice;
     private BigDecimal marginUsedUsd;
+    private MarginProvenance marginProvenance;
     private BigDecimal notionalUsd;
     private BigDecimal leverage;
     private BigDecimal sizeQty;
